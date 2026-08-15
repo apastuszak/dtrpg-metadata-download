@@ -1,30 +1,62 @@
-"""Writes Calibre-compatible XMP metadata into PDFs via pikepdf.
+"""Writes BookOrbit-compatible XMP metadata into PDFs via pikepdf.
 
-Field mapping (intentionally not a 1:1 copy of Calibre's own output —
-this is a project-specific policy since DriveThruRPG's per-book author
-credits and descriptions are frequently missing or unreliable):
+BookOrbit (https://bookorbit.app) is the target reader/library app —
+Kavita is no longer in use. Field mapping was determined by reading
+BookOrbit's actual open-source parser/writer, not by guessing from a
+generic schema (github.com/bookorbit/bookorbit, at the commit current
+when this was written):
+  - reader: server/src/modules/metadata/lib/pdf-xmp-reader.ts,
+            server/src/modules/metadata/lib/pdf-parser.ts
+  - writer: server/src/modules/file-write/formats/pdf/pdf-xmp-builder.ts
+  - namespace: server/src/common/bookorbit-ns.ts
 
-    dc:title       <- matched title
-    dc:creator     <- publisher (not the actual author list; RPG PDFs in
-                      this library are browsed/grouped by publisher, and
-                      DTRPG's author credits are too inconsistent to trust)
-    dc:publisher   <- publisher
-    dc:description <- description text (shown as "Comments" by ebook-meta)
-    dc:subject     <- tags/categories (shown as "Tags" by ebook-meta —
-                      note this is the *only* field ebook-meta calls
-                      "Tags"; there is no separate "Subject" field)
-    xmp:Identifier <- dtrpg:<product_id> (the DriveThruRPG item number, so
-                      the exact listing a file was matched against can be
-                      traced back later — their search isn't reliable
-                      enough to just re-derive it from the title) and
-                      isbn:<isbn> when DriveThruRPG has one on file (many
-                      PDF-only products don't). Both go in the same
-                      Calibre-style qualified identifier structure (scheme
-                      + value per entry, not a plain dc:identifier string)
-                      — that's the only form ebook-meta's "Identifiers"
-                      field actually recognizes; verified against a real
-                      `ebook-meta` run, not just written on spec.
-    calibre:series, calibre:series_index <- as matched
+Mapping used here (intentionally not a 1:1 copy of BookOrbit's own writer
+— this is a project-specific policy, same reasoning as before: DriveThruRPG's
+per-book author credits are inconsistent for this library, so Author is
+still deliberately set to the publisher rather than the real author list):
+
+    dc:title            <- matched title
+    dc:creator          <- publisher (not the actual author list — same
+                           policy as before, kept on purpose; BookOrbit
+                           reads this as the Authors list)
+    dc:publisher        <- publisher
+    dc:description      <- description text (BookOrbit's Description
+                           field maps directly to dc:description — no
+                           "Comments" naming confusion like ebook-meta had)
+    dc:subject          <- tags/categories, read by BookOrbit as Genres
+    bookorbit:tags       <- the same tags/categories, also written to
+                           BookOrbit's own dedicated Tags field (a
+                           separate concept from Genres in their schema)
+    pdf:Keywords         <- the same tags/categories again, joined with
+                           "; " — not read by BookOrbit at all (it prefers
+                           bookorbit:tags whenever XMP is present), but
+                           pikepdf's docinfo sync maps the classic /Keywords
+                           Info-dict field from pdf:Keywords specifically,
+                           not from dc:subject, so a plain PDF reader that
+                           only looks at the Info dictionary (not XMP) would
+                           otherwise see an empty Keywords field
+    bookorbit:seriesName,
+    bookorbit:seriesIndex <- as matched
+    bookorbit:isbn13 or
+    bookorbit:isbn10     <- DriveThruRPG's isbn, routed by digit count
+                           (13 digits -> isbn13, 10 -> isbn10); skipped
+                           if it's neither shape
+    dc:identifier        <- "dtrpg:<product_id>" as a plain string, for
+                           manual traceability only — BookOrbit has no
+                           concept of a DriveThruRPG identifier so it
+                           doesn't read this, but it's harmless (unknown
+                           XMP properties are just ignored) and still
+                           useful if the file is ever inspected with
+                           exiftool or similar. Unlike Kavita/Calibre,
+                           this no longer needs BookOrbit's qualified
+                           xmp:Identifier structure, so it's written via
+                           pikepdf's normal public API — no more reaching
+                           into private internals for this field.
+
+BookOrbit's own namespace (`bookorbit:`) must be registered with exactly
+that prefix — its XMP reader (fast-xml-parser) matches on literal tag
+prefix text, not on resolved namespace URIs, so any other prefix string
+for the same URI would not be recognized.
 
 pikepdf's docinfo sync (on by default) also mirrors title/author into
 the classic PDF Info dictionary for readers that only look there.
@@ -33,24 +65,21 @@ the classic PDF Info dictionary for readers that only look there.
 from __future__ import annotations
 
 import logging
+import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
 import pikepdf
-from lxml import etree
-from lxml.etree import QName
 
 from review import ReviewRow
 
 logger = logging.getLogger("pdf_writer")
 
-CALIBRE_NS = "http://calibre-ebook.com/xmp-namespace"
-CALIBRE_PREFIX = "calibre"
+BOOKORBIT_NS = "https://bookorbit.app/metadata/1.0/"
+BOOKORBIT_PREFIX = "bookorbit"
 
-XMP_NS_RDF = "http://www.w3.org/1999/02/22-rdf-syntax-ns#"
-XMP_NS_XMP = "http://ns.adobe.com/xap/1.0/"
-XMP_NS_XMPIDQ = "http://ns.adobe.com/xmp/Identifier/qual/1.0/"
+_ISBN_STRIP_RE = re.compile(r"[^0-9Xx]")
 
 
 @dataclass
@@ -60,43 +89,16 @@ class WriteResult:
     message: str
 
 
-def _set_calibre_identifiers(meta: pikepdf.models.metadata.PdfMetadata, identifiers: dict[str, str]) -> None:
-    """Write one or more identifiers in Calibre's own recognized structure.
-
-    pikepdf's public dict-style metadata API only supports simple
-    scalar/array XMP properties — there's no supported way to write a
-    qualified/structured property (rdf:parseType="Resource") through it,
-    so this reaches into pikepdf's private XMP internals (_xmp_doc,
-    _get_rdf_root) to build the exact shape Calibre's own reader expects
-    (see calibre/ebooks/metadata/xmp.py: create_identifiers — this mirrors
-    that function's dict-of-schemes signature so multiple identifiers land
-    in a single Bag, not overwriting each other). If a future pikepdf
-    version changes that internal structure this will raise AttributeError,
-    which callers should catch and treat as non-fatal — losing the
-    identifier tags is much better than failing the whole write.
-    """
-    meta.register_xml_namespace(XMP_NS_XMPIDQ, "xmpidq")
-    xmp_doc = meta._xmp_doc
-    rdf = xmp_doc._get_rdf_root()
-    rdfdesc = rdf.find('rdf:Description[@rdf:about=""]', xmp_doc.NS)
-    if rdfdesc is None:
-        rdfdesc = etree.SubElement(
-            rdf,
-            str(QName(XMP_NS_RDF, "Description")),
-            attrib={str(QName(XMP_NS_RDF, "about")): ""},
-        )
-
-    for existing in rdfdesc.findall(str(QName(XMP_NS_XMP, "Identifier"))):
-        rdfdesc.remove(existing)
-
-    xmpid = etree.SubElement(rdfdesc, str(QName(XMP_NS_XMP, "Identifier")))
-    bag = etree.SubElement(xmpid, str(QName(XMP_NS_RDF, "Bag")))
-    for scheme, value in identifiers.items():
-        li = etree.SubElement(bag, str(QName(XMP_NS_RDF, "li")), attrib={str(QName(XMP_NS_RDF, "parseType")): "Resource"})
-        scheme_el = etree.SubElement(li, str(QName(XMP_NS_XMPIDQ, "Scheme")))
-        scheme_el.text = scheme
-        value_el = etree.SubElement(li, str(QName(XMP_NS_RDF, "value")))
-        value_el.text = value
+def _isbn_field(isbn: str) -> tuple[str, str] | None:
+    """Return (xmp_key, cleaned_value) for an ISBN, routed by digit count
+    to BookOrbit's separate isbn13/isbn10 fields — or None if it doesn't
+    look like either shape."""
+    cleaned = _ISBN_STRIP_RE.sub("", isbn)
+    if len(cleaned) == 13 and cleaned.isdigit():
+        return f"{BOOKORBIT_PREFIX}:isbn13", cleaned
+    if len(cleaned) == 10:
+        return f"{BOOKORBIT_PREFIX}:isbn10", cleaned
+    return None
 
 
 def _backup(path: Path) -> Path:
@@ -120,7 +122,7 @@ def write_metadata(path: Path, row: ReviewRow) -> WriteResult:
     try:
         with pikepdf.open(path, allow_overwriting_input=True) as pdf:
             with pdf.open_metadata(set_pikepdf_as_editor=False) as meta:
-                meta.register_xml_namespace(CALIBRE_NS, CALIBRE_PREFIX)
+                meta.register_xml_namespace(BOOKORBIT_NS, BOOKORBIT_PREFIX)
 
                 if row.matched_title:
                     meta["dc:title"] = row.matched_title
@@ -129,27 +131,31 @@ def write_metadata(path: Path, row: ReviewRow) -> WriteResult:
                     meta["dc:publisher"] = [row.publisher]
                 if row.description:
                     meta["dc:description"] = row.description
+
                 tags = [t.strip() for t in row.tags.split(";") if t.strip()]
                 if tags:
                     meta["dc:subject"] = tags
-                identifiers = {}
-                if row.product_id:
-                    identifiers["dtrpg"] = row.product_id
-                if row.isbn:
-                    identifiers["isbn"] = row.isbn
-                if identifiers:
-                    try:
-                        _set_calibre_identifiers(meta, identifiers)
-                    except AttributeError:
-                        logger.warning(
-                            "Could not write Calibre-style identifiers for %s "
-                            "(pikepdf internals may have changed); skipping them",
-                            path.name,
-                        )
+                    meta[f"{BOOKORBIT_PREFIX}:tags"] = tags
+                    # pikepdf's docinfo sync maps the classic /Keywords field
+                    # from pdf:Keywords specifically — not dc:subject — so a
+                    # plain PDF reader that only looks at the Info dictionary
+                    # (not XMP) would otherwise see an empty Keywords field.
+                    meta["pdf:Keywords"] = "; ".join(tags)
+
                 if row.series:
-                    meta[f"{CALIBRE_PREFIX}:series"] = row.series
+                    meta[f"{BOOKORBIT_PREFIX}:seriesName"] = row.series
                 if row.series_index:
-                    meta[f"{CALIBRE_PREFIX}:series_index"] = str(row.series_index)
+                    meta[f"{BOOKORBIT_PREFIX}:seriesIndex"] = str(row.series_index)
+
+                if row.isbn:
+                    isbn_field = _isbn_field(row.isbn)
+                    if isbn_field:
+                        meta[isbn_field[0]] = isbn_field[1]
+                    else:
+                        logger.warning("ISBN %r for %s doesn't look like 10 or 13 digits; skipping", row.isbn, path.name)
+
+                if row.product_id:
+                    meta["dc:identifier"] = f"dtrpg:{row.product_id}"
 
             pdf.save(path)
     except (pikepdf.PdfError, OSError) as exc:

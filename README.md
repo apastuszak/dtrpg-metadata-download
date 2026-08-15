@@ -1,6 +1,6 @@
 # dtrpg-metadata-download
 
-Matches local RPG PDF files against DriveThruRPG metadata — checking manual overrides, then a pre-supplied product URL, then your purchased library, then DriveThruRPG's public catalog, in that order — and writes the result into each PDF's embedded XMP metadata, so tools like Kavita or Calibre pick it up on their own library scan. No database, no server — a CLI you run against a folder of PDFs.
+Matches local RPG PDF files against DriveThruRPG metadata — checking manual overrides, then a pre-supplied product URL, then your purchased library, then DriveThruRPG's public catalog, in that order — and writes the result into each PDF's embedded XMP metadata, so [BookOrbit](https://bookorbit.app) picks it up on its own library scan. No database, no server — a CLI you run against a folder of PDFs.
 
 ## Setup
 
@@ -86,17 +86,20 @@ The `drivethrurpg_url` column accepts a full product URL, `id:PRODUCT_ID`, or a 
 
 ## What gets written
 
-Field mapping is deliberately not a straight copy of Calibre's own conventions — DriveThruRPG's per-book author credits are inconsistent enough that this library is tagged by publisher instead:
+Field mapping targets [BookOrbit's](https://bookorbit.app) actual XMP schema, confirmed by running BookOrbit's own real parser (from its open-source repo) against PDFs this tool writes — not guessed from a generic convention:
 
-| PDF field (`ebook-meta` label) | Source |
+| BookOrbit field | Source |
 |---|---|
 | Title | Matched title |
-| Author(s) | Publisher |
+| Authors | Publisher (not the actual author list DriveThruRPG returns — kept deliberately, since DriveThruRPG's per-book author credits are inconsistent for this library; Publisher is a separate field below either way) |
 | Publisher | Publisher |
-| Comments | Description |
-| Tags | Categories/tags (filtered — format/language/AI-policy noise like "PDF"/"English" is dropped) |
-| Identifiers | `dtrpg:<item number>`, plus `isbn:<isbn>` when DriveThruRPG has one on file (many PDF-only products don't) — so the exact listing a file was matched against can be traced back later. Written in Calibre's own qualified identifier structure, not a plain string, so it actually shows up under this label |
+| Description | Description |
+| Genres | Categories/tags (filtered — format/language/AI-policy noise like "PDF"/"English" is dropped) |
+| Tags | The same categories/tags list — Genres and Tags are separate fields in BookOrbit, so both get populated from the one source list |
 | Series / Series Index | As matched (DriveThruRPG doesn't expose these as structured fields — they're inferred from the title text) |
+| ISBN | DriveThruRPG's ISBN when it has one on file (many PDF-only products don't), routed to BookOrbit's ISBN-13 or ISBN-10 field by digit count |
+
+Also written, for manual traceability only (BookOrbit doesn't read it, but it's harmless and shows up if you inspect the file with `exiftool` or similar): a plain `dtrpg:<item number>` identifier, so the exact DriveThruRPG listing a file was matched against can be traced back later.
 
 The original file is copied to `<name>.pdf.bak` before the first write; re-tagging a file later won't overwrite that backup, so it always holds the pre-tagging original.
 
@@ -112,4 +115,4 @@ If matching breaks in a new way, check `data/debug/` — a raw response dump is 
 
 ## Not implemented
 
-Pushing metadata to Kavita directly via its API is deliberately out of scope for now — `kavita_client.py` is an intentional placeholder. The pipeline relies on Kavita's own library scan picking up the embedded PDF metadata instead.
+Pushing metadata directly via an app's API (rather than writing to the PDF and letting a library scan pick it up) isn't implemented. The pipeline relies on BookOrbit's own library scan reading the embedded PDF metadata.
