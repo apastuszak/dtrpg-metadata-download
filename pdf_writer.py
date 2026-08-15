@@ -50,6 +50,15 @@ etc.), that first source always "wins," and the .opf sidecar's series
 data becomes unreachable in practice. Writing BookOrbit's own series
 fields directly into the embedded PDF is the only way around that.
 
+Re-tagging a file (a supported, expected workflow) explicitly clears all
+four series-related properties before writing whatever the *current*
+match has — unlike identifiers/tags/etc., where an empty value from the
+matcher just means "leave this field alone," an empty series here means
+"this match doesn't have one," and any series data from a *previous*
+match must not silently survive. `series_index` on the bookorbit side is
+only written when it parses as a number, matching the validation
+`_set_calibre_series()` already does for the Calibre side.
+
 pikepdf's docinfo sync (on by default) also mirrors title/author into the
 classic PDF Info dictionary for readers that only look there.
 
@@ -238,6 +247,9 @@ def write_metadata(path: Path, row: ReviewRow) -> WriteResult:
                             path.name,
                         )
 
+                bookorbit_series_name_key = f"{BOOKORBIT_PREFIX}:seriesName"
+                bookorbit_series_index_key = f"{BOOKORBIT_PREFIX}:seriesIndex"
+
                 if row.series:
                     try:
                         _set_calibre_series(meta, row.series, row.series_index)
@@ -253,9 +265,36 @@ def write_metadata(path: Path, row: ReviewRow) -> WriteResult:
                     # makes the sidecar's series data unreachable whenever
                     # the embedded PDF has any metadata at all, which a
                     # Calibre-tagged PDF always does.
-                    meta[f"{BOOKORBIT_PREFIX}:seriesName"] = row.series
+                    meta[bookorbit_series_name_key] = row.series
+                    series_index_valid = False
                     if row.series_index:
-                        meta[f"{BOOKORBIT_PREFIX}:seriesIndex"] = str(row.series_index)
+                        try:
+                            float(row.series_index)
+                        except ValueError:
+                            logger.warning(
+                                "Series index %r for %s isn't numeric; omitting bookorbit:seriesIndex",
+                                row.series_index, path.name,
+                            )
+                        else:
+                            meta[bookorbit_series_index_key] = row.series_index
+                            series_index_valid = True
+                    if not series_index_valid and bookorbit_series_index_key in meta:
+                        # A prior write may have set this for a different
+                        # match that did have a known index -- must not
+                        # silently survive a re-tag that doesn't.
+                        del meta[bookorbit_series_index_key]
+                else:
+                    # No series in the current match at all -- clear any
+                    # stale series data a previous write left behind,
+                    # rather than letting it silently survive a re-tag.
+                    # _set_calibre_series() only clears calibre:series when
+                    # it's actually *called*, which doesn't happen here.
+                    rdfdesc = _get_or_create_rdfdesc(meta)
+                    for existing in rdfdesc.findall(str(QName(CALIBRE_NS, "series"))):
+                        rdfdesc.remove(existing)
+                    for key in (bookorbit_series_name_key, bookorbit_series_index_key):
+                        if key in meta:
+                            del meta[key]
 
             pdf.save(path)
     except (pikepdf.PdfError, OSError) as exc:
