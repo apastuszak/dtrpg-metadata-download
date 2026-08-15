@@ -32,6 +32,12 @@
         write the one you pick straight into it — interactively, no
         review.csv. With --root, loops over every PDF under that
         directory one at a time (type 'q' at any prompt to stop early).
+        --root also asks once up front whether every book in the batch
+        shares one series — if so, that name is applied to all of them
+        with no further prompting; otherwise series is asked per book
+        for candidate-pick/manual-override matches (dtrpg_urls.csv
+        matches never get a series prompt either way, batch answer or
+        not — that path is deliberately non-interactive end to end).
 
 Config defaults (root, thresholds, cache locations) come from
 config.yaml; CLI flags override them. DTRPG_API_KEY must be set in the
@@ -61,7 +67,7 @@ from matcher import (
 )
 from pdf_writer import write_approved, write_metadata
 from provenance import Source, Status
-from review import load_review, merge_by_filename, save_review
+from review import ReviewRow, load_review, merge_by_filename, save_review
 
 logger = logging.getLogger("dtrpg-metadata-download")
 
@@ -183,12 +189,46 @@ def _print_candidate(index: int | None, meta, score: float | None) -> None:
     print(f"        source:    {meta.source.value if hasattr(meta.source, 'value') else meta.source}")
 
 
+def _apply_default_series(row: ReviewRow, default_series: str | None) -> None:
+    """Apply a batch-wide series default, if any, without ever prompting.
+
+    `default_series` being not-None means the user already answered the
+    batch-wide "same series?" question in `cmd_tag`'s --root path — that
+    holds even if they left the series name itself blank, which must
+    still count as "don't ask me again", not "fall back to per-book
+    prompting". Shared by `_prompt_series` and the known_urls branch of
+    `_tag_one`, which must stay non-interactive regardless of batch state.
+    """
+    if not row.series and default_series:
+        row.series = default_series
+
+
+def _prompt_series(row: ReviewRow, default_series: str | None = None) -> None:
+    """DriveThruRPG has no structured series field, so matched rows never
+    come with one pre-filled — ask once, here, rather than requiring a
+    manual_overrides.yaml edit for every book that's part of a series.
+
+    `default_series` not being None means the batch-wide question was
+    already answered "yes" — apply it (even if blank) and never prompt,
+    since that's the whole point of answering that question once.
+    """
+    if row.series:
+        return
+    if default_series is not None:
+        _apply_default_series(row, default_series)
+        return
+    series = input("Series (press Enter to leave blank): ").strip()
+    if series:
+        row.series = series
+
+
 def _tag_one(
     path: Path,
     client: DtrpgClient,
     manual_overrides: dict,
     known_urls: dict[str, str],
     thresholds: dict,
+    default_series: str | None = None,
 ) -> bool:
     """Match+tag a single PDF interactively. Returns True if the user
     asked to stop (typed 'q'), so a batch run can bail out early."""
@@ -203,6 +243,7 @@ def _tag_one(
             print("Skipped.")
             return False
         row = row_from_match(path.name, meta, 100.0, Status.APPROVED)
+        _prompt_series(row, default_series)
         result = write_metadata(path, row)
         print(f"Wrote metadata to {path.name}" if result.success else f"FAILED: {result.message}")
         return False
@@ -214,6 +255,7 @@ def _tag_one(
             print(f"Known URL for {path.name} (product {product_id}) could not be fetched; falling back to search.")
         else:
             row = row_from_match(path.name, meta, 100.0, Status.APPROVED)
+            _apply_default_series(row, default_series)
             result = write_metadata(path, row)
             print(f"Known URL matched: {meta.title}")
             print(f"Wrote metadata to {path.name}" if result.success else f"FAILED: {result.message}")
@@ -239,28 +281,33 @@ def _tag_one(
         print("Skipped.")
         return False
 
-    product_id = extract_product_id(choice_lower)
-    if product_id is not None:
-        meta = client.get_product(product_id)
-        if meta is None:
-            print(f"Could not fetch product {product_id} from DriveThruRPG — skipping.")
-            return False
-        score = 100.0
-    else:
-        try:
-            idx = int(choice_lower)
-            if not (1 <= idx <= len(candidates)):
-                raise ValueError
-        except ValueError:
-            print("Invalid selection, skipping.")
-            return False
+    try:
+        idx = int(choice_lower)
+    except ValueError:
+        idx = None
 
+    if idx is not None and 1 <= idx <= len(candidates):
+        # A number that's a valid list index always means "pick this
+        # candidate" — checked before extract_product_id() so a short
+        # index like "1" can never be misread as a literal DriveThruRPG
+        # product ID (extract_product_id() accepts bare digit strings too,
+        # for dtrpg_urls.csv parsing, where that ambiguity doesn't exist).
         meta, score = candidates[idx - 1]
         if meta.source == Source.DTRPG_LIBRARY and not meta.description:
             try:
                 meta = client.enrich(meta)
             except Exception as exc:
                 print(f"(couldn't fetch full details: {exc}; proceeding with what we have)")
+    else:
+        product_id = extract_product_id(choice_lower)
+        if product_id is None:
+            print("Invalid selection, skipping.")
+            return False
+        meta = client.get_product(product_id)
+        if meta is None:
+            print(f"Could not fetch product {product_id} from DriveThruRPG — skipping.")
+            return False
+        score = 100.0
 
     status = Status.AUTO_ACCEPTED if score >= thresholds.get("high_confidence_threshold", 90.0) else Status.APPROVED
     row = row_from_match(path.name, meta, score, status)
@@ -273,6 +320,7 @@ def _tag_one(
         print("Skipped.")
         return False
 
+    _prompt_series(row, default_series)
     result = write_metadata(path, row)
     print(f"Wrote metadata to {path.name}" if result.success else f"FAILED: {result.message}")
     return False
@@ -292,9 +340,18 @@ def cmd_tag(args: argparse.Namespace, config: dict) -> None:
         client = build_client(config)
         known_urls = load_known_urls(root)
         print(f"Found {len(pdfs)} PDF(s) under {root}\n")
+
+        default_series = None
+        same_series = input("Are all books in this batch part of the same series? [y/N] ").strip().lower() in ("y", "yes")
+        if same_series:
+            # Deliberately not "or None" here -- a blank answer still means
+            # "don't ask me again per book", just with no series to apply.
+            default_series = input("Series name: ").strip()
+        print()
+
         for i, path in enumerate(pdfs, 1):
             print(f"[{i}/{len(pdfs)}] {path}")
-            if _tag_one(path, client, manual_overrides, known_urls, thresholds):
+            if _tag_one(path, client, manual_overrides, known_urls, thresholds, default_series):
                 print("Stopped.")
                 break
             print()
