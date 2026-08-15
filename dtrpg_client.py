@@ -130,6 +130,12 @@ class DtrpgClient:
     def _authenticate(self) -> None:
         if self._token:
             return
+        # applicationKey has to go in the query string -- that's how this
+        # (undocumented) endpoint is reverse-engineered to work -- but that
+        # means resp.url now contains the raw key. Every error path below
+        # is deliberately kept from ever surfacing that URL (dump or
+        # exception message); see _dump_debug's redaction for the same
+        # reasoning applied generically.
         resp = self.session.post(
             f"{API_BASE}/auth_key",
             params={"applicationKey": self.api_key},
@@ -140,7 +146,13 @@ class DtrpgClient:
                 "Application Key from the DriveThruRPG account page — this is not "
                 "your account password."
             )
-        resp.raise_for_status()
+        try:
+            resp.raise_for_status()
+        except requests.HTTPError:
+            # Not `raise ... from exc` -- the original HTTPError's message
+            # embeds resp.url, which contains the API key; chaining would
+            # keep that reachable via the traceback's "direct cause" text.
+            raise DtrpgApiError(f"auth_key request failed (HTTP {resp.status_code})") from None
         data = self._parse_json(resp, context="auth_key")
         token = data.get("token")
         if not token:
@@ -453,9 +465,15 @@ class DtrpgClient:
     def _dump_debug(self, label: str, resp: requests.Response) -> None:
         self.debug_dir.mkdir(parents=True, exist_ok=True)
         path = self.debug_dir / f"{int(time.time())}_{label}.txt"
+        # auth_key is the only endpoint that puts a secret in the URL (see
+        # _authenticate), but redact generically here rather than only at
+        # that one call site -- this is the one place these dumps get
+        # written to disk, so it's the one place that has to hold no
+        # matter which caller reaches it.
+        url = resp.url.replace(self.api_key, "***REDACTED***") if self.api_key in resp.url else resp.url
         try:
             path.write_text(
-                f"URL: {resp.url}\nStatus: {resp.status_code}\n\n{resp.text}",
+                f"URL: {url}\nStatus: {resp.status_code}\n\n{resp.text}",
                 encoding="utf-8",
             )
             logger.error("Dumped raw response to %s for debugging", path)

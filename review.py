@@ -14,6 +14,16 @@ from pathlib import Path
 
 from provenance import Source, Status
 
+# Leading characters a spreadsheet app (Excel/LibreOffice/Numbers) reads as
+# the start of a formula. matched_title/description/publisher/tags are
+# sourced from DriveThruRPG's *public* catalog -- anyone can list a
+# product there, so this is attacker-reachable content, not just the
+# user's own data -- and review.csv is a file the documented workflow has
+# the user open by hand in a spreadsheet app. Prefixing with a leading
+# apostrophe (the standard CSV-injection mitigation) forces those apps to
+# treat the value as literal text instead of evaluating it.
+_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
 FIELDNAMES = [
     "filename",
     "matched_title",
@@ -53,6 +63,21 @@ class ReviewRow:
         return self.status in (Status.APPROVED.value, Status.AUTO_ACCEPTED.value)
 
 
+def _defang_formula(value: str) -> str:
+    if value.startswith(_FORMULA_PREFIXES):
+        return "'" + value
+    return value
+
+
+def _refang_formula(value: str) -> str:
+    """Inverse of _defang_formula, applied on read -- otherwise the safety
+    prefix would leak into matched_title/etc. and end up written into the
+    PDF itself as a stray leading apostrophe."""
+    if value.startswith("'") and value[1:].startswith(_FORMULA_PREFIXES):
+        return value[1:]
+    return value
+
+
 def load_review(path: str | Path) -> list[ReviewRow]:
     path = Path(path)
     if not path.exists():
@@ -60,7 +85,10 @@ def load_review(path: str | Path) -> list[ReviewRow]:
     with path.open(newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         known = {f.name for f in fields(ReviewRow)}
-        return [ReviewRow(**{k: v for k, v in row.items() if k in known}) for row in reader]
+        return [
+            ReviewRow(**{k: _refang_formula(v) for k, v in row.items() if k in known})
+            for row in reader
+        ]
 
 
 def save_review(path: str | Path, rows: list[ReviewRow]) -> None:
@@ -70,7 +98,7 @@ def save_review(path: str | Path, rows: list[ReviewRow]) -> None:
         writer = csv.DictWriter(f, fieldnames=FIELDNAMES)
         writer.writeheader()
         for row in rows:
-            writer.writerow(asdict(row))
+            writer.writerow({k: _defang_formula(v) for k, v in asdict(row).items()})
 
 
 def merge_by_filename(existing: list[ReviewRow], fresh: list[ReviewRow]) -> list[ReviewRow]:
