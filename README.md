@@ -70,6 +70,15 @@ If you'd rather review matches in bulk before anything gets written, use the CSV
 
 `scan --refresh-library` re-pulls your purchased library instead of using the cache. `scan --apply-review` only matches files not already present in `review.csv`, so a re-run doesn't re-query files you've already resolved.
 
+### Renaming files after tagging
+
+```bash
+./dtrpg-metadata-download.py rename --root "/path/to/rpg/pdfs" --dry-run   # preview first
+./dtrpg-metadata-download.py rename --root "/path/to/rpg/pdfs"
+```
+
+Renames each already-tagged PDF to `<series> - <title>.pdf` (or just `<title>.pdf` when there's no series), reading title/series back from that file's `.metadata.json` sidecar — the only one of the three outputs that's plain, flat JSON, since Calibre's/BookOrbit's embedded XMP series fields are qualified/structured properties that can't be read back reliably through pikepdf's public API (see `renamer.py`). The `.pdf.bak`, `.opf`, and `.metadata.json` siblings are renamed right along with the PDF, since they're all named from its stem. Files with no sidecar (never tagged) or already named correctly are skipped; if the computed name collides with an existing file, that one's left alone and reported as failed rather than overwritten. If renaming one file's companion group fails partway through (permissions, a file locked by another app), whatever in that group already succeeded is rolled back rather than left split across old and new names, and the batch continues with the next file instead of aborting.
+
 ### Manual overrides
 
 For titles DriveThruRPG doesn't sell at all (Bits and Mortar exclusives, publisher-direct purchases, etc.) — where there's no DriveThruRPG listing to fetch — fill in `data/manual_overrides.yaml` keyed by exact filename with the full metadata by hand; see the template in that file for the format. Both `tag` and `scan` check this first, before anything else.
@@ -88,7 +97,7 @@ The `drivethrurpg_url` column accepts a full product URL, `id:PRODUCT_ID`, or a 
 
 ## What gets written
 
-Three things happen on every write, all from the same matched data:
+Up to three things happen on every write, all from the same matched data — embedded metadata and the Grimmory sidecar always, the BookOrbit `.opf` only with `--bookorbit-mode`:
 
 ### 1. Embedded PDF metadata, in Calibre's format
 
@@ -111,7 +120,11 @@ The same tags/categories are additionally written to the classic `pdf:Keywords` 
 
 Standard EPUB2/Calibre-style OPF, written next to the PDF. BookOrbit reads a same-stem (or `metadata.opf`) sidecar automatically — confirmed by running BookOrbit's own real OPF parser (from its open-source repo) against files this tool writes. Series comes from the same `<meta name="calibre:series">` convention Calibre itself uses; ISBN is auto-bucketed into ISBN-10/13 on BookOrbit's end from a single `<dc:identifier opf:scheme="ISBN">`.
 
-**Why series is also written directly into the embedded PDF (`bookorbit:seriesName`), not just here:** BookOrbit's default scan order tries embedded PDF metadata *first*, and only opens the `.opf` sidecar if the embedded extraction returns *nothing at all* — it's a whole-source fallback, not a per-field merge. Since a Calibre-tagged PDF always has some embedded metadata (title, authors, etc.), the sidecar's series data was silently unreachable in practice. Confirmed against BookOrbit's real scanner source and its real XMP reader, not just theory.
+**Why series is also written directly into the embedded PDF (`bookorbit:seriesName`), not just here:** BookOrbit's default scan order tries embedded PDF metadata *first*, and only opens the `.opf` sidecar if the embedded extraction returns *nothing at all* — it's a whole-source fallback, not a per-field merge. Since a Calibre-tagged PDF always has some embedded metadata (title, authors, etc.), the sidecar's series data was silently unreachable in practice. Confirmed against BookOrbit's real scanner source and its real XMP reader, not just theory. **By default the `.opf` isn't even written** — pointless when the embedded PDF always "wins" — unless `--bookorbit-mode` is passed (see below), which flips the whole strategy: strip the embedded PDF metadata entirely instead, forcing BookOrbit to actually fall through to this file.
+
+#### `--bookorbit-mode`
+
+Available on `tag`, `write-pdfs`, and `all`. Instead of writing Calibre metadata into the PDF, this strips **all** PDF-level metadata — the full XMP packet and the classic Info dictionary, not just the fields this tool would otherwise write, since a leftover publisher-set `/Title` alone is enough for BookOrbit's embedded source to "win" — and writes the `.opf` sidecar (which is otherwise skipped, see above). The Grimmory `.metadata.json` sidecar is written either way; this flag only changes the embedded-PDF/`.opf` tradeoff for BookOrbit. Off by default — re-tagging a file with the flag now on top of a previous non-`--bookorbit-mode` write correctly wipes whatever Calibre metadata that earlier write left behind, and conversely, re-tagging *without* the flag after a previous `--bookorbit-mode` write deletes the stale `.opf` rather than leaving it behind with the old match's data.
 
 ### 3. `<name>.metadata.json` — Grimmory sidecar
 

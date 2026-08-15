@@ -19,16 +19,16 @@
     review-status
         Print match counts by status from data/review.csv.
 
-    write-pdfs --root PATH
+    write-pdfs --root PATH [--bookorbit-mode]
         Write metadata for every "approved"/"auto-accepted" row in
         data/review.csv into the corresponding PDF (in place, with a
         one-time .bak backup per file).
 
-    all --root PATH [--refresh-library] [--apply-review]
+    all --root PATH [--refresh-library] [--apply-review] [--bookorbit-mode]
         Run scan, then write-pdfs. Still gated by review.csv status —
         rows left at needs-review/no-match are not written.
 
-    tag PDF_PATH | tag --root PATH
+    tag PDF_PATH | tag --root PATH [--bookorbit-mode]
         Match PDF(s) by filename, show ranked candidates per file, and
         write the one you pick straight into it — interactively, no
         review.csv. With --root, loops over every PDF under that
@@ -39,6 +39,24 @@
         for candidate-pick/manual-override matches (dtrpg_urls.csv
         matches never get a series prompt either way, batch answer or
         not — that path is deliberately non-interactive end to end).
+
+    --bookorbit-mode (on write-pdfs/all/tag): instead of writing Calibre
+        metadata into the PDF, strips ALL PDF-level metadata (full XMP
+        packet + classic Info dictionary, not just this tool's own
+        fields) and writes the BookOrbit .opf sidecar. Off by default,
+        in which case .opf is not written at all (BookOrbit's scanner
+        never opens it when the embedded PDF has any metadata, which it
+        normally does — see pdf_writer.py). The Grimmory .metadata.json
+        sidecar is unaffected either way.
+
+    rename --root PATH [--dry-run]
+        Rename every already-tagged PDF under --root (plus its .bak/
+        .opf/.metadata.json sidecars) to "<series> - <title>.pdf" (or
+        just "<title>.pdf" with no series), read from each file's
+        .metadata.json sidecar. Untagged files (no sidecar/no title) and
+        files already named correctly are skipped; a computed name that
+        collides with an existing file is skipped with a warning rather
+        than overwritten. --dry-run previews without renaming anything.
 
 Config defaults (root, thresholds, cache locations) come from
 config.yaml; CLI flags override them. DTRPG_API_KEY must be set in the
@@ -68,6 +86,7 @@ from matcher import (
 )
 from pdf_writer import write_approved, write_metadata
 from provenance import Source, Status
+from renamer import apply_rename, plan_rename
 from review import ReviewRow, load_review, merge_by_filename, save_review
 
 logger = logging.getLogger("dtrpg-metadata-download")
@@ -164,7 +183,7 @@ def cmd_write_pdfs(args: argparse.Namespace, config: dict) -> None:
         print("No approved/auto-accepted rows to write.")
         return
 
-    results = write_approved(rows, root)
+    results = write_approved(rows, root, bookorbit_mode=args.bookorbit_mode)
     succeeded = sum(1 for r in results if r.success)
     print(f"Wrote metadata to {succeeded}/{len(results)} approved files")
     for r in results:
@@ -175,6 +194,38 @@ def cmd_write_pdfs(args: argparse.Namespace, config: dict) -> None:
 def cmd_all(args: argparse.Namespace, config: dict) -> None:
     cmd_scan(args, config)
     cmd_write_pdfs(args, config)
+
+
+def cmd_rename(args: argparse.Namespace, config: dict) -> None:
+    root = args.root or config.get("root")
+    if not root:
+        sys.exit("No --root given and no 'root' set in config.yaml")
+
+    pdfs = scan_pdfs(root)
+    if not pdfs:
+        print(f"No PDFs found under {root}")
+        return
+
+    renamed = skipped = failed = 0
+    for pdf_path in pdfs:
+        plan = plan_rename(pdf_path)
+        result = apply_rename(plan, dry_run=args.dry_run)
+        if not result.success:
+            if plan.reason is not None:
+                skipped += 1
+                print(f"SKIP: {pdf_path.name} ({plan.reason})")
+            else:
+                failed += 1
+                print(f"FAILED: {pdf_path.name}: {result.message}")
+            continue
+        renamed += 1
+        verb = "Would rename" if args.dry_run else "Renamed"
+        print(f"{verb}: {pdf_path.name} -> {result.new_pdf.name}")
+
+    summary = f"{renamed} renamed, {skipped} skipped, {failed} failed"
+    if args.dry_run:
+        summary += " (dry run, nothing changed)"
+    print(f"\n{summary}")
 
 
 def _print_candidate(index: int | None, meta, score: float | None) -> None:
@@ -230,6 +281,7 @@ def _tag_one(
     known_urls: dict[str, str],
     thresholds: dict,
     default_series: str | None = None,
+    bookorbit_mode: bool = False,
 ) -> bool:
     """Match+tag a single PDF interactively. Returns True if the user
     asked to stop (typed 'q'), so a batch run can bail out early."""
@@ -245,7 +297,7 @@ def _tag_one(
             return False
         row = row_from_match(path.name, meta, 100.0, Status.APPROVED)
         _prompt_series(row, default_series)
-        result = write_metadata(path, row)
+        result = write_metadata(path, row, bookorbit_mode=bookorbit_mode)
         print(f"Wrote metadata to {path.name}" if result.success else f"FAILED: {result.message}")
         return False
 
@@ -257,7 +309,7 @@ def _tag_one(
         else:
             row = row_from_match(path.name, meta, 100.0, Status.APPROVED)
             _apply_default_series(row, default_series)
-            result = write_metadata(path, row)
+            result = write_metadata(path, row, bookorbit_mode=bookorbit_mode)
             print(f"Known URL matched: {meta.title}")
             print(f"Wrote metadata to {path.name}" if result.success else f"FAILED: {result.message}")
             return False
@@ -322,7 +374,7 @@ def _tag_one(
         return False
 
     _prompt_series(row, default_series)
-    result = write_metadata(path, row)
+    result = write_metadata(path, row, bookorbit_mode=bookorbit_mode)
     print(f"Wrote metadata to {path.name}" if result.success else f"FAILED: {result.message}")
     return False
 
@@ -352,7 +404,7 @@ def cmd_tag(args: argparse.Namespace, config: dict) -> None:
 
         for i, path in enumerate(pdfs, 1):
             print(f"[{i}/{len(pdfs)}] {path}")
-            if _tag_one(path, client, manual_overrides, known_urls, thresholds, default_series):
+            if _tag_one(path, client, manual_overrides, known_urls, thresholds, default_series, args.bookorbit_mode):
                 print("Stopped.")
                 break
             print()
@@ -366,7 +418,7 @@ def cmd_tag(args: argparse.Namespace, config: dict) -> None:
 
     client = build_client(config)
     known_urls = load_known_urls(path.parent)
-    _tag_one(path, client, manual_overrides, known_urls, thresholds)
+    _tag_one(path, client, manual_overrides, known_urls, thresholds, bookorbit_mode=args.bookorbit_mode)
 
 
 def main() -> None:
@@ -386,9 +438,15 @@ def main() -> None:
     status_parser.add_argument("--review-csv", help="Path to review.csv (overrides config.yaml)")
     status_parser.set_defaults(func=cmd_review_status)
 
+    bookorbit_mode_help = (
+        "Strip all PDF-level metadata instead of writing Calibre metadata, "
+        "and write the BookOrbit .opf sidecar (skipped otherwise)"
+    )
+
     write_parser = subparsers.add_parser("write-pdfs", help="Write approved metadata into PDFs")
     write_parser.add_argument("--root", help="Root folder of RPG PDFs (overrides config.yaml)")
     write_parser.add_argument("--review-csv", help="Path to review.csv (overrides config.yaml)")
+    write_parser.add_argument("--bookorbit-mode", action="store_true", help=bookorbit_mode_help)
     write_parser.set_defaults(func=cmd_write_pdfs)
 
     all_parser = subparsers.add_parser("all", help="Run scan, then write-pdfs")
@@ -396,13 +454,20 @@ def main() -> None:
     all_parser.add_argument("--review-csv", help="Path to review.csv (overrides config.yaml)")
     all_parser.add_argument("--refresh-library", action="store_true")
     all_parser.add_argument("--apply-review", action="store_true")
+    all_parser.add_argument("--bookorbit-mode", action="store_true", help=bookorbit_mode_help)
     all_parser.set_defaults(func=cmd_all)
 
     tag_parser = subparsers.add_parser("tag", help="Match and tag PDF(s) interactively, no review.csv")
     tag_group = tag_parser.add_mutually_exclusive_group(required=True)
     tag_group.add_argument("pdf", nargs="?", help="Path to a single PDF file to match and tag")
     tag_group.add_argument("--root", help="Process every PDF under this directory instead of a single file")
+    tag_parser.add_argument("--bookorbit-mode", action="store_true", help=bookorbit_mode_help)
     tag_parser.set_defaults(func=cmd_tag)
+
+    rename_parser = subparsers.add_parser("rename", help="Rename tagged PDFs (and sidecars) to 'Series - Title'")
+    rename_parser.add_argument("--root", help="Root folder of RPG PDFs (overrides config.yaml)")
+    rename_parser.add_argument("--dry-run", action="store_true", help="Preview renames without changing anything")
+    rename_parser.set_defaults(func=cmd_rename)
 
     args = parser.parse_args()
     logging.basicConfig(

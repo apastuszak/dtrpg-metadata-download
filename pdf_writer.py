@@ -50,6 +50,22 @@ etc.), that first source always "wins," and the .opf sidecar's series
 data becomes unreachable in practice. Writing BookOrbit's own series
 fields directly into the embedded PDF is the only way around that.
 
+``bookorbit_mode`` (write_metadata's second knob, off by default) takes
+the opposite approach instead of fighting BookOrbit's precedence: rather
+than duplicating series into the embedded PDF, it wipes *all* PDF-level
+metadata — the full XMP packet plus the classic Info dictionary, not
+just the fields this tool would otherwise write — so BookOrbit's
+embedded-metadata source finds nothing at all and is forced to fall
+through to the .opf sidecar, which is written in this mode instead of
+skipped. A surgical removal of only this tool's own fields wouldn't be
+enough: a PDF can already carry a publisher-set /Title or /Author before
+this tool ever touches it, and that alone is sufficient for BookOrbit's
+"first source that returns anything" check to short-circuit past the
+sidecar. When this mode is off (the default), the .opf sidecar is *not*
+written at all — with normal embedded metadata present, BookOrbit would
+never open it anyway (see above), so writing it unconditionally, as
+earlier versions of this module did, was dead weight.
+
 Re-tagging a file (a supported, expected workflow) explicitly clears all
 four series-related properties before writing whatever the *current*
 match has — unlike identifiers/tags/etc., where an empty value from the
@@ -201,7 +217,7 @@ def _backup(path: Path) -> Path:
     return backup_path
 
 
-def write_metadata(path: Path, row: ReviewRow) -> WriteResult:
+def write_metadata(path: Path, row: ReviewRow, bookorbit_mode: bool = False) -> WriteResult:
     if not path.exists():
         return WriteResult(path.name, False, "file not found")
 
@@ -212,91 +228,18 @@ def write_metadata(path: Path, row: ReviewRow) -> WriteResult:
 
     try:
         with pikepdf.open(path, allow_overwriting_input=True) as pdf:
-            with pdf.open_metadata(set_pikepdf_as_editor=False) as meta:
-                meta.register_xml_namespace(CALIBRE_NS, CALIBRE_PREFIX)
-                meta.register_xml_namespace(BOOKORBIT_NS, BOOKORBIT_PREFIX)
-
-                if row.matched_title:
-                    meta["dc:title"] = row.matched_title
-                if row.publisher:
-                    meta["dc:creator"] = [row.publisher]
-                    meta["dc:publisher"] = [row.publisher]
-                if row.description:
-                    meta["dc:description"] = row.description
-
-                tags = [t.strip() for t in row.tags.split(";") if t.strip()]
-                if tags:
-                    meta["dc:subject"] = tags
-                    meta["pdf:Keywords"] = "; ".join(tags)
-
-                identifiers = {}
-                if row.product_id:
-                    identifiers["dtrpg"] = row.product_id
-                if row.isbn:
-                    if any(_split_isbn(row.isbn)):
-                        identifiers["isbn"] = row.isbn
-                    else:
-                        logger.warning("ISBN %r for %s doesn't look like 10 or 13 digits; skipping", row.isbn, path.name)
-                if identifiers:
-                    try:
-                        _set_calibre_identifiers(meta, identifiers)
-                    except AttributeError:
-                        logger.warning(
-                            "Could not write Calibre-style identifiers for %s "
-                            "(pikepdf internals may have changed); skipping them",
-                            path.name,
-                        )
-
-                bookorbit_series_name_key = f"{BOOKORBIT_PREFIX}:seriesName"
-                bookorbit_series_index_key = f"{BOOKORBIT_PREFIX}:seriesIndex"
-
-                if row.series:
-                    try:
-                        _set_calibre_series(meta, row.series, row.series_index)
-                    except AttributeError:
-                        logger.warning(
-                            "Could not write Calibre-style series for %s "
-                            "(pikepdf internals may have changed); skipping it",
-                            path.name,
-                        )
-                    # Also in BookOrbit's own (simpler) form -- see the
-                    # module docstring for why this isn't redundant with
-                    # the .opf sidecar: BookOrbit's default scan precedence
-                    # makes the sidecar's series data unreachable whenever
-                    # the embedded PDF has any metadata at all, which a
-                    # Calibre-tagged PDF always does.
-                    meta[bookorbit_series_name_key] = row.series
-                    series_index_valid = False
-                    if row.series_index:
-                        try:
-                            float(row.series_index)
-                        except ValueError:
-                            logger.warning(
-                                "Series index %r for %s isn't numeric; omitting bookorbit:seriesIndex",
-                                row.series_index, path.name,
-                            )
-                        else:
-                            meta[bookorbit_series_index_key] = row.series_index
-                            series_index_valid = True
-                    if not series_index_valid and bookorbit_series_index_key in meta:
-                        # A prior write may have set this for a different
-                        # match that did have a known index -- must not
-                        # silently survive a re-tag that doesn't.
-                        del meta[bookorbit_series_index_key]
-                else:
-                    # No series in the current match at all -- clear any
-                    # stale series data a previous write left behind,
-                    # rather than letting it silently survive a re-tag.
-                    # _set_calibre_series() only clears calibre:series when
-                    # it's actually *called*, which doesn't happen here.
-                    rdfdesc = _get_or_create_rdfdesc(meta)
-                    for existing in rdfdesc.findall(str(QName(CALIBRE_NS, "series"))):
-                        rdfdesc.remove(existing)
-                    for key in (bookorbit_series_name_key, bookorbit_series_index_key):
-                        if key in meta:
-                            del meta[key]
-
-            pdf.save(path)
+            if bookorbit_mode:
+                # See module docstring: wipe everything, not just this
+                # tool's own fields, so BookOrbit's embedded-metadata
+                # source is guaranteed to return nothing and fall
+                # through to the .opf sidecar written below.
+                with pdf.open_metadata(set_pikepdf_as_editor=False) as meta:
+                    meta.clear()
+                for key in list(pdf.docinfo.keys()):
+                    del pdf.docinfo[key]
+                pdf.save(path)
+            else:
+                _write_embedded_metadata(pdf, path, row)
     except (pikepdf.PdfError, OSError) as exc:
         return WriteResult(path.name, False, f"write failed: {exc}")
 
@@ -304,18 +247,121 @@ def write_metadata(path: Path, row: ReviewRow) -> WriteResult:
     # already succeeded, so a sidecar failure (of any kind, not just OSError
     # — e.g. an encoding issue) must not blow up the whole write.
     try:
-        write_bookorbit_opf(path, row)
-    except Exception:
-        logger.exception("Failed to write BookOrbit .opf sidecar for %s", path.name)
-    try:
         write_grimmory_sidecar(path, row)
     except Exception:
         logger.exception("Failed to write Grimmory .metadata.json sidecar for %s", path.name)
 
+    if bookorbit_mode:
+        # Off by default -- see module docstring for why writing this
+        # unconditionally (as earlier versions did) was dead weight.
+        try:
+            write_bookorbit_opf(path, row)
+        except Exception:
+            logger.exception("Failed to write BookOrbit .opf sidecar for %s", path.name)
+    else:
+        # A prior write may have been --bookorbit-mode and left an .opf
+        # behind with that match's data -- must not silently survive a
+        # later non-bookorbit-mode re-tag to a different match, same
+        # principle as the series-clearing logic above.
+        opf_path = path.with_suffix(".opf")
+        if opf_path.exists():
+            try:
+                opf_path.unlink()
+            except OSError:
+                logger.exception("Failed to remove stale BookOrbit .opf sidecar for %s", path.name)
+
     return WriteResult(path.name, True, "ok")
 
 
-def write_approved(rows: list[ReviewRow], root: str | Path) -> list[WriteResult]:
+def _write_embedded_metadata(pdf: pikepdf.Pdf, path: Path, row: ReviewRow) -> None:
+    with pdf.open_metadata(set_pikepdf_as_editor=False) as meta:
+        meta.register_xml_namespace(CALIBRE_NS, CALIBRE_PREFIX)
+        meta.register_xml_namespace(BOOKORBIT_NS, BOOKORBIT_PREFIX)
+
+        if row.matched_title:
+            meta["dc:title"] = row.matched_title
+        if row.publisher:
+            meta["dc:creator"] = [row.publisher]
+            meta["dc:publisher"] = [row.publisher]
+        if row.description:
+            meta["dc:description"] = row.description
+
+        tags = [t.strip() for t in row.tags.split(";") if t.strip()]
+        if tags:
+            meta["dc:subject"] = tags
+            meta["pdf:Keywords"] = "; ".join(tags)
+
+        identifiers = {}
+        if row.product_id:
+            identifiers["dtrpg"] = row.product_id
+        if row.isbn:
+            if any(_split_isbn(row.isbn)):
+                identifiers["isbn"] = row.isbn
+            else:
+                logger.warning("ISBN %r for %s doesn't look like 10 or 13 digits; skipping", row.isbn, path.name)
+        if identifiers:
+            try:
+                _set_calibre_identifiers(meta, identifiers)
+            except AttributeError:
+                logger.warning(
+                    "Could not write Calibre-style identifiers for %s "
+                    "(pikepdf internals may have changed); skipping them",
+                    path.name,
+                )
+
+        bookorbit_series_name_key = f"{BOOKORBIT_PREFIX}:seriesName"
+        bookorbit_series_index_key = f"{BOOKORBIT_PREFIX}:seriesIndex"
+
+        if row.series:
+            try:
+                _set_calibre_series(meta, row.series, row.series_index)
+            except AttributeError:
+                logger.warning(
+                    "Could not write Calibre-style series for %s "
+                    "(pikepdf internals may have changed); skipping it",
+                    path.name,
+                )
+            # Also in BookOrbit's own (simpler) form -- see the
+            # module docstring for why this isn't redundant with
+            # the .opf sidecar: BookOrbit's default scan precedence
+            # makes the sidecar's series data unreachable whenever
+            # the embedded PDF has any metadata at all, which a
+            # Calibre-tagged PDF always does.
+            meta[bookorbit_series_name_key] = row.series
+            series_index_valid = False
+            if row.series_index:
+                try:
+                    float(row.series_index)
+                except ValueError:
+                    logger.warning(
+                        "Series index %r for %s isn't numeric; omitting bookorbit:seriesIndex",
+                        row.series_index, path.name,
+                    )
+                else:
+                    meta[bookorbit_series_index_key] = row.series_index
+                    series_index_valid = True
+            if not series_index_valid and bookorbit_series_index_key in meta:
+                # A prior write may have set this for a different
+                # match that did have a known index -- must not
+                # silently survive a re-tag that doesn't.
+                del meta[bookorbit_series_index_key]
+        else:
+            # No series in the current match at all -- clear any
+            # stale series data a previous write left behind,
+            # rather than letting it silently survive a re-tag.
+            # _set_calibre_series() only clears calibre:series when
+            # it's actually *called*, which doesn't happen here.
+            rdfdesc = _get_or_create_rdfdesc(meta)
+            for existing in rdfdesc.findall(str(QName(CALIBRE_NS, "series"))):
+                rdfdesc.remove(existing)
+            for key in (bookorbit_series_name_key, bookorbit_series_index_key):
+                if key in meta:
+                    del meta[key]
+
+    pdf.save(path)
+
+
+def write_approved(rows: list[ReviewRow], root: str | Path, bookorbit_mode: bool = False) -> list[WriteResult]:
     root = Path(root)
     results: list[WriteResult] = []
     for row in rows:
@@ -325,7 +371,7 @@ def write_approved(rows: list[ReviewRow], root: str | Path) -> list[WriteResult]
         if not matches:
             results.append(WriteResult(row.filename, False, "file not found under root"))
             continue
-        results.append(write_metadata(matches[0], row))
+        results.append(write_metadata(matches[0], row, bookorbit_mode=bookorbit_mode))
 
     succeeded = sum(1 for r in results if r.success)
     logger.info("Wrote metadata to %d/%d approved files", succeeded, len(results))
