@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+*.bak
+*.pdf
+.~lock.*#
+.claude/
+data/debug/
+data/library_cache.json
+data/catalog_cache.json

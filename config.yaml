@@ -1,0 +1,17 @@
+# Copy/edit this file to point at your library. DTRPG_API_KEY (an
+# Application Key from your DriveThruRPG account page, not your account
+# password) must come from the environment or a separate secrets file —
+# never hardcode it here.
+
+root: /path/to/rpg/pdfs
+
+data_dir: data
+review_csv: data/review.csv
+manual_overrides: data/manual_overrides.yaml
+
+matching:
+  high_confidence_threshold: 90.0
+  review_floor_threshold: 70.0
+
+dtrpg:
+  catalog_rate_limit_seconds: 1.0

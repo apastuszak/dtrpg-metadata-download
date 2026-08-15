@@ -1,0 +1,20 @@
+# Hand-filled metadata for titles with no DriveThruRPG listing at all
+# (or that you've already identified elsewhere, e.g. a publisher's own
+# site). Keyed by exact PDF filename. Anything listed here is applied
+# with status "approved" and skips the DriveThruRPG lookup entirely.
+#
+# Example:
+#
+# "GURPS Dungeon Fantasy 1 - Adventurers.pdf":
+#   title: "GURPS Dungeon Fantasy 1: Adventurers"
+#   series: "GURPS Dungeon Fantasy"
+#   series_index: 1
+#   publisher: "Steve Jackson Games"
+#   authors:
+#     - Sean Punch
+#   tags:
+#     - GURPS
+#     - Fantasy
+#   description: ""
+#   product_url: ""
+#   source: bits-and-mortar
