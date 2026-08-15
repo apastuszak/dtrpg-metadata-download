@@ -37,6 +37,19 @@ DriveThruRPG's per-book author credits are inconsistent for this library:
                       against a real `ebook-meta --to-opf` run on a
                       pristine file, not just written on spec.
 
+One deliberate exception to "Calibre format only": bookorbit:seriesName /
+bookorbit:seriesIndex also get written, in BookOrbit's own simple scalar
+form (no nested-value structure needed — confirmed from BookOrbit's real
+pdf-xmp-reader.ts). This isn't redundant with the .opf sidecar below:
+BookOrbit's scanner defaults to trying embedded PDF metadata *first*, and
+only falls back to the .opf sidecar if the embedded extraction returns
+*nothing at all* — not per-field, the whole source either wins or doesn't
+(see scanner.service.ts: extractFirstAvailableMetadataSource). Since a
+Calibre-tagged PDF always has *some* embedded metadata (title, authors,
+etc.), that first source always "wins," and the .opf sidecar's series
+data becomes unreachable in practice. Writing BookOrbit's own series
+fields directly into the embedded PDF is the only way around that.
+
 pikepdf's docinfo sync (on by default) also mirrors title/author into the
 classic PDF Info dictionary for readers that only look there.
 
@@ -64,6 +77,9 @@ logger = logging.getLogger("pdf_writer")
 
 CALIBRE_NS = "http://calibre-ebook.com/xmp-namespace"
 CALIBRE_PREFIX = "calibre"
+
+BOOKORBIT_NS = "https://bookorbit.app/metadata/1.0/"
+BOOKORBIT_PREFIX = "bookorbit"
 
 XMP_NS_RDF = "http://www.w3.org/1999/02/22-rdf-syntax-ns#"
 XMP_NS_XMP = "http://ns.adobe.com/xap/1.0/"
@@ -189,6 +205,7 @@ def write_metadata(path: Path, row: ReviewRow) -> WriteResult:
         with pikepdf.open(path, allow_overwriting_input=True) as pdf:
             with pdf.open_metadata(set_pikepdf_as_editor=False) as meta:
                 meta.register_xml_namespace(CALIBRE_NS, CALIBRE_PREFIX)
+                meta.register_xml_namespace(BOOKORBIT_NS, BOOKORBIT_PREFIX)
 
                 if row.matched_title:
                     meta["dc:title"] = row.matched_title
@@ -230,6 +247,15 @@ def write_metadata(path: Path, row: ReviewRow) -> WriteResult:
                             "(pikepdf internals may have changed); skipping it",
                             path.name,
                         )
+                    # Also in BookOrbit's own (simpler) form -- see the
+                    # module docstring for why this isn't redundant with
+                    # the .opf sidecar: BookOrbit's default scan precedence
+                    # makes the sidecar's series data unreachable whenever
+                    # the embedded PDF has any metadata at all, which a
+                    # Calibre-tagged PDF always does.
+                    meta[f"{BOOKORBIT_PREFIX}:seriesName"] = row.series
+                    if row.series_index:
+                        meta[f"{BOOKORBIT_PREFIX}:seriesIndex"] = str(row.series_index)
 
             pdf.save(path)
     except (pikepdf.PdfError, OSError) as exc:

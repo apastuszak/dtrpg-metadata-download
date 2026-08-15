@@ -3,6 +3,8 @@ __pycache__/
 *.pyc
 *.bak
 *.pdf
+*.opf
+*.metadata.json
 .~lock.*#
 .claude/
 data/debug/

@@ -102,13 +102,16 @@ Field mapping targets Calibre's own conventions (verified against a real, instal
 | Comments | Description |
 | Tags | Categories/tags (filtered — format/language/AI-policy noise like "PDF"/"English" is dropped) |
 | Identifiers | `dtrpg:<item number>` plus `isbn:<isbn>` when DriveThruRPG has one on file, in Calibre's own qualified identifier structure |
-| Series | As matched, in Calibre's own qualified structure — **not** a plain scalar field. This tripped us up for a while: a naive write round-trips through pikepdf fine and looks correct, but real Calibre silently never shows it as a series, because `calibre:series` needs its value wrapped in a nested `rdf:value`, and the index lives in a completely different namespace (`calibreSI:series_index`) nested inside the series element. Confirmed fixed against a real `ebook-meta --to-opf` run. |
+| Series | As matched, in Calibre's own qualified structure — **not** a plain scalar field. This tripped us up for a while: a naive write round-trips through pikepdf fine and looks correct, but real Calibre silently never shows it as a series, because `calibre:series` needs its value wrapped in a nested `rdf:value`, and the index lives in a completely different namespace (`calibreSI:series_index`) nested inside the series element. Confirmed fixed against a real `ebook-meta --to-opf` run. The index is only written when actually known — left blank rather than assuming "book 1" (Calibre's own reader defaults a missing index to 1 anyway, so this changes nothing about the display, just avoids fabricating a claim in the raw data). |
+| Series (again) | Also written as `bookorbit:seriesName`/`bookorbit:seriesIndex`, BookOrbit's own simpler (unstructured) series fields — see "BookOrbit sidecar" below for why this duplication is actually necessary. |
 
 The same tags/categories are additionally written to the classic `pdf:Keywords` field, so a plain PDF reader that only looks at the Info dictionary (not XMP at all) still sees something — pikepdf's automatic sync maps the Info dictionary's `/Subject` from the XMP description, not from tags, so `/Keywords` is otherwise the only place they'd show up.
 
 ### 2. `<name>.opf` — BookOrbit sidecar
 
 Standard EPUB2/Calibre-style OPF, written next to the PDF. BookOrbit reads a same-stem (or `metadata.opf`) sidecar automatically — confirmed by running BookOrbit's own real OPF parser (from its open-source repo) against files this tool writes. Series comes from the same `<meta name="calibre:series">` convention Calibre itself uses; ISBN is auto-bucketed into ISBN-10/13 on BookOrbit's end from a single `<dc:identifier opf:scheme="ISBN">`.
+
+**Why series is also written directly into the embedded PDF (`bookorbit:seriesName`), not just here:** BookOrbit's default scan order tries embedded PDF metadata *first*, and only opens the `.opf` sidecar if the embedded extraction returns *nothing at all* — it's a whole-source fallback, not a per-field merge. Since a Calibre-tagged PDF always has some embedded metadata (title, authors, etc.), the sidecar's series data was silently unreachable in practice. Confirmed against BookOrbit's real scanner source and its real XMP reader, not just theory.
 
 ### 3. `<name>.metadata.json` — Grimmory sidecar
 
