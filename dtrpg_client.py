@@ -237,10 +237,22 @@ class DtrpgClient:
         richer data. Call this once on whichever candidate you're actually
         about to use, not on every candidate returned by ``search_library``,
         to avoid burning the rate limit on options that don't get picked.
+
+        The ``order_products`` listing's ``productId`` can go stale — a
+        purchased title can get re-listed under a new ID after purchase
+        (e.g. following a content update), orphaning the one your library
+        entry still points at. DriveThruRPG returns a 403 for the old ID
+        in that case rather than data (confirmed against a real purchase:
+        "Delta Green: Handler's Guide" 403'd on its library-linked ID,
+        while the current listing at a different ID fetched cleanly). If
+        the direct fetch 403s (or fails for any reason), fall back to a
+        catalog search by title to find the current listing.
         """
         if not meta.product_id or meta.description:
             return meta
         detail = self._fetch_product_detail(meta.product_id)
+        if detail is None:
+            detail = self._enrich_fallback_by_title(meta)
         if detail is None:
             return meta
         meta.authors = meta.authors or detail.authors
@@ -249,7 +261,24 @@ class DtrpgClient:
         meta.isbn = meta.isbn or detail.isbn
         if not meta.publisher:
             meta.publisher = detail.publisher
+        # Keep in sync with whichever listing the data actually came from —
+        # matters most for the fallback path, where this corrects a stale
+        # product_id that would otherwise get written into the file as an
+        # unusable dc:identifier reference.
+        meta.product_id = detail.product_id
         return meta
+
+    def _enrich_fallback_by_title(self, meta: ProductMetadata) -> ProductMetadata | None:
+        logger.info("product_id=%s for %r failed; retrying via catalog search by title", meta.product_id, meta.title)
+        try:
+            candidates = self.search_catalog(meta.title)
+        except Exception:
+            logger.exception("Catalog fallback search failed for %r", meta.title)
+            return None
+        for candidate in candidates:
+            if candidate.title.strip().lower() == meta.title.strip().lower():
+                return candidate
+        return candidates[0] if candidates else None
 
     def get_product(self, product_id: int | str) -> ProductMetadata | None:
         """Fetch a single product directly by ID, bypassing search entirely.

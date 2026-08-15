@@ -54,6 +54,8 @@ Pick a number to write, paste a DriveThruRPG product URL (or 'id:PRODUCT_ID') fo
 - Paste a DriveThruRPG product URL, or type `id:PRODUCT_ID`, to fetch an exact listing directly — useful when the right book doesn't show up in the candidates at all (DriveThruRPG's search requires query words to literally match the title text, so it can miss real matches; see Known quirks below).
 - Press Enter to skip the file, or `q` to stop the whole batch early without touching the rest.
 
+With `--root`, before the per-file loop starts you're asked once: *"Are all books in this batch part of the same series?"* Answer yes and give a name, and it's applied to every book written in that run with no further prompting; answer no (or single-file `tag`) and you're asked per book instead — press Enter to leave a book's series blank. (Files matched via `dtrpg_urls.csv`, below, never get a series prompt either way, since that path is deliberately non-interactive end to end.)
+
 ### Batch mode with a review step
 
 If you'd rather review matches in bulk before anything gets written, use the CSV-gated path instead:
@@ -101,6 +103,8 @@ Field mapping targets [BookOrbit's](https://bookorbit.app) actual XMP schema, co
 
 Also written, for manual traceability only (BookOrbit doesn't read it, but it's harmless and shows up if you inspect the file with `exiftool` or similar): a plain `dtrpg:<item number>` identifier, so the exact DriveThruRPG listing a file was matched against can be traced back later.
 
+The same tags/categories are additionally written to the classic `pdf:Keywords` field, so a plain PDF reader that only looks at the Info dictionary (not XMP at all) still sees something — pikepdf's automatic sync maps the Info dictionary's `/Subject` from the XMP description, not from tags, so `/Keywords` is otherwise the only place they'd show up outside BookOrbit.
+
 The original file is copied to `<name>.pdf.bak` before the first write; re-tagging a file later won't overwrite that backup, so it always holds the pre-tagging original.
 
 ## Known quirks of DriveThruRPG's API
@@ -110,6 +114,7 @@ It's undocumented, and a few real surprises came up building this:
 - The **catalog search** (`products?name=...`) isn't fuzzy — it behaves like every query word must be literally present in the product's real title. A perfectly reasonable query (e.g. including the publisher name) can come back empty, or worse, silently match the wrong product if a word isn't part of the actual title. The tool automatically strips filename noise (edition shorthand like `1E`/`2E`, SKU codes) and retries with the leading word dropped, but some titles genuinely aren't findable by any reasonable query — that's what the direct URL/`id:` lookup in `tag` is for.
 - The **product detail** endpoint (`products/{id}`) returns different response shapes depending on request headers (a flat object vs. an older JSON:API-style envelope) — content negotiation, not randomness. The client's fixed headers get the flat shape reliably.
 - Your **purchased library** listing only has title + publisher, not authors/tags/description — those get fetched lazily (one extra API call) only for whichever match actually gets used, not for every candidate shown.
+- A purchased title's **product ID can go stale** — DriveThruRPG can re-list a book under a new ID after purchase (confirmed against a real title: fetching the library-linked ID 403'd with `"You cannot access this content right now"`, while the current listing at a different ID worked fine). Handled automatically: if fetching the library-linked ID fails, the tool retries with a catalog search by title and, if found, uses the corrected ID — including for the identifier written into the file, not just the description/tags/ISBN.
 
 If matching breaks in a new way, check `data/debug/` — a raw response dump is written automatically whenever a response can't be parsed as expected.
 
