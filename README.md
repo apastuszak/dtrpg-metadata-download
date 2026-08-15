@@ -1,6 +1,6 @@
 # dtrpg-metadata-download
 
-Matches local RPG PDF files against DriveThruRPG metadata — checking manual overrides, then a pre-supplied product URL, then your purchased library, then DriveThruRPG's public catalog, in that order — and writes the result into each PDF's embedded XMP metadata, so [BookOrbit](https://bookorbit.app) picks it up on its own library scan. No database, no server — a CLI you run against a folder of PDFs.
+Matches local RPG PDF files against DriveThruRPG metadata — checking manual overrides, then a pre-supplied product URL, then your purchased library, then DriveThruRPG's public catalog, in that order — and writes the result into each PDF's embedded XMP metadata in Calibre's own format, plus a [BookOrbit](https://bookorbit.app) `.opf` sidecar and a [Grimmory](https://grimmory.org) `.metadata.json` sidecar alongside it. No database, no server — a CLI you run against a folder of PDFs.
 
 ## Setup
 
@@ -88,22 +88,33 @@ The `drivethrurpg_url` column accepts a full product URL, `id:PRODUCT_ID`, or a 
 
 ## What gets written
 
-Field mapping targets [BookOrbit's](https://bookorbit.app) actual XMP schema, confirmed by running BookOrbit's own real parser (from its open-source repo) against PDFs this tool writes — not guessed from a generic convention:
+Three things happen on every write, all from the same matched data:
 
-| BookOrbit field | Source |
+### 1. Embedded PDF metadata, in Calibre's format
+
+Field mapping targets Calibre's own conventions (verified against a real, installed Calibre 9.13 — both `ebook-meta`'s summary view and its `--to-opf` export — not just written on spec and assumed correct):
+
+| PDF field (`ebook-meta` label) | Source |
 |---|---|
 | Title | Matched title |
-| Authors | Publisher (not the actual author list DriveThruRPG returns — kept deliberately, since DriveThruRPG's per-book author credits are inconsistent for this library; Publisher is a separate field below either way) |
+| Author(s) | Publisher (not the actual author list DriveThruRPG returns — deliberate, since DriveThruRPG's per-book author credits are too inconsistent to trust for this library) |
 | Publisher | Publisher |
-| Description | Description |
-| Genres | Categories/tags (filtered — format/language/AI-policy noise like "PDF"/"English" is dropped) |
-| Tags | The same categories/tags list — Genres and Tags are separate fields in BookOrbit, so both get populated from the one source list |
-| Series / Series Index | As matched (DriveThruRPG doesn't expose these as structured fields — they're inferred from the title text) |
-| ISBN | DriveThruRPG's ISBN when it has one on file (many PDF-only products don't), routed to BookOrbit's ISBN-13 or ISBN-10 field by digit count |
+| Comments | Description |
+| Tags | Categories/tags (filtered — format/language/AI-policy noise like "PDF"/"English" is dropped) |
+| Identifiers | `dtrpg:<item number>` plus `isbn:<isbn>` when DriveThruRPG has one on file, in Calibre's own qualified identifier structure |
+| Series | As matched, in Calibre's own qualified structure — **not** a plain scalar field. This tripped us up for a while: a naive write round-trips through pikepdf fine and looks correct, but real Calibre silently never shows it as a series, because `calibre:series` needs its value wrapped in a nested `rdf:value`, and the index lives in a completely different namespace (`calibreSI:series_index`) nested inside the series element. Confirmed fixed against a real `ebook-meta --to-opf` run. |
 
-Also written, for manual traceability only (BookOrbit doesn't read it, but it's harmless and shows up if you inspect the file with `exiftool` or similar): a plain `dtrpg:<item number>` identifier, so the exact DriveThruRPG listing a file was matched against can be traced back later.
+The same tags/categories are additionally written to the classic `pdf:Keywords` field, so a plain PDF reader that only looks at the Info dictionary (not XMP at all) still sees something — pikepdf's automatic sync maps the Info dictionary's `/Subject` from the XMP description, not from tags, so `/Keywords` is otherwise the only place they'd show up.
 
-The same tags/categories are additionally written to the classic `pdf:Keywords` field, so a plain PDF reader that only looks at the Info dictionary (not XMP at all) still sees something — pikepdf's automatic sync maps the Info dictionary's `/Subject` from the XMP description, not from tags, so `/Keywords` is otherwise the only place they'd show up outside BookOrbit.
+### 2. `<name>.opf` — BookOrbit sidecar
+
+Standard EPUB2/Calibre-style OPF, written next to the PDF. BookOrbit reads a same-stem (or `metadata.opf`) sidecar automatically — confirmed by running BookOrbit's own real OPF parser (from its open-source repo) against files this tool writes. Series comes from the same `<meta name="calibre:series">` convention Calibre itself uses; ISBN is auto-bucketed into ISBN-10/13 on BookOrbit's end from a single `<dc:identifier opf:scheme="ISBN">`.
+
+### 3. `<name>.metadata.json` — Grimmory sidecar
+
+Grimmory's own flat JSON sidecar format (confirmed against its real Java DTO schema and writer source, `github.com/grimmory-tools/grimmory`) — `title`, `authors`, `publisher`, `description`, `isbn10`/`isbn13` (bucketed by digit count, since Grimmory's JSON has no auto-detection the way the OPF does), `categories`/`tags`, and `series: {name, number}`.
+
+Both sidecar-format choices are best-effort: a field with no data is simply omitted, matching how both apps' own writers behave.
 
 The original file is copied to `<name>.pdf.bak` before the first write; re-tagging a file later won't overwrite that backup, so it always holds the pre-tagging original.
 
@@ -120,4 +131,4 @@ If matching breaks in a new way, check `data/debug/` — a raw response dump is 
 
 ## Not implemented
 
-Pushing metadata directly via an app's API (rather than writing to the PDF and letting a library scan pick it up) isn't implemented. The pipeline relies on BookOrbit's own library scan reading the embedded PDF metadata.
+Pushing metadata directly via an app's API (rather than writing to the PDF and generating sidecar files) isn't implemented. The pipeline relies on each app's own library scan picking up the embedded metadata and/or sidecar files on disk.

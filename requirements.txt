@@ -2,3 +2,4 @@ pikepdf>=8.0
 rapidfuzz>=3.0
 PyYAML>=6.0
 requests>=2.31
+lxml>=4.9

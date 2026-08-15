@@ -6,6 +6,7 @@
 #     "rapidfuzz>=3.0",
 #     "PyYAML>=6.0",
 #     "requests>=2.31",
+#     "lxml>=4.9",
 # ]
 # ///
 """CLI entry point for the RPG PDF metadata pipeline.
