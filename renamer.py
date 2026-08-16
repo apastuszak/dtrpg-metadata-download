@@ -46,9 +46,20 @@ def _read_sidecar_metadata(pdf_path: Path) -> tuple[str | None, str | None]:
         data = json.loads(sidecar_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None, None
-    metadata = data.get("metadata", {})
-    title = metadata.get("title") or None
-    series = (metadata.get("series") or {}).get("name") or None
+    # Tolerate a shape that doesn't match what this tool itself writes --
+    # e.g. a hand-edited sidecar with `series` simplified to a plain
+    # string instead of {name, number} -- rather than crashing the whole
+    # batch on one malformed file. Same "skip this file, not the run"
+    # guarantee _read_sidecar_metadata's JSON-decode-failure case above
+    # already has.
+    metadata = data.get("metadata") if isinstance(data, dict) else None
+    if not isinstance(metadata, dict):
+        return None, None
+    title = metadata.get("title")
+    title = title if isinstance(title, str) and title else None
+    series_obj = metadata.get("series")
+    series = series_obj.get("name") if isinstance(series_obj, dict) else None
+    series = series if isinstance(series, str) and series else None
     return title, series
 
 

@@ -131,17 +131,24 @@ def load_manual_overrides(path: str | Path) -> dict[str, ProductMetadata]:
     raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     overrides: dict[str, ProductMetadata] = {}
     for filename, meta in raw.items():
+        # `.get(key, default)` only falls back when the key is *missing* --
+        # an entry with a present-but-blank key (e.g. "source:" with
+        # nothing after it, a plausible mistake since most other fields in
+        # the documented template *are* meant to be left blank) parses to
+        # an explicit YAML null, which .get() happily returns as-is. `or`
+        # catches that too; source= additionally used to crash outright
+        # (Source(None)) rather than just storing a wrong-but-inert value.
         overrides[filename] = ProductMetadata(
-            title=meta.get("title", ""),
-            series=meta.get("series", ""),
-            series_index=str(meta.get("series_index", "")),
-            publisher=meta.get("publisher", ""),
+            title=meta.get("title") or "",
+            series=meta.get("series") or "",
+            series_index=str(meta.get("series_index") or ""),
+            publisher=meta.get("publisher") or "",
             authors=list(meta.get("authors") or []),
             tags=list(meta.get("tags") or []),
-            description=meta.get("description", ""),
-            product_url=meta.get("product_url", ""),
-            source=Source(meta.get("source", Source.MANUAL.value)),
-            isbn=meta.get("isbn", ""),
+            description=meta.get("description") or "",
+            product_url=meta.get("product_url") or "",
+            source=Source(meta.get("source") or Source.MANUAL.value),
+            isbn=meta.get("isbn") or "",
         )
     return overrides
 

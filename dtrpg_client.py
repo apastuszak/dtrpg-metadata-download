@@ -470,7 +470,12 @@ class DtrpgClient:
         # that one call site -- this is the one place these dumps get
         # written to disk, so it's the one place that has to hold no
         # matter which caller reaches it.
-        url = resp.url.replace(self.api_key, "***REDACTED***") if self.api_key in resp.url else resp.url
+        # The empty-string guard matters: an empty api_key is "in" every
+        # string, so without it .replace("", ...) would mangle the URL by
+        # inserting the redaction marker between every character. Not
+        # reachable via the CLI today (build_client() already refuses an
+        # empty key before constructing this client), but cheap to guard.
+        url = resp.url.replace(self.api_key, "***REDACTED***") if self.api_key and self.api_key in resp.url else resp.url
         try:
             path.write_text(
                 f"URL: {url}\nStatus: {resp.status_code}\n\n{resp.text}",

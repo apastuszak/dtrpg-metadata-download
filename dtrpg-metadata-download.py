@@ -49,14 +49,15 @@
         normally does — see pdf_writer.py). The Grimmory .metadata.json
         sidecar is unaffected either way.
 
-    rename --root PATH [--dry-run]
-        Rename every already-tagged PDF under --root (plus its .bak/
-        .opf/.metadata.json sidecars) to "<series> - <title>.pdf" (or
-        just "<title>.pdf" with no series), read from each file's
-        .metadata.json sidecar. Untagged files (no sidecar/no title) and
-        files already named correctly are skipped; a computed name that
-        collides with an existing file is skipped with a warning rather
-        than overwritten. --dry-run previews without renaming anything.
+    rename PDF_PATH | rename --root PATH [--dry-run]
+        Rename a single already-tagged PDF, or every one under --root
+        (plus its .bak/.opf/.metadata.json sidecars), to
+        "<series> - <title>.pdf" (or just "<title>.pdf" with no series),
+        read from each file's .metadata.json sidecar. Untagged files (no
+        sidecar/no title) and files already named correctly are skipped;
+        a computed name that collides with an existing file is skipped
+        with a warning rather than overwritten. --dry-run previews
+        without renaming anything.
 
 Config defaults (root, thresholds, cache locations) come from
 config.yaml; CLI flags override them. DTRPG_API_KEY must be set in the
@@ -196,7 +197,33 @@ def cmd_all(args: argparse.Namespace, config: dict) -> None:
     cmd_write_pdfs(args, config)
 
 
+def _rename_one(pdf_path: Path, dry_run: bool) -> str:
+    """Rename a single PDF (plus its .bak/.opf/.metadata.json companions),
+    print the outcome, and return 'renamed'/'skipped'/'failed' for the
+    caller's tally."""
+    plan = plan_rename(pdf_path)
+    result = apply_rename(plan, dry_run=dry_run)
+    if not result.success:
+        if plan.reason is not None:
+            print(f"SKIP: {pdf_path.name} ({plan.reason})")
+            return "skipped"
+        print(f"FAILED: {pdf_path.name}: {result.message}")
+        return "failed"
+    verb = "Would rename" if dry_run else "Renamed"
+    print(f"{verb}: {pdf_path.name} -> {result.new_pdf.name}")
+    return "renamed"
+
+
 def cmd_rename(args: argparse.Namespace, config: dict) -> None:
+    if args.pdf:
+        path = Path(args.pdf)
+        if not path.exists():
+            sys.exit(f"File not found: {path}")
+        if path.suffix.lower() != ".pdf":
+            sys.exit(f"Not a PDF: {path}")
+        _rename_one(path, args.dry_run)
+        return
+
     root = args.root or config.get("root")
     if not root:
         sys.exit("No --root given and no 'root' set in config.yaml")
@@ -206,23 +233,11 @@ def cmd_rename(args: argparse.Namespace, config: dict) -> None:
         print(f"No PDFs found under {root}")
         return
 
-    renamed = skipped = failed = 0
+    counts = {"renamed": 0, "skipped": 0, "failed": 0}
     for pdf_path in pdfs:
-        plan = plan_rename(pdf_path)
-        result = apply_rename(plan, dry_run=args.dry_run)
-        if not result.success:
-            if plan.reason is not None:
-                skipped += 1
-                print(f"SKIP: {pdf_path.name} ({plan.reason})")
-            else:
-                failed += 1
-                print(f"FAILED: {pdf_path.name}: {result.message}")
-            continue
-        renamed += 1
-        verb = "Would rename" if args.dry_run else "Renamed"
-        print(f"{verb}: {pdf_path.name} -> {result.new_pdf.name}")
+        counts[_rename_one(pdf_path, args.dry_run)] += 1
 
-    summary = f"{renamed} renamed, {skipped} skipped, {failed} failed"
+    summary = f"{counts['renamed']} renamed, {counts['skipped']} skipped, {counts['failed']} failed"
     if args.dry_run:
         summary += " (dry run, nothing changed)"
     print(f"\n{summary}")
@@ -464,8 +479,10 @@ def main() -> None:
     tag_parser.add_argument("--bookorbit-mode", action="store_true", help=bookorbit_mode_help)
     tag_parser.set_defaults(func=cmd_tag)
 
-    rename_parser = subparsers.add_parser("rename", help="Rename tagged PDFs (and sidecars) to 'Series - Title'")
-    rename_parser.add_argument("--root", help="Root folder of RPG PDFs (overrides config.yaml)")
+    rename_parser = subparsers.add_parser("rename", help="Rename tagged PDF(s) (and sidecars) to 'Series - Title'")
+    rename_group = rename_parser.add_mutually_exclusive_group()
+    rename_group.add_argument("pdf", nargs="?", help="Path to a single already-tagged PDF file to rename")
+    rename_group.add_argument("--root", help="Rename every already-tagged PDF under this directory instead of a single file")
     rename_parser.add_argument("--dry-run", action="store_true", help="Preview renames without changing anything")
     rename_parser.set_defaults(func=cmd_rename)
 

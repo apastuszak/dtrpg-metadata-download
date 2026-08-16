@@ -63,16 +63,24 @@ class ReviewRow:
         return self.status in (Status.APPROVED.value, Status.AUTO_ACCEPTED.value)
 
 
-def _defang_formula(value: str) -> str:
+def _defang_formula(value: str | None) -> str | None:
+    # csv.DictReader fills a short/hand-edited row's missing trailing
+    # columns with None (restval), and that can round-trip back in here
+    # via merge_by_filename -> save_review -- pass non-str values through
+    # unchanged rather than crashing on .startswith().
+    if not isinstance(value, str):
+        return value
     if value.startswith(_FORMULA_PREFIXES):
         return "'" + value
     return value
 
 
-def _refang_formula(value: str) -> str:
+def _refang_formula(value: str | None) -> str | None:
     """Inverse of _defang_formula, applied on read -- otherwise the safety
     prefix would leak into matched_title/etc. and end up written into the
     PDF itself as a stray leading apostrophe."""
+    if not isinstance(value, str):
+        return value
     if value.startswith("'") and value[1:].startswith(_FORMULA_PREFIXES):
         return value[1:]
     return value

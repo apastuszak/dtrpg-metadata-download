@@ -73,6 +73,7 @@ If you'd rather review matches in bulk before anything gets written, use the CSV
 ### Renaming files after tagging
 
 ```bash
+./dtrpg-metadata-download.py rename "some_book.pdf"                        # a single file
 ./dtrpg-metadata-download.py rename --root "/path/to/rpg/pdfs" --dry-run   # preview first
 ./dtrpg-metadata-download.py rename --root "/path/to/rpg/pdfs"
 ```
