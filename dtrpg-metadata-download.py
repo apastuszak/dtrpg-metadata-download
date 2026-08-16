@@ -39,6 +39,12 @@
         for candidate-pick/manual-override matches (dtrpg_urls.csv
         matches never get a series prompt either way, batch answer or
         not — that path is deliberately non-interactive end to end).
+        At any candidate prompt (or when no candidates are found at
+        all), type 'm' (or answer yes when offered) to type in title/
+        publisher/series/description/tags/isbn/product_url by hand
+        instead — for titles DriveThruRPG doesn't have at all, without
+        needing to pre-edit data/manual_overrides.yaml. Leaving Title
+        blank cancels back out.
 
     --bookorbit-mode (on write-pdfs/all/tag): instead of writing Calibre
         metadata into the PDF, strips ALL PDF-level metadata (full XMP
@@ -86,7 +92,7 @@ from matcher import (
     scan_pdfs,
 )
 from pdf_writer import write_approved, write_metadata
-from provenance import Source, Status
+from provenance import ProductMetadata, Source, Status
 from renamer import apply_rename, plan_rename
 from review import ReviewRow, load_review, merge_by_filename, save_review
 
@@ -289,6 +295,66 @@ def _prompt_series(row: ReviewRow, default_series: str | None = None) -> None:
         row.series = series
 
 
+def _prompt_manual_metadata(path: Path, default_series: str | None) -> ProductMetadata | None:
+    """Collect metadata by hand for a file with no usable DriveThruRPG
+    match at all -- the same fields data/manual_overrides.yaml supports,
+    just typed in now instead of hand-edited into that file ahead of
+    time. Returns None if the user backs out by leaving Title blank.
+
+    Honors a batch-wide default_series exactly like _prompt_series does
+    (not-None means already answered, even if blank -- don't ask again).
+    """
+    print(f"Enter metadata for {path.name} (blank Title cancels):")
+    title = input("  Title: ").strip()
+    if not title:
+        print("Cancelled.")
+        return None
+    publisher = input("  Publisher: ").strip()
+    series = default_series if default_series is not None else input("  Series (Enter to leave blank): ").strip()
+    series_index = input("  Series index (Enter to leave blank): ").strip() if series else ""
+    description = input("  Description (Enter to leave blank): ").strip()
+    tags_raw = input("  Tags, semicolon-separated (Enter to leave blank): ").strip()
+    tags = [t.strip() for t in tags_raw.split(";") if t.strip()]
+    isbn = input("  ISBN (Enter to leave blank): ").strip()
+    product_url = input("  Product URL, for your own reference (Enter to leave blank): ").strip()
+
+    return ProductMetadata(
+        title=title,
+        series=series,
+        series_index=series_index,
+        publisher=publisher,
+        tags=tags,
+        description=description,
+        product_url=product_url,
+        source=Source.MANUAL,
+        isbn=isbn,
+    )
+
+
+def _manual_entry_flow(path: Path, default_series: str | None, bookorbit_mode: bool) -> bool:
+    """Prompt for metadata by hand and write it, mirroring the same
+    confirm-then-write pattern the candidate-pick path uses. Returns
+    True if the user typed 'q' (or backed out of the manual prompt
+    itself), so a batch run can bail out early -- consistent with
+    every other branch of _tag_one."""
+    meta = _prompt_manual_metadata(path, default_series)
+    if meta is None:
+        return False
+
+    print(f"About to write: {meta.title}")
+    answer = input("Proceed? [y/N/q] ").strip().lower()
+    if answer == "q":
+        return True
+    if answer not in ("y", "yes"):
+        print("Skipped.")
+        return False
+
+    row = row_from_match(path.name, meta, 100.0, Status.APPROVED)
+    result = write_metadata(path, row, bookorbit_mode=bookorbit_mode)
+    print(f"Wrote metadata to {path.name}" if result.success else f"FAILED: {result.message}")
+    return False
+
+
 def _tag_one(
     path: Path,
     client: DtrpgClient,
@@ -332,6 +398,12 @@ def _tag_one(
     candidates = find_candidates(path, client)
     if not candidates:
         print(f"No candidates found for {path.name}.")
+        answer = input("Enter metadata manually? [y/N/q] ").strip().lower()
+        if answer == "q":
+            return True
+        if answer in ("y", "yes"):
+            return _manual_entry_flow(path, default_series, bookorbit_mode)
+        print("Skipped.")
         return False
 
     print(f"Candidates for {path.name}:")
@@ -340,11 +412,13 @@ def _tag_one(
 
     choice = input(
         "Pick a number to write, paste a DriveThruRPG product URL (or 'id:PRODUCT_ID') "
-        "for a direct lookup, Enter to skip, or 'q' to stop: "
+        "for a direct lookup, 'm' to enter metadata manually, Enter to skip, or 'q' to stop: "
     ).strip()
     choice_lower = choice.lower()
     if choice_lower == "q":
         return True
+    if choice_lower == "m":
+        return _manual_entry_flow(path, default_series, bookorbit_mode)
     if not choice:
         print("Skipped.")
         return False

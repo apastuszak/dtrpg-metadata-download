@@ -47,11 +47,12 @@ Candidates for Sword Worlds.pdf:
   [2] (61.3) Traveller: Explorer's Edition
         publisher: Mongoose
         source:    dtrpg-library
-Pick a number to write, paste a DriveThruRPG product URL (or 'id:PRODUCT_ID') for a direct lookup, Enter to skip, or 'q' to stop:
+Pick a number to write, paste a DriveThruRPG product URL (or 'id:PRODUCT_ID') for a direct lookup, 'm' to enter metadata manually, Enter to skip, or 'q' to stop:
 ```
 
 - Type a number to write that candidate's metadata into the file (asks for a final y/N confirm first).
 - Paste a DriveThruRPG product URL, or type `id:PRODUCT_ID`, to fetch an exact listing directly — useful when the right book doesn't show up in the candidates at all (DriveThruRPG's search requires query words to literally match the title text, so it can miss real matches; see Known quirks below).
+- Type `m` to type in title/publisher/series/series index/description/tags/ISBN/product URL by hand — for a title DriveThruRPG doesn't sell at all, without pre-editing `data/manual_overrides.yaml` first. Leaving Title blank cancels back out. (If no candidates were found at all, you're offered this directly instead of the full prompt.)
 - Press Enter to skip the file, or `q` to stop the whole batch early without touching the rest.
 
 With `--root`, before the per-file loop starts you're asked once: *"Are all books in this batch part of the same series?"* Answer yes and give a name, and it's applied to every book written in that run with no further prompting; answer no (or single-file `tag`) and you're asked per book instead — press Enter to leave a book's series blank. (Files matched via `dtrpg_urls.csv`, below, never get a series prompt either way, since that path is deliberately non-interactive end to end.)
@@ -82,7 +83,7 @@ Renames each already-tagged PDF to `<series> - <title>.pdf` (or just `<title>.pd
 
 ### Manual overrides
 
-For titles DriveThruRPG doesn't sell at all (Bits and Mortar exclusives, publisher-direct purchases, etc.) — where there's no DriveThruRPG listing to fetch — fill in `data/manual_overrides.yaml` keyed by exact filename with the full metadata by hand; see the template in that file for the format. Both `tag` and `scan` check this first, before anything else.
+For titles DriveThruRPG doesn't sell at all (Bits and Mortar exclusives, publisher-direct purchases, etc.) — where there's no DriveThruRPG listing to fetch — fill in `data/manual_overrides.yaml` keyed by exact filename with the full metadata by hand; see the template in that file for the format. Both `tag` and `scan` check this first, before anything else. For a one-off file rather than something you want recorded for every future run, `tag`'s `m` option (above) prompts for the same fields interactively instead of editing this file.
 
 ### Known URLs — pre-populating known matches
 
