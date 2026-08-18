@@ -112,7 +112,7 @@ class DtrpgClient:
             {
                 "Content-Type": "application/json",
                 "Accept": "application/json",
-                "User-Agent": "dtrpg-metadata-download/1.1.0 (personal library tagging tool)",
+                "User-Agent": "dtrpg-metadata-download/1.2.0 (personal library tagging tool)",
             }
         )
         self.max_retries = max_retries
