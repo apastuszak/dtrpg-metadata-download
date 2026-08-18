@@ -57,6 +57,8 @@ Pick a number to write, paste a DriveThruRPG product URL (or 'id:PRODUCT_ID') fo
 
 With `--root`, before the per-file loop starts you're asked once: *"Are all books in this batch part of the same series?"* Answer yes and give a name, and it's applied to every book written in that run with no further prompting; answer no (or single-file `tag`) and you're asked per book instead — press Enter to leave a book's series blank. (Files matched via `dtrpg_urls.csv`, below, never get a series prompt either way, since that path is deliberately non-interactive end to end.)
 
+Add `--rename` to tag and rename in one pass — right after each successful write, the file (and its `.opf`/`.metadata.json`/`.bak` siblings) is immediately renamed to `<series> - <title>.pdf`, the same result you'd get running `rename` on it afterward. Applies to every match path (candidate-pick, manual override, known URL, or manual entry); skipped for anything not actually written (a declined confirm, a cancelled manual entry, a failed write).
+
 ### Batch mode with a review step
 
 If you'd rather review matches in bulk before anything gets written, use the CSV-gated path instead:

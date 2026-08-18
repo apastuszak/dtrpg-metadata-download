@@ -28,7 +28,7 @@
         Run scan, then write-pdfs. Still gated by review.csv status —
         rows left at needs-review/no-match are not written.
 
-    tag PDF_PATH | tag --root PATH [--bookorbit-mode]
+    tag PDF_PATH | tag --root PATH [--bookorbit-mode] [--rename]
         Match PDF(s) by filename, show ranked candidates per file, and
         write the one you pick straight into it — interactively, no
         review.csv. With --root, loops over every PDF under that
@@ -45,6 +45,12 @@
         instead — for titles DriveThruRPG doesn't have at all, without
         needing to pre-edit data/manual_overrides.yaml. Leaving Title
         blank cancels back out.
+        --rename immediately renames a file (and its sidecars) to
+        "<series> - <title>.pdf" right after a successful write, same
+        as running the rename subcommand on it afterward — for every
+        match path (candidate-pick, manual override, known URL, or
+        manual entry). Skipped for a write that failed, and for any
+        file skipped/cancelled/left unwritten.
 
     --bookorbit-mode (on write-pdfs/all/tag): instead of writing Calibre
         metadata into the PDF, strips ALL PDF-level metadata (full XMP
@@ -331,7 +337,23 @@ def _prompt_manual_metadata(path: Path, default_series: str | None) -> ProductMe
     )
 
 
-def _manual_entry_flow(path: Path, default_series: str | None, bookorbit_mode: bool) -> bool:
+def _write_and_maybe_rename(path: Path, row: ReviewRow, bookorbit_mode: bool, rename: bool) -> None:
+    """Write metadata, print the outcome, and -- if `rename` is set --
+    immediately rename the file (and its sidecars) to match. Reuses
+    rename's own plan_rename()/apply_rename() logic wholesale (same
+    collision handling, same mid-group rollback on failure) rather than
+    duplicating any of it here. Skipped entirely if the write itself
+    failed -- nothing to rename yet, and reading back a .metadata.json
+    sidecar that write_metadata() never actually got to write would
+    just report a spurious "no title" skip.
+    """
+    result = write_metadata(path, row, bookorbit_mode=bookorbit_mode)
+    print(f"Wrote metadata to {path.name}" if result.success else f"FAILED: {result.message}")
+    if result.success and rename:
+        _rename_one(path, dry_run=False)
+
+
+def _manual_entry_flow(path: Path, default_series: str | None, bookorbit_mode: bool, rename: bool) -> bool:
     """Prompt for metadata by hand and write it, mirroring the same
     confirm-then-write pattern the candidate-pick path uses. Returns
     True if the user typed 'q' (or backed out of the manual prompt
@@ -350,8 +372,7 @@ def _manual_entry_flow(path: Path, default_series: str | None, bookorbit_mode: b
         return False
 
     row = row_from_match(path.name, meta, 100.0, Status.APPROVED)
-    result = write_metadata(path, row, bookorbit_mode=bookorbit_mode)
-    print(f"Wrote metadata to {path.name}" if result.success else f"FAILED: {result.message}")
+    _write_and_maybe_rename(path, row, bookorbit_mode, rename)
     return False
 
 
@@ -363,6 +384,7 @@ def _tag_one(
     thresholds: dict,
     default_series: str | None = None,
     bookorbit_mode: bool = False,
+    rename: bool = False,
 ) -> bool:
     """Match+tag a single PDF interactively. Returns True if the user
     asked to stop (typed 'q'), so a batch run can bail out early."""
@@ -378,8 +400,7 @@ def _tag_one(
             return False
         row = row_from_match(path.name, meta, 100.0, Status.APPROVED)
         _prompt_series(row, default_series)
-        result = write_metadata(path, row, bookorbit_mode=bookorbit_mode)
-        print(f"Wrote metadata to {path.name}" if result.success else f"FAILED: {result.message}")
+        _write_and_maybe_rename(path, row, bookorbit_mode, rename)
         return False
 
     if path.name in known_urls:
@@ -390,9 +411,8 @@ def _tag_one(
         else:
             row = row_from_match(path.name, meta, 100.0, Status.APPROVED)
             _apply_default_series(row, default_series)
-            result = write_metadata(path, row, bookorbit_mode=bookorbit_mode)
             print(f"Known URL matched: {meta.title}")
-            print(f"Wrote metadata to {path.name}" if result.success else f"FAILED: {result.message}")
+            _write_and_maybe_rename(path, row, bookorbit_mode, rename)
             return False
 
     candidates = find_candidates(path, client)
@@ -402,7 +422,7 @@ def _tag_one(
         if answer == "q":
             return True
         if answer in ("y", "yes"):
-            return _manual_entry_flow(path, default_series, bookorbit_mode)
+            return _manual_entry_flow(path, default_series, bookorbit_mode, rename)
         print("Skipped.")
         return False
 
@@ -418,7 +438,7 @@ def _tag_one(
     if choice_lower == "q":
         return True
     if choice_lower == "m":
-        return _manual_entry_flow(path, default_series, bookorbit_mode)
+        return _manual_entry_flow(path, default_series, bookorbit_mode, rename)
     if not choice:
         print("Skipped.")
         return False
@@ -463,8 +483,7 @@ def _tag_one(
         return False
 
     _prompt_series(row, default_series)
-    result = write_metadata(path, row, bookorbit_mode=bookorbit_mode)
-    print(f"Wrote metadata to {path.name}" if result.success else f"FAILED: {result.message}")
+    _write_and_maybe_rename(path, row, bookorbit_mode, rename)
     return False
 
 
@@ -493,7 +512,7 @@ def cmd_tag(args: argparse.Namespace, config: dict) -> None:
 
         for i, path in enumerate(pdfs, 1):
             print(f"[{i}/{len(pdfs)}] {path}")
-            if _tag_one(path, client, manual_overrides, known_urls, thresholds, default_series, args.bookorbit_mode):
+            if _tag_one(path, client, manual_overrides, known_urls, thresholds, default_series, args.bookorbit_mode, args.rename):
                 print("Stopped.")
                 break
             print()
@@ -507,7 +526,7 @@ def cmd_tag(args: argparse.Namespace, config: dict) -> None:
 
     client = build_client(config)
     known_urls = load_known_urls(path.parent)
-    _tag_one(path, client, manual_overrides, known_urls, thresholds, bookorbit_mode=args.bookorbit_mode)
+    _tag_one(path, client, manual_overrides, known_urls, thresholds, bookorbit_mode=args.bookorbit_mode, rename=args.rename)
 
 
 def main() -> None:
@@ -551,6 +570,10 @@ def main() -> None:
     tag_group.add_argument("pdf", nargs="?", help="Path to a single PDF file to match and tag")
     tag_group.add_argument("--root", help="Process every PDF under this directory instead of a single file")
     tag_parser.add_argument("--bookorbit-mode", action="store_true", help=bookorbit_mode_help)
+    tag_parser.add_argument(
+        "--rename", action="store_true",
+        help="Also rename the file (and its sidecars) to 'Series - Title' immediately after a successful write",
+    )
     tag_parser.set_defaults(func=cmd_tag)
 
     rename_parser = subparsers.add_parser("rename", help="Rename tagged PDF(s) (and sidecars) to 'Series - Title'")
