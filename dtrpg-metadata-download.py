@@ -7,6 +7,7 @@
 #     "PyYAML>=6.0",
 #     "requests>=2.31",
 #     "lxml>=4.9",
+#     "textual>=0.60",
 # ]
 # ///
 """CLI entry point for the RPG PDF metadata pipeline.
@@ -29,28 +30,33 @@
         rows left at needs-review/no-match are not written.
 
     tag PDF_PATH | tag --root PATH [--bookorbit-mode] [--rename]
-        Match PDF(s) by filename, show ranked candidates per file, and
-        write the one you pick straight into it — interactively, no
-        review.csv. With --root, loops over every PDF under that
-        directory one at a time (type 'q' at any prompt to stop early).
-        --root also asks once up front whether every book in the batch
-        shares one series — if so, that name is applied to all of them
-        with no further prompting; otherwise series is asked per book
-        for candidate-pick/manual-override matches (dtrpg_urls.csv
-        matches never get a series prompt either way, batch answer or
-        not — that path is deliberately non-interactive end to end).
-        At any candidate prompt (or when no candidates are found at
-        all), type 'm' (or answer yes when offered) to type in title/
-        publisher/series/description/tags/isbn/product_url by hand
-        instead — for titles DriveThruRPG doesn't have at all, without
-        needing to pre-edit data/manual_overrides.yaml. Leaving Title
-        blank cancels back out.
+        Match PDF(s) by filename and write the one you pick straight
+        into it, via a full-screen terminal UI (see tag_tui.py) — no
+        review.csv. A single file and --root both use this UI; --root
+        works through the directory one PDF at a time and asks once up
+        front whether every book in the batch shares one series (if so,
+        applied to all of them with no further per-book prompt).
+
+        For each file: a candidate screen shows ranked matches (arrow
+        keys + Enter to pick, or 'm' for manual entry, Escape to skip,
+        'q' to quit the whole run) plus a field to paste a DriveThruRPG
+        URL or type id:PRODUCT_ID for a direct lookup — shown even when
+        no candidates were found at all, so that escape hatch is never
+        unavailable. Manual entry is a form with a real multi-line text
+        area for Description (title/publisher/series/series index/tags/
+        isbn/product_url are single-line) — for titles DriveThruRPG
+        doesn't have at all, without needing to pre-edit
+        data/manual_overrides.yaml. Every match path (candidate pick,
+        manual override, known URL, manual entry) shares one confirm
+        screen before anything is actually written; known-URL matches
+        skip both the candidate screen and confirm screen entirely,
+        staying non-interactive end to end.
+
         --rename immediately renames a file (and its sidecars) to
         "<series> - <title>.pdf" right after a successful write, same
-        as running the rename subcommand on it afterward — for every
-        match path (candidate-pick, manual override, known URL, or
-        manual entry). Skipped for a write that failed, and for any
-        file skipped/cancelled/left unwritten.
+        as running the rename subcommand on it afterward. Skipped for a
+        write that failed, and for any file skipped/cancelled/left
+        unwritten.
 
     --bookorbit-mode (on write-pdfs/all/tag): instead of writing Calibre
         metadata into the PDF, strips ALL PDF-level metadata (full XMP
@@ -86,21 +92,14 @@ from collections import Counter
 from pathlib import Path
 
 import yaml
+from textual.logging import TextualHandler
 
 from dtrpg_client import DtrpgClient
-from matcher import (
-    extract_product_id,
-    find_candidates,
-    load_known_urls,
-    load_manual_overrides,
-    match_file,
-    row_from_match,
-    scan_pdfs,
-)
-from pdf_writer import write_approved, write_metadata
-from provenance import ProductMetadata, Source, Status
+from matcher import load_known_urls, load_manual_overrides, match_file, scan_pdfs
+from pdf_writer import write_approved
 from renamer import apply_rename, plan_rename
-from review import ReviewRow, load_review, merge_by_filename, save_review
+from review import load_review, merge_by_filename, save_review
+from tag_tui import TagApp
 
 logger = logging.getLogger("dtrpg-metadata-download")
 
@@ -255,239 +254,14 @@ def cmd_rename(args: argparse.Namespace, config: dict) -> None:
     print(f"\n{summary}")
 
 
-def _print_candidate(index: int | None, meta, score: float | None) -> None:
-    label = f"[{index}] " if index is not None else ""
-    score_part = f"({score:.1f}) " if score is not None else ""
-    print(f"  {label}{score_part}{meta.title}")
-    if meta.publisher:
-        print(f"        publisher: {meta.publisher}")
-    if meta.authors:
-        print(f"        authors:   {meta.authors_str()}")
-    if meta.series:
-        print(f"        series:    {meta.series} #{meta.series_index}")
-    print(f"        source:    {meta.source.value if hasattr(meta.source, 'value') else meta.source}")
-
-
-def _apply_default_series(row: ReviewRow, default_series: str | None) -> None:
-    """Apply a batch-wide series default, if any, without ever prompting.
-
-    `default_series` being not-None means the user already answered the
-    batch-wide "same series?" question in `cmd_tag`'s --root path — that
-    holds even if they left the series name itself blank, which must
-    still count as "don't ask me again", not "fall back to per-book
-    prompting". Shared by `_prompt_series` and the known_urls branch of
-    `_tag_one`, which must stay non-interactive regardless of batch state.
-    """
-    if not row.series and default_series:
-        row.series = default_series
-
-
-def _prompt_series(row: ReviewRow, default_series: str | None = None) -> None:
-    """DriveThruRPG has no structured series field, so matched rows never
-    come with one pre-filled — ask once, here, rather than requiring a
-    manual_overrides.yaml edit for every book that's part of a series.
-
-    `default_series` not being None means the batch-wide question was
-    already answered "yes" — apply it (even if blank) and never prompt,
-    since that's the whole point of answering that question once.
-    """
-    if row.series:
-        return
-    if default_series is not None:
-        _apply_default_series(row, default_series)
-        return
-    series = input("Series (press Enter to leave blank): ").strip()
-    if series:
-        row.series = series
-
-
-def _prompt_manual_metadata(path: Path, default_series: str | None) -> ProductMetadata | None:
-    """Collect metadata by hand for a file with no usable DriveThruRPG
-    match at all -- the same fields data/manual_overrides.yaml supports,
-    just typed in now instead of hand-edited into that file ahead of
-    time. Returns None if the user backs out by leaving Title blank.
-
-    Honors a batch-wide default_series exactly like _prompt_series does
-    (not-None means already answered, even if blank -- don't ask again).
-    """
-    print(f"Enter metadata for {path.name} (blank Title cancels):")
-    title = input("  Title: ").strip()
-    if not title:
-        print("Cancelled.")
-        return None
-    publisher = input("  Publisher: ").strip()
-    series = default_series if default_series is not None else input("  Series (Enter to leave blank): ").strip()
-    series_index = input("  Series index (Enter to leave blank): ").strip() if series else ""
-    description = input("  Description (Enter to leave blank): ").strip()
-    tags_raw = input("  Tags, semicolon-separated (Enter to leave blank): ").strip()
-    tags = [t.strip() for t in tags_raw.split(";") if t.strip()]
-    isbn = input("  ISBN (Enter to leave blank): ").strip()
-    product_url = input("  Product URL, for your own reference (Enter to leave blank): ").strip()
-
-    return ProductMetadata(
-        title=title,
-        series=series,
-        series_index=series_index,
-        publisher=publisher,
-        tags=tags,
-        description=description,
-        product_url=product_url,
-        source=Source.MANUAL,
-        isbn=isbn,
-    )
-
-
-def _write_and_maybe_rename(path: Path, row: ReviewRow, bookorbit_mode: bool, rename: bool) -> None:
-    """Write metadata, print the outcome, and -- if `rename` is set --
-    immediately rename the file (and its sidecars) to match. Reuses
-    rename's own plan_rename()/apply_rename() logic wholesale (same
-    collision handling, same mid-group rollback on failure) rather than
-    duplicating any of it here. Skipped entirely if the write itself
-    failed -- nothing to rename yet, and reading back a .metadata.json
-    sidecar that write_metadata() never actually got to write would
-    just report a spurious "no title" skip.
-    """
-    result = write_metadata(path, row, bookorbit_mode=bookorbit_mode)
-    print(f"Wrote metadata to {path.name}" if result.success else f"FAILED: {result.message}")
-    if result.success and rename:
-        _rename_one(path, dry_run=False)
-
-
-def _manual_entry_flow(path: Path, default_series: str | None, bookorbit_mode: bool, rename: bool) -> bool:
-    """Prompt for metadata by hand and write it, mirroring the same
-    confirm-then-write pattern the candidate-pick path uses. Returns
-    True if the user typed 'q' (or backed out of the manual prompt
-    itself), so a batch run can bail out early -- consistent with
-    every other branch of _tag_one."""
-    meta = _prompt_manual_metadata(path, default_series)
-    if meta is None:
-        return False
-
-    print(f"About to write: {meta.title}")
-    answer = input("Proceed? [y/N/q] ").strip().lower()
-    if answer == "q":
-        return True
-    if answer not in ("y", "yes"):
-        print("Skipped.")
-        return False
-
-    row = row_from_match(path.name, meta, 100.0, Status.APPROVED)
-    _write_and_maybe_rename(path, row, bookorbit_mode, rename)
-    return False
-
-
-def _tag_one(
-    path: Path,
-    client: DtrpgClient,
-    manual_overrides: dict,
-    known_urls: dict[str, str],
-    thresholds: dict,
-    default_series: str | None = None,
-    bookorbit_mode: bool = False,
-    rename: bool = False,
-) -> bool:
-    """Match+tag a single PDF interactively. Returns True if the user
-    asked to stop (typed 'q'), so a batch run can bail out early."""
-    if path.name in manual_overrides:
-        meta = manual_overrides[path.name]
-        print(f"Manual override found for {path.name}:")
-        _print_candidate(None, meta, None)
-        answer = input("Write this metadata into the PDF? [y/N/q] ").strip().lower()
-        if answer == "q":
-            return True
-        if answer not in ("y", "yes"):
-            print("Skipped.")
-            return False
-        row = row_from_match(path.name, meta, 100.0, Status.APPROVED)
-        _prompt_series(row, default_series)
-        _write_and_maybe_rename(path, row, bookorbit_mode, rename)
-        return False
-
-    if path.name in known_urls:
-        product_id = known_urls[path.name]
-        meta = client.get_product(product_id)
-        if meta is None:
-            print(f"Known URL for {path.name} (product {product_id}) could not be fetched; falling back to search.")
-        else:
-            row = row_from_match(path.name, meta, 100.0, Status.APPROVED)
-            _apply_default_series(row, default_series)
-            print(f"Known URL matched: {meta.title}")
-            _write_and_maybe_rename(path, row, bookorbit_mode, rename)
-            return False
-
-    candidates = find_candidates(path, client)
-    if not candidates:
-        print(f"No candidates found for {path.name}.")
-        answer = input("Enter metadata manually? [y/N/q] ").strip().lower()
-        if answer == "q":
-            return True
-        if answer in ("y", "yes"):
-            return _manual_entry_flow(path, default_series, bookorbit_mode, rename)
-        print("Skipped.")
-        return False
-
-    print(f"Candidates for {path.name}:")
-    for i, (meta, score) in enumerate(candidates, 1):
-        _print_candidate(i, meta, score)
-
-    choice = input(
-        "Pick a number to write, paste a DriveThruRPG product URL (or 'id:PRODUCT_ID') "
-        "for a direct lookup, 'm' to enter metadata manually, Enter to skip, or 'q' to stop: "
-    ).strip()
-    choice_lower = choice.lower()
-    if choice_lower == "q":
-        return True
-    if choice_lower == "m":
-        return _manual_entry_flow(path, default_series, bookorbit_mode, rename)
-    if not choice:
-        print("Skipped.")
-        return False
-
-    try:
-        idx = int(choice_lower)
-    except ValueError:
-        idx = None
-
-    if idx is not None and 1 <= idx <= len(candidates):
-        # A number that's a valid list index always means "pick this
-        # candidate" — checked before extract_product_id() so a short
-        # index like "1" can never be misread as a literal DriveThruRPG
-        # product ID (extract_product_id() accepts bare digit strings too,
-        # for dtrpg_urls.csv parsing, where that ambiguity doesn't exist).
-        meta, score = candidates[idx - 1]
-        if meta.source == Source.DTRPG_LIBRARY and not meta.description:
-            try:
-                meta = client.enrich(meta)
-            except Exception as exc:
-                print(f"(couldn't fetch full details: {exc}; proceeding with what we have)")
-    else:
-        product_id = extract_product_id(choice_lower)
-        if product_id is None:
-            print("Invalid selection, skipping.")
-            return False
-        meta = client.get_product(product_id)
-        if meta is None:
-            print(f"Could not fetch product {product_id} from DriveThruRPG — skipping.")
-            return False
-        score = 100.0
-
-    status = Status.AUTO_ACCEPTED if score >= thresholds.get("high_confidence_threshold", 90.0) else Status.APPROVED
-    row = row_from_match(path.name, meta, score, status)
-
-    print(f"About to write: {meta.title}")
-    answer = input("Proceed? [y/N/q] ").strip().lower()
-    if answer == "q":
-        return True
-    if answer not in ("y", "yes"):
-        print("Skipped.")
-        return False
-
-    _prompt_series(row, default_series)
-    _write_and_maybe_rename(path, row, bookorbit_mode, rename)
-    return False
-
-
 def cmd_tag(args: argparse.Namespace, config: dict) -> None:
+    """Thin dispatch into tag_tui.TagApp -- the actual interactive flow
+    (candidate list, manual entry, confirm-then-write, --rename) lives
+    there now. Everything below (guard clauses, loading overrides/known
+    URLs/thresholds, resolving the PDF list, building the DtrpgClient) is
+    unchanged from before the TUI rewrite -- a missing DTRPG_API_KEY
+    still sys.exit()s here, on a normal terminal, before the TUI ever
+    starts."""
     manual_overrides_path = Path(config.get("manual_overrides", "data/manual_overrides.yaml"))
     manual_overrides = load_manual_overrides(manual_overrides_path)
     thresholds = config.get("matching", {})
@@ -500,33 +274,26 @@ def cmd_tag(args: argparse.Namespace, config: dict) -> None:
             return
         client = build_client(config)
         known_urls = load_known_urls(root)
-        print(f"Found {len(pdfs)} PDF(s) under {root}\n")
+    else:
+        path = Path(args.pdf)
+        if not path.exists():
+            sys.exit(f"File not found: {path}")
+        if path.suffix.lower() != ".pdf":
+            sys.exit(f"Not a PDF: {path}")
+        pdfs = [path]
+        client = build_client(config)
+        known_urls = load_known_urls(path.parent)
 
-        default_series = None
-        same_series = input("Are all books in this batch part of the same series? [y/N] ").strip().lower() in ("y", "yes")
-        if same_series:
-            # Deliberately not "or None" here -- a blank answer still means
-            # "don't ask me again per book", just with no series to apply.
-            default_series = input("Series name: ").strip()
-        print()
-
-        for i, path in enumerate(pdfs, 1):
-            print(f"[{i}/{len(pdfs)}] {path}")
-            if _tag_one(path, client, manual_overrides, known_urls, thresholds, default_series, args.bookorbit_mode, args.rename):
-                print("Stopped.")
-                break
-            print()
-        return
-
-    path = Path(args.pdf)
-    if not path.exists():
-        sys.exit(f"File not found: {path}")
-    if path.suffix.lower() != ".pdf":
-        sys.exit(f"Not a PDF: {path}")
-
-    client = build_client(config)
-    known_urls = load_known_urls(path.parent)
-    _tag_one(path, client, manual_overrides, known_urls, thresholds, bookorbit_mode=args.bookorbit_mode, rename=args.rename)
+    TagApp(
+        pdfs=pdfs,
+        client=client,
+        manual_overrides=manual_overrides,
+        known_urls=known_urls,
+        thresholds=thresholds,
+        bookorbit_mode=args.bookorbit_mode,
+        rename=args.rename,
+        root_mode=bool(args.root),
+    ).run()
 
 
 def main() -> None:
@@ -584,9 +351,17 @@ def main() -> None:
     rename_parser.set_defaults(func=cmd_rename)
 
     args = parser.parse_args()
+    # TextualHandler routes to the active Textual app's own log (instead of
+    # stderr) whenever one is running -- tag's TUI takes over the terminal
+    # via an alternate screen, and a plain StreamHandler writing to stderr
+    # mid-run (e.g. a logger.warning() from matcher.py/dtrpg_client.py)
+    # would corrupt the display. It falls back to plain stderr when no app
+    # is active, so this is a safe universal replacement, not just a
+    # tag-specific special case.
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        handlers=[TextualHandler()],
     )
 
     config = load_config(Path(args.config))

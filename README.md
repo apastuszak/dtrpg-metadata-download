@@ -12,7 +12,7 @@ export DTRPG_API_KEY=...   # an Application Key from your DriveThruRPG account p
 ./dtrpg-metadata-download.py --help
 ```
 
-The first run resolves and caches pikepdf/rapidfuzz/PyYAML/requests automatically (a few seconds); every run after that is instant. No `.venv` directory, no `pip install` step, nothing to activate.
+The first run resolves and caches pikepdf/rapidfuzz/PyYAML/requests/lxml/textual automatically (a few seconds); every run after that is instant. No `.venv` directory, no `pip install` step, nothing to activate.
 
 Don't have `uv`? The classic path still works:
 
@@ -27,7 +27,7 @@ Copy `config.yaml` and adjust `root` (and anything else) for your machine. It's 
 
 ## Usage
 
-The primary workflow is `tag` — interactive, no review step, writes immediately on confirm:
+The primary workflow is `tag` — a full-screen terminal UI (built with [Textual](https://textual.textualize.io/)), no review step, writes immediately on confirm:
 
 ```bash
 # One file
@@ -37,25 +37,14 @@ The primary workflow is `tag` — interactive, no review step, writes immediatel
 ./dtrpg-metadata-download.py tag --root "/path/to/rpg/pdfs"
 ```
 
-For each file it searches your library, then DriveThruRPG's public catalog, and shows ranked candidates:
+For each file it searches your library, then DriveThruRPG's public catalog, and shows a screen of ranked candidates:
 
-```
-Candidates for Sword Worlds.pdf:
-  [1] (98.6) Sword Worlds
-        publisher: Mongoose
-        source:    dtrpg-library
-  [2] (61.3) Traveller: Explorer's Edition
-        publisher: Mongoose
-        source:    dtrpg-library
-Pick a number to write, paste a DriveThruRPG product URL (or 'id:PRODUCT_ID') for a direct lookup, 'm' to enter metadata manually, Enter to skip, or 'q' to stop:
-```
+- **Arrow keys + Enter** to pick a candidate (asks for a final confirm screen before writing).
+- A text field to **paste a DriveThruRPG URL, or type `id:PRODUCT_ID`**, for a direct lookup — useful when the right book doesn't show up in the candidates at all (DriveThruRPG's search requires query words to literally match the title text, so it can miss real matches; see Known quirks below). This field is shown even when *no* candidates were found at all, so pasting a known link is never unavailable.
+- **`m`** opens a manual-entry form — title/publisher/series/series index/tags/ISBN/product URL as single-line fields, plus a real **multi-line text area for Description** — for a title DriveThruRPG doesn't sell at all, without pre-editing `data/manual_overrides.yaml` first. Leaving Title blank and pressing Escape cancels back out.
+- **Escape** skips the file, **`q`** stops the whole batch early without touching the rest.
 
-- Type a number to write that candidate's metadata into the file (asks for a final y/N confirm first).
-- Paste a DriveThruRPG product URL, or type `id:PRODUCT_ID`, to fetch an exact listing directly — useful when the right book doesn't show up in the candidates at all (DriveThruRPG's search requires query words to literally match the title text, so it can miss real matches; see Known quirks below).
-- Type `m` to type in title/publisher/series/series index/description/tags/ISBN/product URL by hand — for a title DriveThruRPG doesn't sell at all, without pre-editing `data/manual_overrides.yaml` first. Leaving Title blank cancels back out. (If no candidates were found at all, you're offered this directly instead of the full prompt.)
-- Press Enter to skip the file, or `q` to stop the whole batch early without touching the rest.
-
-With `--root`, before the per-file loop starts you're asked once: *"Are all books in this batch part of the same series?"* Answer yes and give a name, and it's applied to every book written in that run with no further prompting; answer no (or single-file `tag`) and you're asked per book instead — press Enter to leave a book's series blank. (Files matched via `dtrpg_urls.csv`, below, never get a series prompt either way, since that path is deliberately non-interactive end to end.)
+With `--root`, before the per-file loop starts you're asked once: *"Are all books in this batch part of the same series?"* Answer yes and give a name, and it's applied to every book written in that run with no further prompting (the series field is simply left out of every later screen); answer no and you're asked per book instead. (Files matched via `dtrpg_urls.csv`, below, never get a series screen either way, since that path is deliberately non-interactive end to end.)
 
 Add `--rename` to tag and rename in one pass — right after each successful write, the file (and its `.opf`/`.metadata.json`/`.bak` siblings) is immediately renamed to `<series> - <title>.pdf`, the same result you'd get running `rename` on it afterward. Applies to every match path (candidate-pick, manual override, known URL, or manual entry); skipped for anything not actually written (a declined confirm, a cancelled manual entry, a failed write).
 
