@@ -170,11 +170,11 @@ class ConfirmResult:
 
 
 class BatchSeriesModal(ModalScreen[str | None]):
-    """Once, only in --root mode with more than one file: "are all books
-    in this batch the same series?" Result is None (ask per book, the old
-    default_series = None) or a string -- possibly blank -- meaning
-    "apply this to every book, never ask again" (see resolve_series's
-    docstring for why a blank answer still counts as answered)."""
+    """Once, only in --root mode with more than one file: asks for a
+    batch-wide series name up front. A non-blank answer is applied to
+    every book in the run with no further prompting; a blank answer
+    means None -- the books aren't all one series, so each book is
+    prompted individually instead (see resolve_series's docstring)."""
 
     DEFAULT_CSS = """
     BatchSeriesModal { align: center middle; }
@@ -185,21 +185,19 @@ class BatchSeriesModal(ModalScreen[str | None]):
 
     def compose(self) -> ComposeResult:
         with Vertical():
-            yield Label("Are all books in this batch part of the same series?")
-            with Horizontal():
-                yield Button("Yes", id="yes", variant="primary")
-                yield Button("No", id="no")
-            yield Label("Series name (only used if Yes):")
+            yield Label("Series name for this batch:")
+            yield Label("Leave blank if all books are not in the same series.")
             yield Input(id="series")
+            yield Button("Continue", id="continue", variant="primary")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "yes":
-            self.dismiss(self.query_one("#series", Input).value.strip())
-        else:
-            self.dismiss(None)
+        self._submit()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
-        self.dismiss(event.value.strip())
+        self._submit()
+
+    def _submit(self) -> None:
+        self.dismiss(self.query_one("#series", Input).value.strip() or None)
 
 
 class CandidateScreen(Screen[CandidateResult]):

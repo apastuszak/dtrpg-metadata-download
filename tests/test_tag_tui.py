@@ -210,7 +210,7 @@ async def test_quit_mid_batch_second_file_untouched():
                      thresholds={}, bookorbit_mode=False, rename=False, root_mode=True)
         async with app.run_test() as pilot:
             await pilot.pause()
-            await pilot.click("#no")  # "same series for the batch?" -> No
+            await pilot.click("#continue")  # blank batch series -> ask per book
             await pilot.pause()
             await pilot.press("q")  # quit at the very first candidate screen
             await pilot.pause(delay=0.2)
@@ -284,7 +284,7 @@ async def test_batch_default_series_applied_silently():
             await pilot.pause()
             await pilot.click("#series")
             await pilot.press(*"Shared Series")
-            await pilot.click("#yes")
+            await pilot.click("#continue")
             await pilot.pause()
             # File 1: pick candidate, confirm -- no series Input should be
             # shown at all (needs_series_prompt False, applied silently).
