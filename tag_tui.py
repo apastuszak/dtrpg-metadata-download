@@ -14,11 +14,16 @@ interactive today and have no TUI involvement at all.
 
 Screens replace print()/input() calls one for one:
     BatchSeriesModal  <- cmd_tag()'s "same series for the whole batch?"
+    SeriesModal       <- _prompt_series()'s per-book "Series (blank=none):"
+                         ask, shown after ConfirmScreen closes, only if
+                         the confirmed metadata's series is still blank
     CandidateScreen   <- _tag_one()'s candidate list + choice prompt
     ManualEntryScreen <- _prompt_manual_metadata()'s field-by-field prompts
     ConfirmScreen     <- the "About to write: X" / "Proceed? [y/N/q]" step,
                          shared by every path exactly as the old code
-                         shared write_metadata()+_prompt_series() calls
+                         shared write_metadata()+_prompt_series() calls;
+                         now a full editable form of every field about
+                         to be written, not just series
 
 Orchestration is one linear coroutine (TagApp._run_flow, run as a
 Textual worker) that `await self.push_screen_wait(...)`s through each
@@ -39,7 +44,7 @@ differently than a naive port of the old print() calls would suggest.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal
 
@@ -108,6 +113,43 @@ def build_manual_metadata(
     )
 
 
+def apply_edits(
+    meta: ProductMetadata,
+    *,
+    title: str,
+    publisher: str,
+    series: str,
+    series_index: str,
+    description: str,
+    tags_raw: str,
+    isbn: str,
+    product_url: str,
+) -> ProductMetadata | None:
+    """Rebuilds meta from ConfirmScreen's edited field values. Preserves
+    source/authors/product_id -- the fields the edit form doesn't expose,
+    since they aren't hand-typed data (product_id in particular must stay
+    whatever was actually matched/fetched, so dc:identifier and --rename
+    still point at the right DriveThruRPG page even if the user tweaks
+    the title). Returns None if Title was cleared, the same "cancel"
+    signal as build_manual_metadata.
+    """
+    title = title.strip()
+    if not title:
+        return None
+    tags = [t.strip() for t in tags_raw.split(";") if t.strip()]
+    return replace(
+        meta,
+        title=title,
+        publisher=publisher.strip(),
+        series=series.strip(),
+        series_index=series_index.strip(),
+        description=description.strip(),
+        tags=tags,
+        isbn=isbn.strip(),
+        product_url=product_url.strip(),
+    )
+
+
 def format_candidate_lines(meta: ProductMetadata, score: float | None = None) -> str:
     """Mirrors _print_candidate()'s field selection/order as a single
     renderable string instead of print() calls."""
@@ -161,7 +203,7 @@ class ManualEntryResult:
 @dataclass
 class ConfirmResult:
     action: Literal["confirm", "skip", "quit"]
-    series: str | None = None
+    meta: ProductMetadata | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -198,6 +240,48 @@ class BatchSeriesModal(ModalScreen[str | None]):
 
     def _submit(self) -> None:
         self.dismiss(self.query_one("#series", Input).value.strip() or None)
+
+
+class SeriesModal(ModalScreen[str]):
+    """Shown once per file, right after ConfirmScreen closes, only if
+    the confirmed metadata's series is still blank at that point -- the
+    user had every chance to fill it in on ConfirmScreen itself (which
+    starts pre-filled with any batch default or match-provided series),
+    so this is a final deliberate-choice check, not a first ask. Called
+    out as its own dialog rather than a second silent pass over the
+    same field. Leaving it blank here means no series, same convention
+    as BatchSeriesModal.
+    """
+
+    DEFAULT_CSS = """
+    SeriesModal { align: center middle; }
+    SeriesModal > Vertical {
+        width: 60; height: auto; border: thick $primary; padding: 1 2;
+    }
+    """
+
+    def __init__(self, book_title: str):
+        super().__init__()
+        self.book_title = book_title
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Label(f"Series for {self.book_title}:")
+            yield Label("Leave blank for no series.")
+            yield Input(id="series")
+            yield Button("Continue", id="continue", variant="primary")
+
+    def on_mount(self) -> None:
+        self.query_one("#series", Input).focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self._submit()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        self._submit()
+
+    def _submit(self) -> None:
+        self.dismiss(self.query_one("#series", Input).value.strip())
 
 
 class CandidateScreen(Screen[CandidateResult]):
@@ -369,61 +453,88 @@ class ManualEntryScreen(Screen[ManualEntryResult]):
 
 class ConfirmScreen(Screen[ConfirmResult]):
     """The "About to write: X" / "Proceed? [y/N/q]" step every path
-    shares in the old code (manual override, candidate pick, known-URL
+    shares in the old code (manual override, candidate pick; known-URL
     matches skip this entirely, matching their "deliberately non-
-    interactive end to end" behavior). Only shows an editable series
-    field when resolve_series() says one is actually needed -- silently
-    applies an already-known or batch-default series otherwise, exactly
-    like the old _prompt_series().
+    interactive end to end" behavior). Shows every field that's about
+    to be written -- not just series -- as an editable form pre-filled
+    with the match's current values (including any already-resolved
+    batch-default series), so nothing has to be exactly right in the
+    original DriveThruRPG listing before it's confirmed. Authors/source
+    are shown read-only underneath: informational only, since neither
+    is actually written (see CLAUDE.md on dc:creator/publisher policy)
+    or hand-editable here.
     """
 
     BINDINGS = [
         Binding("q", "quit_batch", "Quit"),
         Binding("escape", "skip", "Skip"),
+        Binding("ctrl+s", "confirm", "Confirm"),
     ]
 
-    def __init__(self, header: str, meta: ProductMetadata, progress: str, needs_series_prompt: bool):
+    def __init__(self, header: str, meta: ProductMetadata, progress: str):
         super().__init__()
         self.header = header
         self.meta = meta
         self.progress = progress
-        self.needs_series_prompt = needs_series_prompt
 
     def compose(self) -> ComposeResult:
         yield Header()
         with VerticalScroll():
             yield Static(self.progress)
             yield Static(self.header)
-            yield Static(format_candidate_lines(self.meta))
-            if self.needs_series_prompt:
-                yield Label("Series (Enter to leave blank):")
-                yield Input(id="series")
+            if self.meta.authors:
+                yield Static(f"authors: {self.meta.authors_str()}")
+            yield Static(f"source: {self.meta.source.value if hasattr(self.meta.source, 'value') else self.meta.source}")
+            yield Label("Title (required):")
+            yield Input(id="title", value=self.meta.title)
+            yield Label("Publisher:")
+            yield Input(id="publisher", value=self.meta.publisher)
+            yield Label("Series:")
+            yield Input(id="series", value=self.meta.series)
+            yield Label("Series index:")
+            yield Input(id="series_index", value=self.meta.series_index)
+            yield Label("Description:")
+            yield TextArea(self.meta.description, id="description")
+            yield Label("Tags, semicolon-separated:")
+            yield Input(id="tags", value=self.meta.tags_str())
+            yield Label("ISBN:")
+            yield Input(id="isbn", value=self.meta.isbn)
+            yield Label("Product URL:")
+            yield Input(id="product_url", value=self.meta.product_url)
             with Horizontal():
-                yield Button("Confirm", id="confirm", variant="primary")
+                yield Button("Confirm (ctrl+s)", id="confirm", variant="primary")
                 yield Button("Skip (Esc)", id="skip")
                 yield Button("Quit (q)", id="quit")
         yield Footer()
 
     def on_mount(self) -> None:
-        if self.needs_series_prompt:
-            self.query_one("#series", Input).focus()
-        else:
-            self.query_one("#confirm", Button).focus()
+        self.query_one("#confirm", Button).focus()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "confirm":
-            self._confirm()
+            self.action_confirm()
         elif event.button.id == "skip":
             self.action_skip()
         elif event.button.id == "quit":
             self.action_quit_batch()
 
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        self._confirm()
-
-    def _confirm(self) -> None:
-        series = self.query_one("#series", Input).value.strip() if self.needs_series_prompt else None
-        self.dismiss(ConfirmResult(action="confirm", series=series))
+    def action_confirm(self) -> None:
+        edited = apply_edits(
+            self.meta,
+            title=self.query_one("#title", Input).value,
+            publisher=self.query_one("#publisher", Input).value,
+            series=self.query_one("#series", Input).value,
+            series_index=self.query_one("#series_index", Input).value,
+            description=self.query_one("#description", TextArea).text,
+            tags_raw=self.query_one("#tags", Input).value,
+            isbn=self.query_one("#isbn", Input).value,
+            product_url=self.query_one("#product_url", Input).value,
+        )
+        if edited is None:
+            self.notify("Title is required.", severity="error")
+            self.query_one("#title", Input).focus()
+            return
+        self.dismiss(ConfirmResult(action="confirm", meta=edited))
 
     def action_skip(self) -> None:
         self.dismiss(ConfirmResult(action="skip"))
@@ -585,20 +696,19 @@ class TagApp(App[None]):
         assert result.meta is not None
         # Still one more confirm step, matching the old _manual_entry_flow()
         # ("About to write: {title}" / "Proceed? [y/N/q]") -- manual entry
-        # doesn't skip that just because it collected its own fields.
-        # needs_series_prompt is always False here: series was already
-        # resolved inside ManualEntryScreen (matching the old
-        # _prompt_manual_metadata(), which never calls _prompt_series()
-        # separately), so there's nothing left for ConfirmScreen to ask.
+        # doesn't skip that just because it collected its own fields; it
+        # also gives one more chance to tweak a field before writing.
         confirm = await self.push_screen_wait(
-            ConfirmScreen(f"About to write: {result.meta.title}", result.meta, progress, needs_series_prompt=False)
+            ConfirmScreen(f"About to write: {result.meta.title}", result.meta, progress)
         )
         if confirm.action == "quit":
             return True
         if confirm.action == "skip":
             self._log("Skipped.")
             return False
-        row = row_from_match(path.name, result.meta, 100.0, Status.APPROVED)
+        assert confirm.meta is not None
+        confirmed_meta = await self._maybe_ask_series(confirm.meta)
+        row = row_from_match(path.name, confirmed_meta, 100.0, Status.APPROVED)
         await self._write_and_maybe_rename(path, row)
         return False
 
@@ -612,22 +722,32 @@ class TagApp(App[None]):
         status: Status = Status.APPROVED,
         default_series: str | None = None,
     ) -> bool:
-        _, needs_prompt = resolve_series(meta.series, default_series)
-        result = await self.push_screen_wait(ConfirmScreen(header, meta, progress, needs_prompt))
+        series, _ = resolve_series(meta.series, default_series)
+        if series != meta.series:
+            meta = replace(meta, series=series)
+        result = await self.push_screen_wait(ConfirmScreen(header, meta, progress))
         if result.action == "quit":
             return True
         if result.action == "skip":
             self._log("Skipped.")
             return False
 
-        row = row_from_match(path.name, meta, score, status)
-        if needs_prompt:
-            if result.series:
-                row.series = result.series
-        else:
-            row.series, _ = resolve_series(meta.series, default_series)
+        assert result.meta is not None
+        confirmed_meta = await self._maybe_ask_series(result.meta)
+        row = row_from_match(path.name, confirmed_meta, score, status)
         await self._write_and_maybe_rename(path, row)
         return False
+
+    async def _maybe_ask_series(self, meta: ProductMetadata) -> ProductMetadata:
+        """Called right after ConfirmScreen closes, for every path that
+        goes through it: if the confirmed metadata's series is still
+        blank at that point, ask once more with a dedicated dialog
+        before writing, rather than silently writing no series just
+        because ConfirmScreen's own Series field was left blank."""
+        if meta.series:
+            return meta
+        series = await self.push_screen_wait(SeriesModal(meta.title))
+        return replace(meta, series=series) if series else meta
 
     async def _write_and_maybe_rename(self, path: Path, row: ReviewRow) -> None:
         result = await self._call(write_metadata, path, row, bookorbit_mode=self.bookorbit_mode)

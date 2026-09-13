@@ -43,7 +43,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pikepdf
-from textual.widgets import TextArea
+from textual.widgets import Input, TextArea
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -97,13 +97,80 @@ async def test_manual_override_confirm():
                      thresholds={}, bookorbit_mode=False, rename=False, root_mode=False)
         async with app.run_test() as pilot:
             await pilot.pause()
-            await pilot.press("enter")  # confirm (no series prompt -- override already has one)
+            await pilot.press("enter")  # confirm (default-focused button; override's series is pre-filled)
             await pilot.pause(delay=0.2)
 
         with pikepdf.open(pdf) as p:
             with p.open_metadata() as m:
                 assert m.get("dc:title") == "Override Title"
     print("PASS: manual_override_confirm")
+
+
+async def test_confirm_screen_edit_before_write():
+    with tempfile.TemporaryDirectory() as tmp:
+        pdf = Path(tmp) / "EditMe.pdf"
+        pikepdf.new().save(pdf)
+        client = _client(search_library=[ProductMetadata(
+            title="Original Title", publisher="Original Publisher", series="Original Series",
+            description="Original description", tags=["one", "two"], isbn="1234567890",
+            source=Source.DTRPG_LIBRARY, product_id="1",
+        )])
+        app = TagApp(pdfs=[pdf], client=client, manual_overrides={}, known_urls={},
+                     thresholds={}, bookorbit_mode=False, rename=False, root_mode=False)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await pilot.press("enter")  # pick the candidate
+            await pilot.pause()
+            # The confirm form should be pre-filled with every value about
+            # to be written, not just series -- the actual feature.
+            screen = pilot.app.screen
+            assert screen.query_one("#title", Input).value == "Original Title"
+            assert screen.query_one("#publisher", Input).value == "Original Publisher"
+            assert screen.query_one("#series", Input).value == "Original Series"
+            assert screen.query_one("#description", TextArea).text == "Original description"
+            assert screen.query_one("#isbn", Input).value == "1234567890"
+            # Edit Title and Publisher before confirming.
+            screen.query_one("#title", Input).value = "Edited Title"
+            screen.query_one("#publisher", Input).value = "Edited Publisher"
+            await pilot.press("ctrl+s")
+            await pilot.pause(delay=0.2)
+
+        with pikepdf.open(pdf) as p:
+            with p.open_metadata() as m:
+                assert m.get("dc:title") == "Edited Title", m.get("dc:title")
+                assert m.get("dc:creator") == ["Edited Publisher"], m.get("dc:creator")
+    print("PASS: confirm_screen_edit_before_write")
+
+
+async def test_series_dialog_when_blank():
+    with tempfile.TemporaryDirectory() as tmp:
+        pdf = Path(tmp) / "NoSeries.pdf"
+        pikepdf.new().save(pdf)
+        client = _client(search_library=[ProductMetadata(
+            title="Standalone Book", description="d", source=Source.DTRPG_LIBRARY, product_id="1",
+        )])
+        app = TagApp(pdfs=[pdf], client=client, manual_overrides={}, known_urls={},
+                     thresholds={}, bookorbit_mode=False, rename=False, root_mode=False)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await pilot.press("enter")  # pick the only candidate
+            await pilot.pause()
+            assert "ConfirmScreen" in str(type(pilot.app.screen))
+            await pilot.press("ctrl+s")  # confirm with Series left blank
+            await pilot.pause()
+            # Series still blank after confirming -> a dedicated dialog,
+            # not just a silently-blank field, asks one more time.
+            assert "SeriesModal" in str(type(pilot.app.screen))
+            await pilot.click("#series")
+            await pilot.press(*"Typed Series")
+            await pilot.click("#continue")
+            await pilot.pause(delay=0.2)
+
+        with pikepdf.open(pdf) as p:
+            with p.open_metadata() as m:
+                raw = p.Root.Metadata.read_bytes().decode("utf-8")
+                assert "Typed Series" in raw, raw
+    print("PASS: series_dialog_when_blank")
 
 
 async def test_known_url_auto_write_no_screen():
@@ -147,6 +214,8 @@ async def test_manual_entry_multiline_description():
             await pilot.press("ctrl+s")
             await pilot.pause()
             await pilot.press("enter")  # the "About to write" confirm step
+            await pilot.pause()
+            await pilot.press("enter")  # series dialog -- leave blank
             await pilot.pause(delay=0.2)
 
         with pikepdf.open(pdf) as p:
@@ -172,6 +241,8 @@ async def test_empty_state_url_paste():
             await pilot.press("enter")
             await pilot.pause()
             await pilot.click("#confirm")
+            await pilot.pause()
+            await pilot.click("#continue")  # series dialog -- leave blank
             await pilot.pause(delay=0.2)
 
         with pikepdf.open(pdf) as p:
@@ -259,9 +330,11 @@ async def test_bookorbit_mode():
                      thresholds={}, bookorbit_mode=True, rename=False, root_mode=False)
         async with app.run_test() as pilot:
             await pilot.pause()
-            await pilot.press("enter")
+            await pilot.press("enter")  # pick candidate
             await pilot.pause()
-            await pilot.press("enter")
+            await pilot.press("enter")  # confirm
+            await pilot.pause()
+            await pilot.press("enter")  # series dialog -- leave blank
             await pilot.pause(delay=0.2)
 
         with pikepdf.open(pdf) as p:
@@ -271,7 +344,7 @@ async def test_bookorbit_mode():
     print("PASS: bookorbit_mode")
 
 
-async def test_batch_default_series_applied_silently():
+async def test_batch_default_series_prefilled():
     with tempfile.TemporaryDirectory() as tmp:
         pdf1 = Path(tmp) / "A.pdf"
         pdf2 = Path(tmp) / "B.pdf"
@@ -286,17 +359,18 @@ async def test_batch_default_series_applied_silently():
             await pilot.press(*"Shared Series")
             await pilot.click("#continue")
             await pilot.pause()
-            # File 1: pick candidate, confirm -- no series Input should be
-            # shown at all (needs_series_prompt False, applied silently).
-            assert len(pilot.app.screen.query("#series")) == 0
+            # File 1: pick candidate -- the confirm form's Series field
+            # should already be pre-filled with the batch answer, with
+            # nothing left to type (just editable if the user wants to).
             await pilot.press("enter")
             await pilot.pause()
+            assert pilot.app.screen.query_one("#series", Input).value == "Shared Series"
             await pilot.press("enter")
             await pilot.pause()
-            # File 2: same -- still no series prompt.
-            assert len(pilot.app.screen.query("#series")) == 0
+            # File 2: same.
             await pilot.press("enter")
             await pilot.pause()
+            assert pilot.app.screen.query_one("#series", Input).value == "Shared Series"
             await pilot.press("enter")
             await pilot.pause(delay=0.2)
 
@@ -304,12 +378,14 @@ async def test_batch_default_series_applied_silently():
             with pikepdf.open(pdf) as p:
                 raw = p.Root.Metadata.read_bytes().decode("utf-8")
                 assert "Shared Series" in raw, raw
-    print("PASS: batch_default_series_applied_silently")
+    print("PASS: batch_default_series_prefilled")
 
 
 TESTS = [
     test_candidate_pick_write,
     test_manual_override_confirm,
+    test_confirm_screen_edit_before_write,
+    test_series_dialog_when_blank,
     test_known_url_auto_write_no_screen,
     test_manual_entry_multiline_description,
     test_empty_state_url_paste,
@@ -317,7 +393,7 @@ TESTS = [
     test_quit_mid_batch_second_file_untouched,
     test_rename_flag,
     test_bookorbit_mode,
-    test_batch_default_series_applied_silently,
+    test_batch_default_series_prefilled,
 ]
 
 
