@@ -46,6 +46,8 @@ For each file it searches your library, then DriveThruRPG's public catalog, and 
 
 With `--root`, before the per-file loop starts you're asked once for a series name, with a hint that you can *"leave blank if all books are not in the same series."* Give a name and every later confirm screen's Series field comes pre-filled with it (still editable per book, just not blank by default); leave it blank and each book's confirm screen instead starts with whatever series that match already carries. (Files matched via `dtrpg_urls.csv`, below, never get a confirm screen either way, since that path is deliberately non-interactive end to end.)
 
+Once the run finishes (or you quit a batch early with `q`), the TUI closes itself automatically and prints a plain summary line for every file — no "press q to exit" screen to dismiss.
+
 Add `--rename` to tag and rename in one pass — right after each successful write, the file (and its `.opf`/`.metadata.json`/`.bak` siblings) is immediately renamed to `<series> - <title>.pdf`, the same result you'd get running `rename` on it afterward. Applies to every match path (candidate-pick, manual override, known URL, or manual entry); skipped for anything not actually written (a declined confirm, a cancelled manual entry, a failed write).
 
 ### Batch mode with a review step

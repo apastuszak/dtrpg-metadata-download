@@ -36,9 +36,12 @@ etc.) are shown as toast notifications (self.notify) rather than a
 persistent on-screen log -- Textual's screen stack fully occludes
 whatever's beneath a pushed screen, so a permanently-visible sidebar
 would fight the framework rather than use it. Every outcome line is
-also appended to self.history (a plain list) for tests and the final
-summary screen to inspect, so nothing is lost, just displayed
-differently than a naive port of the old print() calls would suggest.
+also appended to self.history (a plain list) for tests to inspect and
+for the final summary. The app quits itself the moment the run (or a
+mid-batch quit) is done -- no "press q to exit" screen -- and the same
+history is handed to App.exit(message=...), which Textual prints to
+the real terminal after it's torn down the alternate screen, not
+inside the TUI itself.
 """
 
 from __future__ import annotations
@@ -543,30 +546,6 @@ class ConfirmScreen(Screen[ConfirmResult]):
         self.dismiss(ConfirmResult(action="quit"))
 
 
-class SummaryScreen(Screen[None]):
-    """Shown once, after the last file (or after a mid-batch quit), so
-    the app doesn't just vanish the instant the last write finishes --
-    matches every other subcommand in this project ending with a printed
-    summary line (e.g. cmd_rename's "X renamed, Y skipped, Z failed")."""
-
-    BINDINGS = [Binding("q", "quit_app", "Quit")]
-
-    def __init__(self, lines: list[str]):
-        super().__init__()
-        self.lines = lines
-
-    def compose(self) -> ComposeResult:
-        yield Header()
-        with VerticalScroll():
-            yield Static("Run summary (press q to exit):")
-            for line in self.lines:
-                yield Static(line)
-        yield Footer()
-
-    def action_quit_app(self) -> None:
-        self.app.exit()
-
-
 # ---------------------------------------------------------------------------
 # App
 # ---------------------------------------------------------------------------
@@ -630,8 +609,8 @@ class TagApp(App[None]):
                 self._log("Stopped.")
                 break
 
-        await self.push_screen_wait(SummaryScreen(list(self.history)))
-        self.exit()
+        summary = "\n".join(["Run summary:", *self.history]) if self.history else "Run summary: nothing to report."
+        self.exit(message=summary)
 
     async def _process_one(self, path: Path, progress: str, default_series: str | None) -> bool:
         """Returns True if the user asked to stop the whole batch --
