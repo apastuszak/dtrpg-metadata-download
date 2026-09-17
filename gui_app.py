@@ -32,6 +32,7 @@ import os
 import queue
 import threading
 import tkinter as tk
+import webbrowser
 from collections import Counter
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -39,11 +40,27 @@ from tkinter import filedialog, messagebox, ttk
 from dtrpg_client import DtrpgClient
 from matcher import load_known_urls, load_manual_overrides, run_scan_batch, scan_pdfs
 from pdf_writer import write_approved
+from preferences import DEFAULT_PREFERENCES_PATH, Preferences, load_preferences, resolve_api_key, save_preferences
 from provenance import Status
 from renamer import apply_rename, plan_rename
 from review import ReviewRow, load_review, save_review
 
 POLL_MS = 50
+
+# Shared checkbox explanatory text -- defined once so WritePdfsTab/AllTab
+# (here) and TagTab (gui_tag_flow.py) can't drift apart on wording for the
+# same flag.
+BOOKORBIT_HINT = (
+    "Writes no metadata into the PDF itself -- only a BookOrbit sidecar (.opf) file next to it. "
+    "Use only if you actually use BookOrbit:"
+)
+BOOKORBIT_URL = "https://bookorbit.app/"
+CONVERT_IMAGES_HINT = (
+    "Converts all images in the PDF from CMYK to RGB, and all JPEG2000 images to JPEG. This can "
+    "speed up file rendering on slower hardware, and can fix an issue on macOS with missing images "
+    "in the PDF. This WILL increase the file size."
+)
+RENAME_HINT = "Renames the file after the metadata update, using the format: Series Name - Book Name.pdf"
 
 
 def build_client_safe(config: dict) -> DtrpgClient:
@@ -52,11 +69,12 @@ def build_client_safe(config: dict) -> DtrpgClient:
     key -- sys.exit() would kill the whole GUI process, not just the tab
     that needed a client. build_client() itself is untouched; every other
     subcommand still needs its sys.exit() behavior on a bare terminal."""
-    api_key = os.environ.get("DTRPG_API_KEY")
+    prefs = load_preferences(config.get("preferences", DEFAULT_PREFERENCES_PATH))
+    api_key = resolve_api_key(prefs)
     if not api_key:
         raise RuntimeError(
-            "DTRPG_API_KEY is not set. Generate an Application Key on your "
-            "DriveThruRPG account page and export it before launching the GUI."
+            "No DriveThruRPG API key found. Set it in the Preferences tab, or export "
+            "DTRPG_API_KEY in the environment before launching the GUI."
         )
     return DtrpgClient(
         api_key=api_key,
@@ -121,6 +139,30 @@ class UiTaskRunner:
                 self.on_done()
 
 
+def _make_description_label(parent: tk.Widget, text: str) -> ttk.Label:
+    """Short explanatory text at the top of a tab, saying what that tab
+    does -- default (not muted) text color, since it's the primary
+    orientation for the whole tab rather than a secondary caveat like
+    _make_hint_label() below."""
+    return ttk.Label(parent, text=text, wraplength=620, justify="left")
+
+
+def _make_hint_label(parent: tk.Widget, text: str) -> ttk.Label:
+    """Small muted explanatory text under a checkbox -- Tkinter Labels
+    don't auto-wrap, so wraplength is set explicitly (matches this
+    window's ~950px width minus padding)."""
+    return ttk.Label(parent, text=text, foreground="#666666", wraplength=620, justify="left")
+
+
+def _make_link_label(parent: tk.Widget, url: str) -> ttk.Label:
+    """A clickable link-styled Label that opens `url` in the system
+    browser -- ttk has no built-in hyperlink widget, so this fakes one
+    with a colored/underlined font and a click binding."""
+    label = ttk.Label(parent, text=url, foreground="#1a73e8", cursor="hand2", font=("TkDefaultFont", 9, "underline"))
+    label.bind("<Button-1>", lambda _e: webbrowser.open(url))
+    return label
+
+
 def _make_log_widget(parent: tk.Widget, row: int, columnspan: int) -> tk.Text:
     frame = ttk.Frame(parent)
     frame.grid(row=row, column=0, columnspan=columnspan, sticky="nsew", pady=(8, 0))
@@ -163,11 +205,11 @@ def _do_scan(
     return merged
 
 
-def _do_write_pdfs(log, rows: list[ReviewRow], root: str, bookorbit_mode: bool) -> None:
+def _do_write_pdfs(log, rows: list[ReviewRow], root: str, bookorbit_mode: bool, convert_images: bool = False) -> None:
     if not any(r.is_approved() for r in rows):
         log("No approved/auto-accepted rows to write.")
         return
-    results = write_approved(rows, root, bookorbit_mode=bookorbit_mode)
+    results = write_approved(rows, root, bookorbit_mode=bookorbit_mode, convert_images=convert_images, log=log)
     succeeded = sum(1 for r in results if r.success)
     log(f"Wrote metadata to {succeeded}/{len(results)} approved files")
     for r in results:
@@ -207,21 +249,28 @@ class ScanTab(ttk.Frame):
         self.refresh_var = tk.BooleanVar(value=False)
         self.apply_review_var = tk.BooleanVar(value=False)
 
-        ttk.Label(self, text="Root folder:").grid(row=0, column=0, sticky="w")
-        ttk.Entry(self, textvariable=self.root_var, width=50).grid(row=0, column=1, sticky="we")
-        ttk.Button(self, text="Browse...", command=self._browse).grid(row=0, column=2)
+        _make_description_label(
+            self,
+            "Matches every PDF under a folder against DriveThruRPG and writes the results to "
+            "review.csv -- never touches your PDFs directly. Approve matches here or in the "
+            "Review tab, then use Write PDFs (or All) to apply them.",
+        ).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 8))
+
+        ttk.Label(self, text="Root folder:").grid(row=1, column=0, sticky="w")
+        ttk.Entry(self, textvariable=self.root_var, width=50).grid(row=1, column=1, sticky="we")
+        ttk.Button(self, text="Browse...", command=self._browse).grid(row=1, column=2)
         ttk.Checkbutton(
             self, text="Refresh library (--refresh-library)", variable=self.refresh_var
-        ).grid(row=1, column=0, columnspan=3, sticky="w")
+        ).grid(row=2, column=0, columnspan=3, sticky="w")
         ttk.Checkbutton(
             self, text="Only match new files (--apply-review)", variable=self.apply_review_var
-        ).grid(row=2, column=0, columnspan=3, sticky="w")
+        ).grid(row=3, column=0, columnspan=3, sticky="w")
         self.run_button = ttk.Button(self, text="Run Scan", command=self._run)
-        self.run_button.grid(row=3, column=0, sticky="w", pady=(6, 0))
+        self.run_button.grid(row=4, column=0, sticky="w", pady=(6, 0))
 
-        self.log = _make_log_widget(self, row=4, columnspan=3)
+        self.log = _make_log_widget(self, row=5, columnspan=3)
         self.columnconfigure(1, weight=1)
-        self.rowconfigure(4, weight=1)
+        self.rowconfigure(5, weight=1)
         self.runner = UiTaskRunner(self, self.log, on_done=self._on_done)
 
     def _browse(self) -> None:
@@ -253,19 +302,35 @@ class WritePdfsTab(ttk.Frame):
         self.config_ = config
         self.root_var = tk.StringVar(value=config.get("root", ""))
         self.bookorbit_var = tk.BooleanVar(value=False)
+        self.convert_images_var = tk.BooleanVar(value=False)
 
-        ttk.Label(self, text="Root folder:").grid(row=0, column=0, sticky="w")
-        ttk.Entry(self, textvariable=self.root_var, width=50).grid(row=0, column=1, sticky="we")
-        ttk.Button(self, text="Browse...", command=self._browse).grid(row=0, column=2)
+        _make_description_label(
+            self,
+            "Writes metadata into every PDF whose review.csv row is approved or auto-accepted -- "
+            "this step never matches files itself. Run Scan (and approve rows in Review) first.",
+        ).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 8))
+
+        ttk.Label(self, text="Root folder:").grid(row=1, column=0, sticky="w")
+        ttk.Entry(self, textvariable=self.root_var, width=50).grid(row=1, column=1, sticky="we")
+        ttk.Button(self, text="Browse...", command=self._browse).grid(row=1, column=2)
+
         ttk.Checkbutton(
             self, text="BookOrbit mode (--bookorbit-mode)", variable=self.bookorbit_var
-        ).grid(row=1, column=0, columnspan=3, sticky="w")
-        self.run_button = ttk.Button(self, text="Write Approved PDFs", command=self._run)
-        self.run_button.grid(row=2, column=0, sticky="w", pady=(6, 0))
+        ).grid(row=2, column=0, columnspan=3, sticky="w")
+        _make_hint_label(self, BOOKORBIT_HINT).grid(row=3, column=0, columnspan=3, sticky="w", padx=(20, 0))
+        _make_link_label(self, BOOKORBIT_URL).grid(row=4, column=0, columnspan=3, sticky="w", padx=(20, 0))
 
-        self.log = _make_log_widget(self, row=3, columnspan=3)
+        ttk.Checkbutton(
+            self, text="Convert all images to RGB JPEG (--convert-images)", variable=self.convert_images_var
+        ).grid(row=5, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        _make_hint_label(self, CONVERT_IMAGES_HINT).grid(row=6, column=0, columnspan=3, sticky="w", padx=(20, 0))
+
+        self.run_button = ttk.Button(self, text="Write Approved PDFs", command=self._run)
+        self.run_button.grid(row=7, column=0, sticky="w", pady=(10, 0))
+
+        self.log = _make_log_widget(self, row=8, columnspan=3)
         self.columnconfigure(1, weight=1)
-        self.rowconfigure(3, weight=1)
+        self.rowconfigure(8, weight=1)
         self.runner = UiTaskRunner(self, self.log, on_done=self._on_done)
 
     def _browse(self) -> None:
@@ -280,11 +345,11 @@ class WritePdfsTab(ttk.Frame):
             return
         self.run_button.configure(state="disabled")
         review_csv = Path(self.config_.get("review_csv", "data/review.csv"))
-        self.runner.start(self._worker, review_csv, root, self.bookorbit_var.get())
+        self.runner.start(self._worker, review_csv, root, self.bookorbit_var.get(), self.convert_images_var.get())
 
-    def _worker(self, review_csv: Path, root: str, bookorbit_mode: bool) -> None:
+    def _worker(self, review_csv: Path, root: str, bookorbit_mode: bool, convert_images: bool) -> None:
         rows = load_review(review_csv)
-        _do_write_pdfs(self.runner.log, rows, root, bookorbit_mode)
+        _do_write_pdfs(self.runner.log, rows, root, bookorbit_mode, convert_images)
 
     def _on_done(self) -> None:
         self.run_button.configure(state="normal")
@@ -303,24 +368,31 @@ class RenameTab(ttk.Frame):
         # it first would silently only preview, never actually renaming.
         self.dry_run_var = tk.BooleanVar(value=False)
 
+        _make_description_label(
+            self,
+            "Renames an already-tagged PDF (and its .bak/.opf/.metadata.json sidecars) to "
+            '"Series Name - Book Name.pdf", using the title/series recorded in its '
+            ".metadata.json sidecar. Untagged or already-correctly-named files are skipped.",
+        ).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 8))
+
         ttk.Radiobutton(self, text="Single file", value="file", variable=self.mode_var).grid(
-            row=0, column=0, sticky="w"
+            row=1, column=0, sticky="w"
         )
         ttk.Radiobutton(self, text="Whole folder", value="root", variable=self.mode_var).grid(
-            row=0, column=1, sticky="w"
+            row=1, column=1, sticky="w"
         )
-        ttk.Entry(self, textvariable=self.path_var, width=50).grid(row=1, column=0, columnspan=2, sticky="we")
-        ttk.Button(self, text="Browse...", command=self._browse).grid(row=1, column=2)
+        ttk.Entry(self, textvariable=self.path_var, width=50).grid(row=2, column=0, columnspan=2, sticky="we")
+        ttk.Button(self, text="Browse...", command=self._browse).grid(row=2, column=2)
         ttk.Checkbutton(self, text="Dry run (preview only)", variable=self.dry_run_var).grid(
-            row=2, column=0, columnspan=3, sticky="w"
+            row=3, column=0, columnspan=3, sticky="w"
         )
         self.run_button = ttk.Button(self, text="Run Rename", command=self._run)
-        self.run_button.grid(row=3, column=0, sticky="w", pady=(6, 0))
+        self.run_button.grid(row=4, column=0, sticky="w", pady=(6, 0))
 
-        self.log = _make_log_widget(self, row=4, columnspan=3)
+        self.log = _make_log_widget(self, row=5, columnspan=3)
         self.columnconfigure(0, weight=1)
         self.columnconfigure(1, weight=1)
-        self.rowconfigure(4, weight=1)
+        self.rowconfigure(5, weight=1)
         self.runner = UiTaskRunner(self, self.log, on_done=self._on_done)
 
     def _browse(self) -> None:
@@ -376,25 +448,41 @@ class AllTab(ttk.Frame):
         self.refresh_var = tk.BooleanVar(value=False)
         self.apply_review_var = tk.BooleanVar(value=False)
         self.bookorbit_var = tk.BooleanVar(value=False)
+        self.convert_images_var = tk.BooleanVar(value=False)
 
-        ttk.Label(self, text="Root folder:").grid(row=0, column=0, sticky="w")
-        ttk.Entry(self, textvariable=self.root_var, width=50).grid(row=0, column=1, sticky="we")
-        ttk.Button(self, text="Browse...", command=self._browse).grid(row=0, column=2)
+        _make_description_label(
+            self,
+            "Runs Scan, then Write PDFs, in one pass -- still gated by review.csv status, so "
+            "anything left unapproved (needs-review/no-match) isn't written.",
+        ).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 8))
+
+        ttk.Label(self, text="Root folder:").grid(row=1, column=0, sticky="w")
+        ttk.Entry(self, textvariable=self.root_var, width=50).grid(row=1, column=1, sticky="we")
+        ttk.Button(self, text="Browse...", command=self._browse).grid(row=1, column=2)
         ttk.Checkbutton(
             self, text="Refresh library (--refresh-library)", variable=self.refresh_var
-        ).grid(row=1, column=0, columnspan=3, sticky="w")
-        ttk.Checkbutton(
-            self, text="Only match new files (--apply-review)", variable=self.apply_review_var
         ).grid(row=2, column=0, columnspan=3, sticky="w")
         ttk.Checkbutton(
-            self, text="BookOrbit mode (--bookorbit-mode)", variable=self.bookorbit_var
+            self, text="Only match new files (--apply-review)", variable=self.apply_review_var
         ).grid(row=3, column=0, columnspan=3, sticky="w")
-        self.run_button = ttk.Button(self, text="Run Scan + Write PDFs", command=self._run)
-        self.run_button.grid(row=4, column=0, sticky="w", pady=(6, 0))
 
-        self.log = _make_log_widget(self, row=5, columnspan=3)
+        ttk.Checkbutton(
+            self, text="BookOrbit mode (--bookorbit-mode)", variable=self.bookorbit_var
+        ).grid(row=4, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        _make_hint_label(self, BOOKORBIT_HINT).grid(row=5, column=0, columnspan=3, sticky="w", padx=(20, 0))
+        _make_link_label(self, BOOKORBIT_URL).grid(row=6, column=0, columnspan=3, sticky="w", padx=(20, 0))
+
+        ttk.Checkbutton(
+            self, text="Convert all images to RGB JPEG (--convert-images)", variable=self.convert_images_var
+        ).grid(row=7, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        _make_hint_label(self, CONVERT_IMAGES_HINT).grid(row=8, column=0, columnspan=3, sticky="w", padx=(20, 0))
+
+        self.run_button = ttk.Button(self, text="Run Scan + Write PDFs", command=self._run)
+        self.run_button.grid(row=9, column=0, sticky="w", pady=(10, 0))
+
+        self.log = _make_log_widget(self, row=10, columnspan=3)
         self.columnconfigure(1, weight=1)
-        self.rowconfigure(5, weight=1)
+        self.rowconfigure(10, weight=1)
         self.runner = UiTaskRunner(self, self.log, on_done=self._on_done)
 
     def _browse(self) -> None:
@@ -414,15 +502,16 @@ class AllTab(ttk.Frame):
         self.runner.start(
             self._worker, root, review_csv, manual_overrides_path, thresholds,
             self.refresh_var.get(), self.apply_review_var.get(), self.bookorbit_var.get(),
+            self.convert_images_var.get(),
         )
 
     def _worker(
         self, root: str, review_csv: Path, manual_overrides_path: Path, thresholds: dict,
-        refresh_library: bool, apply_review: bool, bookorbit_mode: bool,
+        refresh_library: bool, apply_review: bool, bookorbit_mode: bool, convert_images: bool,
     ) -> None:
         log = self.runner.log
         merged = _do_scan(self.config_, log, root, review_csv, manual_overrides_path, thresholds, refresh_library, apply_review)
-        _do_write_pdfs(log, merged, root, bookorbit_mode)
+        _do_write_pdfs(log, merged, root, bookorbit_mode, convert_images)
 
     def _on_done(self) -> None:
         self.run_button.configure(state="normal")
@@ -459,8 +548,15 @@ class ReviewTab(ttk.Frame):
         self._selected_filename: str | None = None
         self._editor: tk.Widget | None = None
 
+        _make_description_label(
+            self,
+            "Approve or edit matches from review.csv directly -- change a row's status, fix its "
+            "series, or edit its description -- then Save. Reload picks up a fresh Scan or an "
+            "external hand-edit.",
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
+
         toolbar = ttk.Frame(self)
-        toolbar.grid(row=0, column=0, columnspan=2, sticky="we")
+        toolbar.grid(row=1, column=0, columnspan=2, sticky="we")
         ttk.Button(toolbar, text="Reload", command=self.reload).pack(side="left")
         ttk.Button(toolbar, text="Save", command=self.save).pack(side="left", padx=(6, 0))
         self.counts_label = ttk.Label(toolbar, text="")
@@ -470,15 +566,15 @@ class ReviewTab(ttk.Frame):
         for col in self.GRID_COLUMNS:
             self.tree.heading(col, text=col)
             self.tree.column(col, width=100, stretch=True)
-        self.tree.grid(row=1, column=0, sticky="nsew")
+        self.tree.grid(row=2, column=0, sticky="nsew")
         tree_scroll = ttk.Scrollbar(self, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=tree_scroll.set)
-        tree_scroll.grid(row=1, column=1, sticky="ns")
+        tree_scroll.grid(row=2, column=1, sticky="ns")
         self.tree.bind("<Double-1>", self._begin_edit)
         self.tree.bind("<<TreeviewSelect>>", self._on_select)
 
         detail = ttk.LabelFrame(self, text="Details for selected row")
-        detail.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=(8, 0))
+        detail.grid(row=3, column=0, columnspan=2, sticky="nsew", pady=(8, 0))
         detail.columnconfigure(1, weight=1)
 
         self.detail_vars: dict[str, tk.StringVar] = {}
@@ -498,7 +594,7 @@ class ReviewTab(ttk.Frame):
         self.description_text.bind("<FocusOut>", lambda _e: self._commit_description())
 
         self.columnconfigure(0, weight=1)
-        self.rowconfigure(1, weight=1)
+        self.rowconfigure(2, weight=1)
 
         self.reload()
 
@@ -604,6 +700,55 @@ class ReviewTab(ttk.Frame):
             editor.bind("<<ComboboxSelected>>", commit)
 
 
+class PreferencesTab(ttk.Frame):
+    """Saved API key + DriveThruRPG name -- see preferences.py's module
+    docstring for why these live in their own gitignored, owner-only-
+    permissioned file rather than config.yaml. The API key field is
+    masked by default (a real secret), with a checkbox to reveal it,
+    matching preferences_tui.py's equivalent in the TUI."""
+
+    def __init__(self, parent: tk.Widget, config: dict):
+        super().__init__(parent, padding=10)
+        self.preferences_path = Path(config.get("preferences", str(DEFAULT_PREFERENCES_PATH)))
+        prefs = load_preferences(self.preferences_path)
+
+        _make_description_label(
+            self,
+            f"Your DriveThruRPG API key and account name, saved to {self.preferences_path} -- "
+            "not config.yaml, which is meant to be safe to share/commit. An existing "
+            "DTRPG_API_KEY environment variable always takes priority over what's saved here.",
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
+
+        self.api_key_var = tk.StringVar(value=prefs.api_key)
+        self.show_key_var = tk.BooleanVar(value=False)
+        self.name_var = tk.StringVar(value=prefs.dtrpg_name)
+
+        ttk.Label(self, text="API Key:").grid(row=1, column=0, sticky="w")
+        self.api_key_entry = ttk.Entry(self, textvariable=self.api_key_var, width=50, show="*")
+        self.api_key_entry.grid(row=1, column=1, sticky="we")
+        ttk.Checkbutton(
+            self, text="Show API key", variable=self.show_key_var, command=self._toggle_show
+        ).grid(row=2, column=1, sticky="w")
+
+        ttk.Label(self, text="DriveThruRPG Name:").grid(row=3, column=0, sticky="w", pady=(8, 0))
+        ttk.Entry(self, textvariable=self.name_var, width=50).grid(row=3, column=1, sticky="we", pady=(8, 0))
+
+        self.save_button = ttk.Button(self, text="Save Preferences", command=self._save)
+        self.save_button.grid(row=4, column=0, sticky="w", pady=(10, 0))
+        self.status_label = ttk.Label(self, text="")
+        self.status_label.grid(row=4, column=1, sticky="w", pady=(10, 0))
+
+        self.columnconfigure(1, weight=1)
+
+    def _toggle_show(self) -> None:
+        self.api_key_entry.configure(show="" if self.show_key_var.get() else "*")
+
+    def _save(self) -> None:
+        prefs = Preferences(api_key=self.api_key_var.get().strip(), dtrpg_name=self.name_var.get().strip())
+        save_preferences(prefs, self.preferences_path)
+        self.status_label.configure(text=f"Saved to {self.preferences_path}")
+
+
 class GuiApp(tk.Tk):
     def __init__(self, config: dict):
         super().__init__()
@@ -621,6 +766,7 @@ class GuiApp(tk.Tk):
         notebook.add(WritePdfsTab(notebook, config), text="Write PDFs")
         notebook.add(RenameTab(notebook, config), text="Rename")
         notebook.add(AllTab(notebook, config), text="All")
+        notebook.add(PreferencesTab(notebook, config), text="Preferences")
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 

@@ -8,6 +8,7 @@ root: /path/to/rpg/pdfs
 data_dir: data
 review_csv: data/review.csv
 manual_overrides: data/manual_overrides.yaml
+preferences: data/preferences.yaml   # your API key + DriveThruRPG name -- gitignored, never commit this file
 
 matching:
   high_confidence_threshold: 90.0

@@ -10,3 +10,4 @@ __pycache__/
 data/debug/
 data/library_cache.json
 data/catalog_cache.json
+data/preferences.yaml

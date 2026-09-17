@@ -12,7 +12,7 @@ export DTRPG_API_KEY=...   # an Application Key from your DriveThruRPG account p
 ./dtrpg-metadata-download.py --help
 ```
 
-The first run resolves and caches pikepdf/rapidfuzz/PyYAML/requests/lxml/textual automatically (a few seconds); every run after that is instant. No `.venv` directory, no `pip install` step, nothing to activate.
+The first run resolves and caches pikepdf/rapidfuzz/PyYAML/requests/lxml/textual/pymupdf/pillow automatically (a few seconds); every run after that is instant. No `.venv` directory, no `pip install` step, nothing to activate.
 
 Don't have `uv`? The classic path still works:
 
@@ -23,7 +23,7 @@ export DTRPG_API_KEY=...
 ./.venv/bin/python dtrpg-metadata-download.py --help
 ```
 
-Copy `config.yaml` and adjust `root` (and anything else) for your machine. It's meant to stay free of secrets — the API key only ever comes from the `DTRPG_API_KEY` environment variable.
+Copy `config.yaml` and adjust `root` (and anything else) for your machine. It's meant to stay free of secrets. The API key comes from `DTRPG_API_KEY` if it's set; otherwise, don't want to manage an environment variable? Run `./dtrpg-metadata-download.py preferences` (or use the Preferences tab in the GUI) to save it to `data/preferences.yaml` instead — gitignored and written with owner-only file permissions, but still a plaintext file on disk, a real (if smaller) step down from an environment variable that only ever lived in one shell session. `DTRPG_API_KEY` always wins over a saved preference if both are present.
 
 ## Usage
 
@@ -98,7 +98,9 @@ The `drivethrurpg_url` column accepts a full product URL, `id:PRODUCT_ID`, or a 
 ./dtrpg-metadata-download.py gui
 ```
 
-A Tkinter desktop window with a tab for every subcommand above — Tag (the same candidate-pick/manual-entry/confirm/series flow as the terminal UI, in dialog windows instead), Scan, Review (an editable table for `review.csv` — approve a row, tweak its series, edit its description — instead of opening it in a spreadsheet app), Write PDFs, Rename, and All. Long-running work happens in the background so the window stays responsive.
+A Tkinter desktop window with a tab for every subcommand above — Tag (the same candidate-pick/manual-entry/confirm/series flow as the terminal UI, in dialog windows instead), Scan, Review (an editable table for `review.csv` — approve a row, tweak its series, edit its description — instead of opening it in a spreadsheet app), Write PDFs, Rename, All, and Preferences (your API key and DriveThruRPG name — see Setup above). Long-running work happens in the background so the window stays responsive.
+
+The Tag, Write PDFs, and All tabs each have a **"Convert all images to RGB JPEG"** checkbox (`--convert-images` on the matching CLI subcommands) — see below.
 
 This needs a Python with Tk bindings, which is a system-level build feature — not a package `pip`/`uv` can install like every other dependency here. Most desktop Python installs (python.org installers, Homebrew, apt's `python3-tk`) already have it; if `gui` fails with a message about `tkinter`/`_tkinter`, it names the fix (try a different Python on your machine, or install Tk bindings for the one you're using).
 
@@ -134,6 +136,10 @@ Standard EPUB2/Calibre-style OPF, written next to the PDF. BookOrbit reads a sam
 #### `--bookorbit-mode`
 
 Available on `tag`, `write-pdfs`, and `all`. Instead of writing Calibre metadata into the PDF, this strips **all** PDF-level metadata — the full XMP packet and the classic Info dictionary, not just the fields this tool would otherwise write, since a leftover publisher-set `/Title` alone is enough for BookOrbit's embedded source to "win" — and writes the `.opf` sidecar (which is otherwise skipped, see above). The Grimmory `.metadata.json` sidecar is written either way; this flag only changes the embedded-PDF/`.opf` tradeoff for BookOrbit. Off by default — re-tagging a file with the flag now on top of a previous non-`--bookorbit-mode` write correctly wipes whatever Calibre metadata that earlier write left behind, and conversely, re-tagging *without* the flag after a previous `--bookorbit-mode` write deletes the stale `.opf` rather than leaving it behind with the old match's data.
+
+#### `--convert-images`
+
+Available on `tag`, `write-pdfs`, and `all` (and as a checkbox in the GUI's Tag/Write PDFs/All tabs). Converts every CMYK, grayscale, and JPEG2000 (JPX) image in the PDF to standard RGB JPEG before metadata is written — useful for PDFs from print workflows, which often carry CMYK images and/or JPX compression that some readers (notably Apple's PDF renderer on macOS/iOS) handle poorly, showing images as missing or wrong-colored. Indexed/palette images (diagrams, pixel art) are kept lossless rather than run through JPEG, which would blur their sharp edges. CMYK images without their own embedded color profile are re-tagged with a real CMYK ICC profile first (macOS only — falls back to a plain conversion elsewhere), and converted images get an explicit sRGB profile rather than bare `/DeviceRGB`, both aimed at avoiding the color casts a naive conversion produces in some readers. Runs before metadata is written, never after, so it can't disturb the Calibre-specific XMP structure `--bookorbit-mode`'s sibling section above already went through the trouble of getting right. Off by default; ported from a separate tool ([mac-pdf-rgb-fix](https://github.com/apastuszak/mac-pdf-rgb-fix)) built specifically for this problem.
 
 ### 3. `<name>.metadata.json` — Grimmory sidecar
 

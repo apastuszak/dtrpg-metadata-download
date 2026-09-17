@@ -90,11 +90,13 @@ import logging
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 import pikepdf
 from lxml import etree
 from lxml.etree import QName
 
+from image_converter import convert_images_to_rgb
 from review import ReviewRow
 from sidecar_writer import _split_isbn, write_bookorbit_opf, write_grimmory_sidecar
 
@@ -217,7 +219,23 @@ def _backup(path: Path) -> Path:
     return backup_path
 
 
-def write_metadata(path: Path, row: ReviewRow, bookorbit_mode: bool = False) -> WriteResult:
+def write_metadata(
+    path: Path,
+    row: ReviewRow,
+    bookorbit_mode: bool = False,
+    convert_images: bool = False,
+    log: Callable[[str], None] | None = None,
+) -> WriteResult:
+    """`log`, if given, is called with human-readable progress lines for
+    the image-conversion step specifically -- separate from this
+    function's own `logger.info()`/`logger.warning()` calls, which cover
+    the plain CLI (visible by default; TextualHandler routes them to
+    stderr there since no Textual app is active) but never reach the
+    TUI's or GUI's own visible log/notification surfaces, which have no
+    connection to Python's logging module at all. Without an explicit
+    "starting" message here, --convert-images on a PDF with many images
+    can run for a while with nothing visible happening in either UI,
+    which looks indistinguishable from a hang."""
     if not path.exists():
         return WriteResult(path.name, False, "file not found")
 
@@ -225,6 +243,30 @@ def write_metadata(path: Path, row: ReviewRow, bookorbit_mode: bool = False) -> 
         _backup(path)
     except OSError as exc:
         return WriteResult(path.name, False, f"backup failed: {exc}")
+
+    if convert_images:
+        # Deliberately runs before pikepdf ever opens the file below --
+        # see image_converter.py's module docstring for why this must not
+        # happen *after* pikepdf's metadata write. Best-effort: a failure
+        # here is logged and the metadata write still proceeds, matching
+        # the sidecar-failure convention elsewhere in this function
+        # (losing one piece must not fail a write that could otherwise
+        # succeed).
+        logger.info("Converting images in %s...", path.name)
+        if log is not None:
+            log(f"Converting images in {path.name}...")
+        result = convert_images_to_rgb(path)
+        if not result.success:
+            logger.warning("Image conversion failed for %s: %s", path.name, result.message)
+            if log is not None:
+                log(f"Image conversion failed for {path.name}: {result.message}")
+        else:
+            logger.info(
+                "Converted %d image(s) to RGB JPEG in %s (%d already fine/skipped)",
+                result.converted, path.name, result.skipped,
+            )
+            if log is not None:
+                log(f"Converted {result.converted} image(s) in {path.name} ({result.skipped} already fine/skipped)")
 
     try:
         with pikepdf.open(path, allow_overwriting_input=True) as pdf:
@@ -361,7 +403,13 @@ def _write_embedded_metadata(pdf: pikepdf.Pdf, path: Path, row: ReviewRow) -> No
     pdf.save(path)
 
 
-def write_approved(rows: list[ReviewRow], root: str | Path, bookorbit_mode: bool = False) -> list[WriteResult]:
+def write_approved(
+    rows: list[ReviewRow],
+    root: str | Path,
+    bookorbit_mode: bool = False,
+    convert_images: bool = False,
+    log: Callable[[str], None] | None = None,
+) -> list[WriteResult]:
     root = Path(root)
     results: list[WriteResult] = []
     for row in rows:
@@ -371,7 +419,9 @@ def write_approved(rows: list[ReviewRow], root: str | Path, bookorbit_mode: bool
         if not matches:
             results.append(WriteResult(row.filename, False, "file not found under root"))
             continue
-        results.append(write_metadata(matches[0], row, bookorbit_mode=bookorbit_mode))
+        results.append(
+            write_metadata(matches[0], row, bookorbit_mode=bookorbit_mode, convert_images=convert_images, log=log)
+        )
 
     succeeded = sum(1 for r in results if r.success)
     logger.info("Wrote metadata to %d/%d approved files", succeeded, len(results))

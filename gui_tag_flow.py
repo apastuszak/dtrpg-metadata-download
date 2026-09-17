@@ -62,7 +62,18 @@ from tag_tui import (
     resolve_series,
 )
 
-from gui_app import POLL_MS, _make_log_widget, build_client_safe
+from gui_app import (
+    BOOKORBIT_HINT,
+    BOOKORBIT_URL,
+    CONVERT_IMAGES_HINT,
+    POLL_MS,
+    RENAME_HINT,
+    _make_description_label,
+    _make_hint_label,
+    _make_link_label,
+    _make_log_widget,
+    build_client_safe,
+)
 
 # ---------------------------------------------------------------------------
 # Orchestration -- runs on a background thread
@@ -89,6 +100,7 @@ class TagFlowController:
         request_queue: "queue.Queue",
         log,
         stop_event: threading.Event,
+        convert_images: bool = False,
     ):
         self.pdfs = pdfs
         self.client = client
@@ -96,6 +108,7 @@ class TagFlowController:
         self.known_urls = known_urls
         self.thresholds = thresholds
         self.bookorbit_mode = bookorbit_mode
+        self.convert_images = convert_images
         self.rename = rename
         self.root_mode = root_mode
         self.request_queue = request_queue
@@ -248,7 +261,14 @@ class TagFlowController:
         return replace(meta, series=series) if series else meta
 
     def _write_and_maybe_rename(self, path: Path, row: ReviewRow) -> None:
-        result = write_metadata(path, row, bookorbit_mode=self.bookorbit_mode)
+        # Unlike tag_tui.py's TagApp, this controller already runs
+        # entirely on its own single worker thread (no further threading
+        # inside write_metadata()), and self._log() only appends to a
+        # plain list and puts onto a thread-safe queue.Queue -- safe to
+        # call directly here with no marshaling back to the main thread.
+        result = write_metadata(
+            path, row, bookorbit_mode=self.bookorbit_mode, convert_images=self.convert_images, log=self._log
+        )
         self._log(f"Wrote metadata to {path.name}" if result.success else f"FAILED: {result.message}")
         if result.success and self.rename:
             outcome = do_rename(path)
@@ -327,7 +347,9 @@ def show_candidate_dialog(parent: tk.Misc, payload: dict) -> CandidateResult:
 
     listbox: tk.Listbox | None = None
     if candidates:
-        ttk.Label(dialog, text=f"{progress} Candidates for {path.name}:".strip()).pack(anchor="w", padx=10, pady=(10, 0))
+        ttk.Label(
+            dialog, text=f"{progress} Choose a Book from the List Provided ({path.name}):".strip()
+        ).pack(anchor="w", padx=10, pady=(10, 0))
         listbox = tk.Listbox(dialog, height=10)
         for meta, score in candidates:
             listbox.insert("end", format_candidate_lines(meta, score).splitlines()[0])
@@ -625,25 +647,44 @@ class TagTab(ttk.Frame):
         self.mode_var = tk.StringVar(value="root")
         self.path_var = tk.StringVar(value=config.get("root", ""))
         self.bookorbit_var = tk.BooleanVar(value=False)
+        self.convert_images_var = tk.BooleanVar(value=False)
         self.rename_var = tk.BooleanVar(value=False)
 
-        ttk.Radiobutton(self, text="Single file", value="file", variable=self.mode_var).grid(row=0, column=0, sticky="w")
-        ttk.Radiobutton(self, text="Whole folder", value="root", variable=self.mode_var).grid(row=0, column=1, sticky="w")
-        ttk.Entry(self, textvariable=self.path_var, width=50).grid(row=1, column=0, columnspan=2, sticky="we")
-        ttk.Button(self, text="Browse...", command=self._browse).grid(row=1, column=2)
-        ttk.Checkbutton(self, text="BookOrbit mode (--bookorbit-mode)", variable=self.bookorbit_var).grid(
-            row=2, column=0, columnspan=3, sticky="w"
-        )
-        ttk.Checkbutton(self, text="Rename after write (--rename)", variable=self.rename_var).grid(
-            row=3, column=0, columnspan=3, sticky="w"
-        )
-        self.start_button = ttk.Button(self, text="Start", command=self._start)
-        self.start_button.grid(row=4, column=0, sticky="w", pady=(6, 0))
+        _make_description_label(
+            self,
+            "Match and tag PDF(s) interactively -- choose a book from the list provided, enter "
+            "metadata by hand, or paste a known URL, then confirm each one before it's written. "
+            "Works on a single file or every PDF in a folder; no review.csv involved.",
+        ).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 8))
 
-        self.log_widget = _make_log_widget(self, row=5, columnspan=3)
+        ttk.Radiobutton(self, text="Single file", value="file", variable=self.mode_var).grid(row=1, column=0, sticky="w")
+        ttk.Radiobutton(self, text="Whole folder", value="root", variable=self.mode_var).grid(row=1, column=1, sticky="w")
+        ttk.Entry(self, textvariable=self.path_var, width=50).grid(row=2, column=0, columnspan=2, sticky="we")
+        ttk.Button(self, text="Browse...", command=self._browse).grid(row=2, column=2)
+
+        ttk.Checkbutton(self, text="BookOrbit mode (--bookorbit-mode)", variable=self.bookorbit_var).grid(
+            row=3, column=0, columnspan=3, sticky="w", pady=(6, 0)
+        )
+        _make_hint_label(self, BOOKORBIT_HINT).grid(row=4, column=0, columnspan=3, sticky="w", padx=(20, 0))
+        _make_link_label(self, BOOKORBIT_URL).grid(row=5, column=0, columnspan=3, sticky="w", padx=(20, 0))
+
+        ttk.Checkbutton(
+            self, text="Convert all images to RGB JPEG (--convert-images)", variable=self.convert_images_var
+        ).grid(row=6, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        _make_hint_label(self, CONVERT_IMAGES_HINT).grid(row=7, column=0, columnspan=3, sticky="w", padx=(20, 0))
+
+        ttk.Checkbutton(self, text="Rename after write (--rename)", variable=self.rename_var).grid(
+            row=8, column=0, columnspan=3, sticky="w", pady=(6, 0)
+        )
+        _make_hint_label(self, RENAME_HINT).grid(row=9, column=0, columnspan=3, sticky="w", padx=(20, 0))
+
+        self.start_button = ttk.Button(self, text="Start", command=self._start)
+        self.start_button.grid(row=10, column=0, sticky="w", pady=(10, 0))
+
+        self.log_widget = _make_log_widget(self, row=11, columnspan=3)
         self.columnconfigure(0, weight=1)
         self.columnconfigure(1, weight=1)
-        self.rowconfigure(5, weight=1)
+        self.rowconfigure(11, weight=1)
 
         self.request_queue: queue.Queue = queue.Queue()
         self.log_queue: queue.Queue = queue.Queue()
@@ -706,6 +747,7 @@ class TagTab(ttk.Frame):
             pdfs=pdfs, client=client, manual_overrides=manual_overrides, known_urls=known_urls,
             thresholds=thresholds, bookorbit_mode=self.bookorbit_var.get(), rename=self.rename_var.get(),
             root_mode=root_mode, request_queue=self.request_queue, log=self._log_line, stop_event=self.stop_event,
+            convert_images=self.convert_images_var.get(),
         )
         self.start_button.configure(state="disabled")
         self._thread = threading.Thread(target=controller.run, daemon=True)

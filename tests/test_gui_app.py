@@ -8,6 +8,8 @@
 #     "requests>=2.31",
 #     "lxml>=4.9",
 #     "textual>=0.60",
+#     "pymupdf>=1.24",
+#     "pillow>=10.0",
 # ]
 # ///
 """Smoke tests for gui_app.py/gui_tag_flow.py -- a scoped exception to

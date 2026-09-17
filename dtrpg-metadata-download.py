@@ -8,6 +8,8 @@
 #     "requests>=2.31",
 #     "lxml>=4.9",
 #     "textual>=0.60",
+#     "pymupdf>=1.24",
+#     "pillow>=10.0",
 # ]
 # ///
 """CLI entry point for the RPG PDF metadata pipeline.
@@ -67,6 +69,13 @@
         normally does — see pdf_writer.py). The Grimmory .metadata.json
         sidecar is unaffected either way.
 
+    --convert-images (on write-pdfs/all/tag): converts every CMYK/
+        grayscale/JPEG2000 image in the PDF to RGB JPEG before metadata
+        is written (see image_converter.py). Off by default. Runs before
+        the embedded-metadata write, never after, so PyMuPDF's save
+        (a different library from pikepdf) can't disturb the Calibre XMP
+        pikepdf writes.
+
     rename PDF_PATH | rename --root PATH [--dry-run]
         Rename a single already-tagged PDF, or every one under --root
         (plus its .bak/.opf/.metadata.json sidecars), to
@@ -84,9 +93,20 @@
         manager (uv/pip) controls — if it's missing, a clear error names
         the fix rather than raising a raw traceback.
 
+    preferences
+        View/edit your saved DriveThruRPG API key and account name (a
+        small Textual app, see preferences_tui.py) — also reachable from
+        the GUI's own Preferences tab. Saved to data/preferences.yaml,
+        gitignored and file-permissioned to your account only, kept
+        separate from config.yaml specifically because that file is
+        meant to be safe to share/commit and this one isn't. An existing
+        DTRPG_API_KEY environment variable always takes priority over
+        what's saved here.
+
 Config defaults (root, thresholds, cache locations) come from
-config.yaml; CLI flags override them. DTRPG_API_KEY must be set in the
-environment (an Application Key from the DriveThruRPG account page).
+config.yaml; CLI flags override them. The DriveThruRPG API key comes
+from DTRPG_API_KEY in the environment, or from `preferences` (above) if
+that's not set.
 """
 
 from __future__ import annotations
@@ -104,6 +124,7 @@ from textual.logging import TextualHandler
 from dtrpg_client import DtrpgClient
 from matcher import load_known_urls, load_manual_overrides, run_scan_batch, scan_pdfs
 from pdf_writer import write_approved
+from preferences import DEFAULT_PREFERENCES_PATH, load_preferences, resolve_api_key
 from renamer import apply_rename, plan_rename
 from review import load_review, save_review
 from tag_tui import TagApp
@@ -120,11 +141,14 @@ def load_config(path: Path) -> dict:
 
 
 def build_client(config: dict) -> DtrpgClient:
-    api_key = os.environ.get("DTRPG_API_KEY")
+    prefs = load_preferences(config.get("preferences", DEFAULT_PREFERENCES_PATH))
+    api_key = resolve_api_key(prefs)
     if not api_key:
-        sys.exit("DTRPG_API_KEY is not set. Generate an Application Key on your "
-                 "DriveThruRPG account page and export it, e.g.:\n"
-                 "  export DTRPG_API_KEY=...")
+        sys.exit("No DriveThruRPG API key found. Either export DTRPG_API_KEY "
+                 "(an Application Key from your DriveThruRPG account page), e.g.:\n"
+                 "  export DTRPG_API_KEY=...\n"
+                 "or save one with:\n"
+                 "  ./dtrpg-metadata-download.py preferences")
     return DtrpgClient(
         api_key=api_key,
         cache_dir=config.get("data_dir", "data"),
@@ -189,7 +213,7 @@ def cmd_write_pdfs(args: argparse.Namespace, config: dict) -> None:
         print("No approved/auto-accepted rows to write.")
         return
 
-    results = write_approved(rows, root, bookorbit_mode=args.bookorbit_mode)
+    results = write_approved(rows, root, bookorbit_mode=args.bookorbit_mode, convert_images=args.convert_images)
     succeeded = sum(1 for r in results if r.success)
     print(f"Wrote metadata to {succeeded}/{len(results)} approved files")
     for r in results:
@@ -285,6 +309,7 @@ def cmd_tag(args: argparse.Namespace, config: dict) -> None:
         known_urls=known_urls,
         thresholds=thresholds,
         bookorbit_mode=args.bookorbit_mode,
+        convert_images=args.convert_images,
         rename=args.rename,
         root_mode=bool(args.root),
     ).run()
@@ -322,6 +347,18 @@ def cmd_gui(args: argparse.Namespace, config: dict) -> None:
     gui_app.run_gui(config)
 
 
+def cmd_preferences(args: argparse.Namespace, config: dict) -> None:
+    """Launch a small Textual app (preferences_tui.py) to view/edit the
+    saved API key and DriveThruRPG name -- see preferences.py's module
+    docstring for why these live in their own gitignored file rather
+    than config.yaml. No DTRPG_API_KEY/build_client() guard here, unlike
+    every other subcommand -- this one exists specifically to let you set
+    that up in the first place."""
+    from preferences_tui import PreferencesApp
+
+    PreferencesApp(Path(config.get("preferences", DEFAULT_PREFERENCES_PATH))).run()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="RPG PDF metadata pipeline")
     parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH), help="Path to config.yaml")
@@ -343,11 +380,15 @@ def main() -> None:
         "Strip all PDF-level metadata instead of writing Calibre metadata, "
         "and write the BookOrbit .opf sidecar (skipped otherwise)"
     )
+    convert_images_help = (
+        "Convert CMYK/grayscale/JPEG2000 images in the PDF to RGB JPEG before writing metadata"
+    )
 
     write_parser = subparsers.add_parser("write-pdfs", help="Write approved metadata into PDFs")
     write_parser.add_argument("--root", help="Root folder of RPG PDFs (overrides config.yaml)")
     write_parser.add_argument("--review-csv", help="Path to review.csv (overrides config.yaml)")
     write_parser.add_argument("--bookorbit-mode", action="store_true", help=bookorbit_mode_help)
+    write_parser.add_argument("--convert-images", action="store_true", help=convert_images_help)
     write_parser.set_defaults(func=cmd_write_pdfs)
 
     all_parser = subparsers.add_parser("all", help="Run scan, then write-pdfs")
@@ -356,6 +397,7 @@ def main() -> None:
     all_parser.add_argument("--refresh-library", action="store_true")
     all_parser.add_argument("--apply-review", action="store_true")
     all_parser.add_argument("--bookorbit-mode", action="store_true", help=bookorbit_mode_help)
+    all_parser.add_argument("--convert-images", action="store_true", help=convert_images_help)
     all_parser.set_defaults(func=cmd_all)
 
     tag_parser = subparsers.add_parser("tag", help="Match and tag PDF(s) interactively, no review.csv")
@@ -363,6 +405,7 @@ def main() -> None:
     tag_group.add_argument("pdf", nargs="?", help="Path to a single PDF file to match and tag")
     tag_group.add_argument("--root", help="Process every PDF under this directory instead of a single file")
     tag_parser.add_argument("--bookorbit-mode", action="store_true", help=bookorbit_mode_help)
+    tag_parser.add_argument("--convert-images", action="store_true", help=convert_images_help)
     tag_parser.add_argument(
         "--rename", action="store_true",
         help="Also rename the file (and its sidecars) to 'Series - Title' immediately after a successful write",
@@ -380,6 +423,11 @@ def main() -> None:
         "gui", help="Launch the desktop GUI (Tkinter), covering every subcommand above"
     )
     gui_parser.set_defaults(func=cmd_gui)
+
+    preferences_parser = subparsers.add_parser(
+        "preferences", help="View/edit your saved DriveThruRPG API key and account name"
+    )
+    preferences_parser.set_defaults(func=cmd_preferences)
 
     args = parser.parse_args()
     # TextualHandler routes to the active Textual app's own log (instead of

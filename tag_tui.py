@@ -311,7 +311,7 @@ class CandidateScreen(Screen[CandidateResult]):
         yield Header()
         with VerticalScroll():
             if self.candidates:
-                yield Label(f"{self.progress} -- Candidates for {self.path.name}:")
+                yield Label(f"{self.progress} -- Choose a Book from the List Provided ({self.path.name}):")
                 yield OptionList(
                     *[
                         Option(format_candidate_lines(meta, score), id=str(i))
@@ -581,6 +581,7 @@ class TagApp(App[None]):
         bookorbit_mode: bool,
         rename: bool,
         root_mode: bool,
+        convert_images: bool = False,
     ):
         super().__init__()
         self.pdfs = pdfs
@@ -589,6 +590,7 @@ class TagApp(App[None]):
         self.known_urls = known_urls
         self.thresholds = thresholds
         self.bookorbit_mode = bookorbit_mode
+        self.convert_images = convert_images
         self.rename = rename
         self.root_mode = root_mode
         self.history: list[str] = []
@@ -735,7 +737,21 @@ class TagApp(App[None]):
         return replace(meta, series=series) if series else meta
 
     async def _write_and_maybe_rename(self, path: Path, row: ReviewRow) -> None:
-        result = await self._call(write_metadata, path, row, bookorbit_mode=self.bookorbit_mode)
+        # write_metadata() (and the image conversion inside it) runs on a
+        # worker thread via self._call() below -- self.notify()/self.history
+        # aren't safe to touch from a thread that isn't the app's own event
+        # loop, so this log callback marshals back via call_from_thread()
+        # (verified with a throwaway script: a plain background thread
+        # calling self.call_from_thread(self._log, line) correctly lands in
+        # self.history with no crash/hang) rather than calling self._log
+        # directly from inside write_metadata's thread.
+        def log_line(line: str) -> None:
+            self.call_from_thread(self._log, line)
+
+        result = await self._call(
+            write_metadata, path, row, bookorbit_mode=self.bookorbit_mode, convert_images=self.convert_images,
+            log=log_line,
+        )
         self._log(f"Wrote metadata to {path.name}" if result.success else f"FAILED: {result.message}")
         if result.success and self.rename:
             outcome = await self._call(do_rename, path)
