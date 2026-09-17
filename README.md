@@ -27,6 +27,8 @@ Copy `config.yaml` and adjust `root` (and anything else) for your machine. It's 
 
 ## Usage
 
+Prefer a window over the terminal? `./dtrpg-metadata-download.py gui` launches a desktop GUI covering everything below in one place — see "Desktop GUI" further down. Everything else in this section describes the terminal/CLI paths.
+
 The primary workflow is `tag` — a full-screen terminal UI (built with [Textual](https://textual.textualize.io/)), no review step, writes immediately on confirm:
 
 ```bash
@@ -40,7 +42,7 @@ The primary workflow is `tag` — a full-screen terminal UI (built with [Textual
 For each file it searches your library, then DriveThruRPG's public catalog, and shows a screen of ranked candidates:
 
 - **Arrow keys + Enter** to pick a candidate — this opens a confirm screen pre-filled with every value about to be written (title, publisher, series, series index, description, tags, ISBN, product URL), so anything DriveThruRPG got wrong or left out can be corrected right there before it's saved; press `ctrl+s` or click Confirm to write, Escape to skip, `q` to quit the batch. If the series is still blank after confirming, a small dialog asks for one before writing — leave it blank for no series.
-- A text field to **paste a DriveThruRPG URL, or type `id:PRODUCT_ID`**, for a direct lookup — useful when the right book doesn't show up in the candidates at all (DriveThruRPG's search requires query words to literally match the title text, so it can miss real matches; see Known quirks below). This field is shown even when *no* candidates were found at all, so pasting a known link is never unavailable.
+- A text field to **paste a DriveThruRPG URL, or type `id:PRODUCT_ID`**, for a direct lookup — useful when the right book doesn't show up in the candidates at all (DriveThruRPG's search requires query words to literally match the title text, so it can miss real matches; see Known quirks below). This field is shown even when *no* candidates were found at all, so pasting a known link is never unavailable. Press Enter or click **Use URL** to submit it — Use URL is a separate button from picking a candidate, so pasting a link and clicking it always uses that link, never whatever's highlighted in the candidate list above.
 - **`m`** opens a manual-entry form — title/publisher/series/series index/tags/ISBN/product URL as single-line fields, plus a real **multi-line text area for Description** — for a title DriveThruRPG doesn't sell at all, without pre-editing `data/manual_overrides.yaml` first. Leaving Title blank and pressing Escape cancels back out. Submitting still goes through the same editable confirm screen as a candidate pick, as one last chance to fix a typo before writing.
 - **Escape** skips the file, **`q`** stops the whole batch early without touching the rest.
 
@@ -89,6 +91,16 @@ Some Other Book.pdf,id:12345
 ```
 
 The `drivethrurpg_url` column accepts a full product URL, `id:PRODUCT_ID`, or a bare product ID. Both `tag` and `scan` check it next (after manual overrides, before search) — full metadata is fetched live from DriveThruRPG, so you only ever need to supply the filename and the URL, nothing else. Matches from this file are auto-approved with no confirmation prompt, even in `tag`; if a listed product ID can't be fetched (typo, delisted, etc.), that file falls back to normal search instead of failing outright.
+
+### Desktop GUI
+
+```bash
+./dtrpg-metadata-download.py gui
+```
+
+A Tkinter desktop window with a tab for every subcommand above — Tag (the same candidate-pick/manual-entry/confirm/series flow as the terminal UI, in dialog windows instead), Scan, Review (an editable table for `review.csv` — approve a row, tweak its series, edit its description — instead of opening it in a spreadsheet app), Write PDFs, Rename, and All. Long-running work happens in the background so the window stays responsive.
+
+This needs a Python with Tk bindings, which is a system-level build feature — not a package `pip`/`uv` can install like every other dependency here. Most desktop Python installs (python.org installers, Homebrew, apt's `python3-tk`) already have it; if `gui` fails with a message about `tkinter`/`_tkinter`, it names the fix (try a different Python on your machine, or install Tk bindings for the one you're using).
 
 ## What gets written
 

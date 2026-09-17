@@ -251,6 +251,36 @@ async def test_empty_state_url_paste():
     print("PASS: empty_state_url_paste")
 
 
+async def test_use_url_button_with_candidates_present():
+    with tempfile.TemporaryDirectory() as tmp:
+        pdf = Path(tmp) / "Book.pdf"
+        pikepdf.new().save(pdf)
+        # A real candidate is shown AND highlighted -- pasting a URL and
+        # clicking "Use URL" (rather than pressing Enter, or clicking
+        # Pick) must use the pasted URL, not the highlighted candidate.
+        client = _client(
+            search_library=[ProductMetadata(title="Wrong Candidate", source=Source.DTRPG_LIBRARY, product_id="1")],
+            get_product=ProductMetadata(title="Via URL Button", source=Source.DTRPG_CATALOG, product_id="42"),
+        )
+        app = TagApp(pdfs=[pdf], client=client, manual_overrides={}, known_urls={},
+                     thresholds={}, bookorbit_mode=False, rename=False, root_mode=False)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await pilot.click("#url")
+            await pilot.press(*"id:42")
+            await pilot.click("#use_url")
+            await pilot.pause()
+            await pilot.click("#confirm")
+            await pilot.pause()
+            await pilot.click("#continue")  # series dialog -- leave blank
+            await pilot.pause(delay=0.2)
+
+        with pikepdf.open(pdf) as p:
+            with p.open_metadata() as m:
+                assert m.get("dc:title") == "Via URL Button", m.get("dc:title")
+    print("PASS: use_url_button_with_candidates_present")
+
+
 async def test_skip():
     with tempfile.TemporaryDirectory() as tmp:
         pdf = Path(tmp) / "Skip.pdf"
@@ -389,6 +419,7 @@ TESTS = [
     test_known_url_auto_write_no_screen,
     test_manual_entry_multiline_description,
     test_empty_state_url_paste,
+    test_use_url_button_with_candidates_present,
     test_skip,
     test_quit_mid_batch_second_file_untouched,
     test_rename_flag,

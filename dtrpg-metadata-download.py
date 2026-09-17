@@ -77,6 +77,13 @@
         with a warning rather than overwritten. --dry-run previews
         without renaming anything.
 
+    gui
+        Launch a desktop GUI (Tkinter, see gui_app.py/gui_tag_flow.py)
+        covering every subcommand above in one window. Requires a Python
+        with Tk bindings, a system-level build feature no dependency
+        manager (uv/pip) controls — if it's missing, a clear error names
+        the fix rather than raising a raw traceback.
+
 Config defaults (root, thresholds, cache locations) come from
 config.yaml; CLI flags override them. DTRPG_API_KEY must be set in the
 environment (an Application Key from the DriveThruRPG account page).
@@ -95,10 +102,10 @@ import yaml
 from textual.logging import TextualHandler
 
 from dtrpg_client import DtrpgClient
-from matcher import load_known_urls, load_manual_overrides, match_file, scan_pdfs
+from matcher import load_known_urls, load_manual_overrides, run_scan_batch, scan_pdfs
 from pdf_writer import write_approved
 from renamer import apply_rename, plan_rename
-from review import load_review, merge_by_filename, save_review
+from review import load_review, save_review
 from tag_tui import TagApp
 
 logger = logging.getLogger("dtrpg-metadata-download")
@@ -141,28 +148,15 @@ def cmd_scan(args: argparse.Namespace, config: dict) -> None:
     manual_overrides = load_manual_overrides(manual_overrides_path)
     known_urls = load_known_urls(root)
     existing_rows = load_review(review_csv)
-    existing_filenames = {row.filename for row in existing_rows}
 
-    pdfs = scan_pdfs(root)
     if args.apply_review:
-        pdfs = [p for p in pdfs if p.name not in existing_filenames]
-        logger.info("--apply-review: matching only %d new file(s) not already in review.csv", len(pdfs))
+        logger.info("--apply-review: matching only new file(s) not already in review.csv")
 
-    fresh_rows = []
-    for i, pdf_path in enumerate(pdfs, 1):
-        logger.info("[%d/%d] Matching %s", i, len(pdfs), pdf_path.name)
-        fresh_rows.append(
-            match_file(
-                pdf_path,
-                client,
-                manual_overrides,
-                known_urls,
-                high_confidence=thresholds.get("high_confidence_threshold", 90.0),
-                review_floor=thresholds.get("review_floor_threshold", 70.0),
-            )
-        )
-
-    merged = merge_by_filename(existing_rows, fresh_rows)
+    merged = run_scan_batch(
+        root, client, manual_overrides, known_urls, existing_rows, thresholds,
+        apply_review=args.apply_review,
+        progress=lambda i, total, name: logger.info("[%d/%d] Matching %s", i, total, name),
+    )
     save_review(review_csv, merged)
 
     counts = Counter(row.status for row in merged)
@@ -296,6 +290,38 @@ def cmd_tag(args: argparse.Namespace, config: dict) -> None:
     ).run()
 
 
+def cmd_gui(args: argparse.Namespace, config: dict) -> None:
+    """Launch the desktop GUI (gui_app.py), which covers every subcommand
+    above in one window. tkinter is imported lazily, here and only here --
+    never at module level -- because Tk bindings are a *system*-level
+    Python build feature, not something PEP 723/uv/pip declare or install
+    like every other dependency in this project. Whether any given Python
+    interpreter has them varies by OS/distribution/build and isn't
+    something this project can guarantee (verified inconsistent even
+    across otherwise-identical `uv`-managed installs on the same machine
+    while developing this feature) -- so rather than assert a specific
+    cause, this just makes the failure obvious and actionable instead of
+    a raw traceback. A module-level import would also break every other
+    subcommand on a Tk-less interpreter; a lazy import here means only
+    `gui` is affected."""
+    try:
+        import tkinter  # noqa: F401
+    except ModuleNotFoundError:
+        sys.exit(
+            f"tkinter is not available in this Python ({sys.executable}).\n"
+            "The GUI needs a Python built with Tk support. Fixes:\n"
+            "  - try running with a different Python on your machine (system\n"
+            "    Python, a Homebrew/python.org install, etc.) -- e.g.:\n"
+            "      uv run --python-preference only-system ./dtrpg-metadata-download.py gui\n"
+            "  - or install Tk bindings for whichever Python you're using:\n"
+            "      macOS (Homebrew):   brew install python-tk\n"
+            "      Debian/Ubuntu:      sudo apt install python3-tk"
+        )
+    import gui_app
+
+    gui_app.run_gui(config)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="RPG PDF metadata pipeline")
     parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH), help="Path to config.yaml")
@@ -349,6 +375,11 @@ def main() -> None:
     rename_group.add_argument("--root", help="Rename every already-tagged PDF under this directory instead of a single file")
     rename_parser.add_argument("--dry-run", action="store_true", help="Preview renames without changing anything")
     rename_parser.set_defaults(func=cmd_rename)
+
+    gui_parser = subparsers.add_parser(
+        "gui", help="Launch the desktop GUI (Tkinter), covering every subcommand above"
+    )
+    gui_parser.set_defaults(func=cmd_gui)
 
     args = parser.parse_args()
     # TextualHandler routes to the active Textual app's own log (instead of

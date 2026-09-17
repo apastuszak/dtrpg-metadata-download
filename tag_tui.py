@@ -321,9 +321,10 @@ class CandidateScreen(Screen[CandidateResult]):
                 )
             else:
                 yield Label(f"{self.progress} -- No candidates found for {self.path.name}.")
-            yield Label("Paste a DriveThruRPG URL, or type id:PRODUCT_ID, and press Enter:")
+            yield Label("Paste a DriveThruRPG URL, or type id:PRODUCT_ID (Enter or Use URL to submit):")
             yield Input(id="url", placeholder="https://www.drivethrurpg.com/... or id:12345")
             with Horizontal():
+                yield Button("Use URL", id="use_url")
                 yield Button("Manual entry (m)", id="manual")
                 yield Button("Skip (Esc)", id="skip")
                 yield Button("Quit (q)", id="quit")
@@ -340,7 +341,10 @@ class CandidateScreen(Screen[CandidateResult]):
         self.dismiss(CandidateResult(action="pick", index=int(event.option.id)))
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
-        text = event.value.strip()
+        self._submit_url()
+
+    def _submit_url(self) -> None:
+        text = self.query_one("#url", Input).value.strip()
         if not text:
             return
         product_id = extract_product_id(text)
@@ -350,7 +354,9 @@ class CandidateScreen(Screen[CandidateResult]):
             self.notify("Could not parse a product ID/URL from that.", severity="error")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "manual":
+        if event.button.id == "use_url":
+            self._submit_url()
+        elif event.button.id == "manual":
             self.action_manual()
         elif event.button.id == "skip":
             self.action_skip()

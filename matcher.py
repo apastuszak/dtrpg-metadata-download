@@ -6,13 +6,14 @@ import csv
 import logging
 import re
 from pathlib import Path
+from typing import Callable
 
 import yaml
 from rapidfuzz import fuzz
 
 from dtrpg_client import DtrpgClient
 from provenance import ProductMetadata, Source, Status
-from review import ReviewRow
+from review import ReviewRow, merge_by_filename
 
 logger = logging.getLogger("matcher")
 
@@ -211,6 +212,50 @@ def match_file(
         meta = _maybe_enrich(client, meta)
         return row_from_match(filename, meta, score, Status.NEEDS_REVIEW)
     return ReviewRow(filename=filename, status=Status.NO_MATCH.value)
+
+
+def run_scan_batch(
+    root: str | Path,
+    client: DtrpgClient,
+    manual_overrides: dict[str, ProductMetadata],
+    known_urls: dict[str, str],
+    existing_rows: list[ReviewRow],
+    thresholds: dict,
+    *,
+    apply_review: bool = False,
+    progress: Callable[[int, int, str], None] | None = None,
+) -> list[ReviewRow]:
+    """Match every PDF under `root` and merge the results into
+    `existing_rows` -- factored out of cmd_scan()'s own inline loop (in
+    dtrpg-metadata-download.py) so both the CLI and the GUI's Scan tab
+    share one copy instead of two slowly drifting apart. Caller still owns
+    save_review() -- this only returns the merged rows.
+
+    `progress`, if given, is called as progress(i, total, pdf_path.name)
+    before each file is matched (1-indexed i), the same information
+    cmd_scan's own logger.info() call already reports today.
+    """
+    pdfs = scan_pdfs(root)
+    if apply_review:
+        existing_filenames = {row.filename for row in existing_rows}
+        pdfs = [p for p in pdfs if p.name not in existing_filenames]
+
+    fresh_rows = []
+    for i, pdf_path in enumerate(pdfs, 1):
+        if progress is not None:
+            progress(i, len(pdfs), pdf_path.name)
+        fresh_rows.append(
+            match_file(
+                pdf_path,
+                client,
+                manual_overrides,
+                known_urls,
+                high_confidence=thresholds.get("high_confidence_threshold", 90.0),
+                review_floor=thresholds.get("review_floor_threshold", 70.0),
+            )
+        )
+
+    return merge_by_filename(existing_rows, fresh_rows)
 
 
 def _maybe_enrich(client: DtrpgClient, meta: ProductMetadata) -> ProductMetadata:
