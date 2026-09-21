@@ -533,6 +533,12 @@ class ManualEntryDialog(QDialog):
         layout.addWidget(QLabel(f"{progress} Enter metadata for {path.name}".strip()))
 
         form = QFormLayout()
+        # QFormLayout's default field growth policy sizes each field to its
+        # own size hint -- QLineEdit's is a fixed-ish default width, while
+        # QPlainTextEdit's is Expanding, so Description ended up visibly
+        # wider than every other field. This makes every field grow to
+        # fill the same column width instead.
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         self.title_edit = QLineEdit()
         form.addRow("Title (required):", self.title_edit)
         self.publisher_edit = QLineEdit()
@@ -624,6 +630,7 @@ class ConfirmDialog(QDialog):
         layout.addWidget(QLabel(f"source: {source_value}"))
 
         form = QFormLayout()
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         self.title_edit = QLineEdit(meta.title)
         form.addRow("Title (required):", self.title_edit)
         self.publisher_edit = QLineEdit(meta.publisher)
