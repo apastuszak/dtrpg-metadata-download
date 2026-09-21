@@ -96,9 +96,9 @@ import pikepdf
 from lxml import etree
 from lxml.etree import QName
 
-from gurps_hyperlink import DEFAULT_HYPERLINK_SCRIPT, hyperlink_gurps_pdf
 from image_converter import convert_images_to_rgb
 from review import ReviewRow
+from rpg_hyperlink import DEFAULT_GURPS_HYPERLINK_SCRIPT, DEFAULT_MONGOOSE_HYPERLINK_SCRIPT, run_hyperlink_script
 from sidecar_writer import _split_isbn, write_bookorbit_opf, write_grimmory_sidecar
 
 logger = logging.getLogger("pdf_writer")
@@ -220,13 +220,41 @@ def _backup(path: Path) -> Path:
     return backup_path
 
 
+def _run_hyperlink_step(
+    path: Path, system_label: str, script_path: str | Path, log: Callable[[str], None] | None
+) -> None:
+    """Shared by both --hyperlink-gurps and --hyperlink-mongoose below --
+    same script interface (see rpg_hyperlink.py), same logging shape,
+    only the script path and a human-readable label differ."""
+    logger.info("Hyperlinking %s (%s)...", path.name, system_label)
+    if log is not None:
+        log(f"Hyperlinking {path.name} ({system_label})...")
+    result = run_hyperlink_script(path, script_path, log=log)
+    if not result.success:
+        logger.warning("Hyperlinking failed for %s (%s): %s", path.name, system_label, result.message)
+        if log is not None:
+            log(f"Hyperlinking failed for {path.name} ({system_label}): {result.message}")
+    else:
+        logger.info(
+            "Added %d page-reference/%d chapter/%d TOC link(s) in %s (%s)",
+            result.added, result.chapter_added, result.toc_added, path.name, system_label,
+        )
+        if log is not None:
+            log(
+                f"Added {result.added} page-reference, {result.chapter_added} chapter, "
+                f"{result.toc_added} TOC link(s) in {path.name} ({system_label})"
+            )
+
+
 def write_metadata(
     path: Path,
     row: ReviewRow,
     bookorbit_mode: bool = False,
     convert_images: bool = False,
     hyperlink_gurps: bool = False,
-    gurps_hyperlink_script: str | Path = DEFAULT_HYPERLINK_SCRIPT,
+    gurps_hyperlink_script: str | Path = DEFAULT_GURPS_HYPERLINK_SCRIPT,
+    hyperlink_mongoose: bool = False,
+    mongoose_hyperlink_script: str | Path = DEFAULT_MONGOOSE_HYPERLINK_SCRIPT,
     log: Callable[[str], None] | None = None,
 ) -> WriteResult:
     """`log`, if given, is called with human-readable progress lines for
@@ -236,9 +264,10 @@ def write_metadata(
     stderr there since no Textual app is active) but never reach the
     TUI's or GUI's own visible log/notification surfaces, which have no
     connection to Python's logging module at all. Without an explicit
-    "starting" message here, --convert-images/--hyperlink-gurps on a PDF
-    with many images/pages can run for a while with nothing visible
-    happening in either UI, which looks indistinguishable from a hang."""
+    "starting" message here, --convert-images/--hyperlink-gurps/
+    --hyperlink-mongoose on a PDF with many images/pages can run for a
+    while with nothing visible happening in either UI, which looks
+    indistinguishable from a hang."""
     if not path.exists():
         return WriteResult(path.name, False, "file not found")
 
@@ -271,33 +300,21 @@ def write_metadata(
             if log is not None:
                 log(f"Converted {result.converted} image(s) in {path.name} ({result.skipped} already fine/skipped)")
 
+    # Both also run before pikepdf opens the file below, same reasoning as
+    # --convert-images above -- verified directly (not just reasoned
+    # through) that a link annotation added via PyMuPDF's saveIncr()
+    # survives a subsequent pikepdf metadata rewrite, so this ordering is
+    # safe; see rpg_hyperlink.py's module docstring. Best-effort, same as
+    # --convert-images: a missing/misconfigured script or a book the
+    # detector can't make sense of must not fail a write that could
+    # otherwise succeed. Mutually independent -- a file could in
+    # principle have both flags set, though in practice a given book is
+    # only ever one publisher's, so at most one will actually find
+    # anything to link.
     if hyperlink_gurps:
-        # Also runs before pikepdf opens the file below, same reasoning as
-        # --convert-images above -- verified directly (not just reasoned
-        # through) that a link annotation added via PyMuPDF's saveIncr()
-        # survives a subsequent pikepdf metadata rewrite, so this ordering
-        # is safe; see gurps_hyperlink.py's module docstring. Best-effort,
-        # same as --convert-images: a missing/misconfigured script or a
-        # book the detector can't make sense of must not fail a write that
-        # could otherwise succeed.
-        logger.info("Hyperlinking %s...", path.name)
-        if log is not None:
-            log(f"Hyperlinking {path.name}...")
-        hyperlink_result = hyperlink_gurps_pdf(path, gurps_hyperlink_script, log=log)
-        if not hyperlink_result.success:
-            logger.warning("Hyperlinking failed for %s: %s", path.name, hyperlink_result.message)
-            if log is not None:
-                log(f"Hyperlinking failed for {path.name}: {hyperlink_result.message}")
-        else:
-            logger.info(
-                "Added %d page-reference/%d chapter/%d TOC link(s) in %s",
-                hyperlink_result.added, hyperlink_result.chapter_added, hyperlink_result.toc_added, path.name,
-            )
-            if log is not None:
-                log(
-                    f"Added {hyperlink_result.added} page-reference, {hyperlink_result.chapter_added} chapter, "
-                    f"{hyperlink_result.toc_added} TOC link(s) in {path.name}"
-                )
+        _run_hyperlink_step(path, "GURPS", gurps_hyperlink_script, log)
+    if hyperlink_mongoose:
+        _run_hyperlink_step(path, "Mongoose", mongoose_hyperlink_script, log)
 
     try:
         with pikepdf.open(path, allow_overwriting_input=True) as pdf:
@@ -440,7 +457,9 @@ def write_approved(
     bookorbit_mode: bool = False,
     convert_images: bool = False,
     hyperlink_gurps: bool = False,
-    gurps_hyperlink_script: str | Path = DEFAULT_HYPERLINK_SCRIPT,
+    gurps_hyperlink_script: str | Path = DEFAULT_GURPS_HYPERLINK_SCRIPT,
+    hyperlink_mongoose: bool = False,
+    mongoose_hyperlink_script: str | Path = DEFAULT_MONGOOSE_HYPERLINK_SCRIPT,
     log: Callable[[str], None] | None = None,
 ) -> list[WriteResult]:
     root = Path(root)
@@ -455,7 +474,9 @@ def write_approved(
         results.append(
             write_metadata(
                 matches[0], row, bookorbit_mode=bookorbit_mode, convert_images=convert_images,
-                hyperlink_gurps=hyperlink_gurps, gurps_hyperlink_script=gurps_hyperlink_script, log=log,
+                hyperlink_gurps=hyperlink_gurps, gurps_hyperlink_script=gurps_hyperlink_script,
+                hyperlink_mongoose=hyperlink_mongoose, mongoose_hyperlink_script=mongoose_hyperlink_script,
+                log=log,
             )
         )
 

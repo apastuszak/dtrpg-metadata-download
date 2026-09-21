@@ -92,6 +92,7 @@ from gui_app import (
     BOOKORBIT_URL,
     CONVERT_IMAGES_HINT,
     HYPERLINK_GURPS_HINT,
+    HYPERLINK_MONGOOSE_HINT,
     RENAME_HINT,
     _make_description_label,
     _make_hint_label,
@@ -100,7 +101,7 @@ from gui_app import (
     _StyledTextEdit,
     build_client_safe,
 )
-from gurps_hyperlink import DEFAULT_HYPERLINK_SCRIPT
+from rpg_hyperlink import DEFAULT_GURPS_HYPERLINK_SCRIPT, DEFAULT_MONGOOSE_HYPERLINK_SCRIPT
 
 # ---------------------------------------------------------------------------
 # Orchestration -- runs on a background thread. Framework-agnostic (no Qt
@@ -131,7 +132,9 @@ class TagFlowController:
         stop_event: threading.Event,
         convert_images: bool = False,
         hyperlink_gurps: bool = False,
-        gurps_hyperlink_script: str | Path = DEFAULT_HYPERLINK_SCRIPT,
+        gurps_hyperlink_script: str | Path = DEFAULT_GURPS_HYPERLINK_SCRIPT,
+        hyperlink_mongoose: bool = False,
+        mongoose_hyperlink_script: str | Path = DEFAULT_MONGOOSE_HYPERLINK_SCRIPT,
     ):
         self.pdfs = pdfs
         self.client = client
@@ -142,6 +145,8 @@ class TagFlowController:
         self.convert_images = convert_images
         self.hyperlink_gurps = hyperlink_gurps
         self.gurps_hyperlink_script = gurps_hyperlink_script
+        self.hyperlink_mongoose = hyperlink_mongoose
+        self.mongoose_hyperlink_script = mongoose_hyperlink_script
         self.rename = rename
         self.root_mode = root_mode
         self._notify = notify
@@ -303,6 +308,7 @@ class TagFlowController:
         result = write_metadata(
             path, row, bookorbit_mode=self.bookorbit_mode, convert_images=self.convert_images,
             hyperlink_gurps=self.hyperlink_gurps, gurps_hyperlink_script=self.gurps_hyperlink_script,
+            hyperlink_mongoose=self.hyperlink_mongoose, mongoose_hyperlink_script=self.mongoose_hyperlink_script,
             log=self._log,
         )
         self._log(f"Wrote metadata to {path.name}" if result.success else f"FAILED: {result.message}")
@@ -330,7 +336,8 @@ class TagWorker(QObject):
     def __init__(
         self, pdfs, client, manual_overrides, known_urls, thresholds,
         bookorbit_mode, rename, root_mode, stop_event, convert_images=False,
-        hyperlink_gurps=False, gurps_hyperlink_script=DEFAULT_HYPERLINK_SCRIPT,
+        hyperlink_gurps=False, gurps_hyperlink_script=DEFAULT_GURPS_HYPERLINK_SCRIPT,
+        hyperlink_mongoose=False, mongoose_hyperlink_script=DEFAULT_MONGOOSE_HYPERLINK_SCRIPT,
     ):
         super().__init__()
         self.controller = TagFlowController(
@@ -338,6 +345,7 @@ class TagWorker(QObject):
             thresholds=thresholds, bookorbit_mode=bookorbit_mode, rename=rename, root_mode=root_mode,
             notify=self._notify, log=self._log, stop_event=stop_event, convert_images=convert_images,
             hyperlink_gurps=hyperlink_gurps, gurps_hyperlink_script=gurps_hyperlink_script,
+            hyperlink_mongoose=hyperlink_mongoose, mongoose_hyperlink_script=mongoose_hyperlink_script,
         )
 
     def _notify(self, kind: str, payload: dict, response_q: "queue.Queue") -> None:
@@ -795,6 +803,12 @@ class TagTab(QWidget):
         layout.addWidget(self.hyperlink_gurps_check)
         layout.addWidget(_make_hint_label(HYPERLINK_GURPS_HINT))
 
+        self.hyperlink_mongoose_check = QCheckBox(
+            "Hyperlink Mongoose Traveller page/chapter references (--hyperlink-mongoose)"
+        )
+        layout.addWidget(self.hyperlink_mongoose_check)
+        layout.addWidget(_make_hint_label(HYPERLINK_MONGOOSE_HINT))
+
         self.rename_check = QCheckBox("Rename after write (--rename)")
         layout.addWidget(self.rename_check)
         layout.addWidget(_make_hint_label(RENAME_HINT))
@@ -866,7 +880,11 @@ class TagTab(QWidget):
             rename=self.rename_check.isChecked(), root_mode=root_mode, stop_event=self.stop_event,
             convert_images=self.convert_images_check.isChecked(),
             hyperlink_gurps=self.hyperlink_gurps_check.isChecked(),
-            gurps_hyperlink_script=self.config_.get("gurps_hyperlink_script", str(DEFAULT_HYPERLINK_SCRIPT)),
+            gurps_hyperlink_script=self.config_.get("gurps_hyperlink_script", str(DEFAULT_GURPS_HYPERLINK_SCRIPT)),
+            hyperlink_mongoose=self.hyperlink_mongoose_check.isChecked(),
+            mongoose_hyperlink_script=self.config_.get(
+                "mongoose_hyperlink_script", str(DEFAULT_MONGOOSE_HYPERLINK_SCRIPT)
+            ),
         )
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
