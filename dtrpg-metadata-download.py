@@ -144,7 +144,7 @@ from textual.logging import TextualHandler
 from dtrpg_client import DtrpgClient
 from matcher import load_known_urls, load_manual_overrides, run_scan_batch, scan_pdfs
 from pdf_writer import write_approved
-from preferences import DEFAULT_PREFERENCES_PATH, load_preferences, resolve_api_key
+from preferences import DEFAULT_PREFERENCES_PATH, load_preferences, resolve_api_key, resolve_path
 from renamer import apply_rename, plan_rename
 from review import load_review, save_review
 from rpg_grayscale import DEFAULT_GRAYSCALE_SCRIPT
@@ -175,6 +175,22 @@ def build_client(config: dict) -> DtrpgClient:
         api_key=api_key,
         cache_dir=config.get("data_dir", "data"),
         catalog_rate_limit_seconds=config.get("dtrpg", {}).get("catalog_rate_limit_seconds", 1.0),
+    )
+
+
+def _resolve_script_paths(config: dict) -> tuple[str, str, str]:
+    """(gurps_hyperlink_script, mongoose_hyperlink_script, grayscale_script),
+    each resolved via preferences.resolve_path() -- a saved Preferences
+    value wins, then config.yaml's own key, then the hardcoded placeholder
+    default. Shared by cmd_write_pdfs/cmd_all (via write_approved()) and
+    cmd_tag (via TagApp) so both read these the same way."""
+    prefs = load_preferences(config.get("preferences", DEFAULT_PREFERENCES_PATH))
+    return (
+        resolve_path(prefs.gurps_hyperlink_script, config.get("gurps_hyperlink_script"), DEFAULT_GURPS_HYPERLINK_SCRIPT),
+        resolve_path(
+            prefs.mongoose_hyperlink_script, config.get("mongoose_hyperlink_script"), DEFAULT_MONGOOSE_HYPERLINK_SCRIPT
+        ),
+        resolve_path(prefs.grayscale_script, config.get("grayscale_script"), DEFAULT_GRAYSCALE_SCRIPT),
     )
 
 
@@ -235,14 +251,12 @@ def cmd_write_pdfs(args: argparse.Namespace, config: dict) -> None:
         print("No approved/auto-accepted rows to write.")
         return
 
+    gurps_hyperlink_script, mongoose_hyperlink_script, grayscale_script = _resolve_script_paths(config)
     results = write_approved(
         rows, root, bookorbit_mode=args.bookorbit_mode, convert_images=args.convert_images,
-        convert_grayscale=args.convert_grayscale,
-        grayscale_script=config.get("grayscale_script", DEFAULT_GRAYSCALE_SCRIPT),
-        hyperlink_gurps=args.hyperlink_gurps,
-        gurps_hyperlink_script=config.get("gurps_hyperlink_script", DEFAULT_GURPS_HYPERLINK_SCRIPT),
-        hyperlink_mongoose=args.hyperlink_mongoose,
-        mongoose_hyperlink_script=config.get("mongoose_hyperlink_script", DEFAULT_MONGOOSE_HYPERLINK_SCRIPT),
+        convert_grayscale=args.convert_grayscale, grayscale_script=grayscale_script,
+        hyperlink_gurps=args.hyperlink_gurps, gurps_hyperlink_script=gurps_hyperlink_script,
+        hyperlink_mongoose=args.hyperlink_mongoose, mongoose_hyperlink_script=mongoose_hyperlink_script,
     )
     succeeded = sum(1 for r in results if r.success)
     print(f"Wrote metadata to {succeeded}/{len(results)} approved files")
@@ -332,6 +346,7 @@ def cmd_tag(args: argparse.Namespace, config: dict) -> None:
         client = build_client(config)
         known_urls = load_known_urls(path.parent)
 
+    gurps_hyperlink_script, mongoose_hyperlink_script, grayscale_script = _resolve_script_paths(config)
     TagApp(
         pdfs=pdfs,
         client=client,
@@ -341,11 +356,11 @@ def cmd_tag(args: argparse.Namespace, config: dict) -> None:
         bookorbit_mode=args.bookorbit_mode,
         convert_images=args.convert_images,
         convert_grayscale=args.convert_grayscale,
-        grayscale_script=config.get("grayscale_script", DEFAULT_GRAYSCALE_SCRIPT),
+        grayscale_script=grayscale_script,
         hyperlink_gurps=args.hyperlink_gurps,
-        gurps_hyperlink_script=config.get("gurps_hyperlink_script", DEFAULT_GURPS_HYPERLINK_SCRIPT),
+        gurps_hyperlink_script=gurps_hyperlink_script,
         hyperlink_mongoose=args.hyperlink_mongoose,
-        mongoose_hyperlink_script=config.get("mongoose_hyperlink_script", DEFAULT_MONGOOSE_HYPERLINK_SCRIPT),
+        mongoose_hyperlink_script=mongoose_hyperlink_script,
         rename=args.rename,
         root_mode=bool(args.root),
     ).run()

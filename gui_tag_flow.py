@@ -102,6 +102,7 @@ from gui_app import (
     _make_mutually_exclusive,
     _StyledTextEdit,
     build_client_safe,
+    resolve_script_paths,
 )
 from rpg_grayscale import DEFAULT_GRAYSCALE_SCRIPT
 from rpg_hyperlink import DEFAULT_GURPS_HYPERLINK_SCRIPT, DEFAULT_MONGOOSE_HYPERLINK_SCRIPT
@@ -886,6 +887,7 @@ class TagTab(QWidget):
         manual_overrides_path = Path(self.config_.get("manual_overrides", "data/manual_overrides.yaml"))
         manual_overrides = load_manual_overrides(manual_overrides_path)
         thresholds = self.config_.get("matching", {})
+        gurps_hyperlink_script, mongoose_hyperlink_script, grayscale_script = resolve_script_paths(self.config_)
 
         self.stop_event = threading.Event()
         self._thread = QThread()
@@ -894,14 +896,10 @@ class TagTab(QWidget):
             thresholds=thresholds, bookorbit_mode=self.bookorbit_check.isChecked(),
             rename=self.rename_check.isChecked(), root_mode=root_mode, stop_event=self.stop_event,
             convert_images=self.convert_images_check.isChecked(),
-            convert_grayscale=self.convert_grayscale_check.isChecked(),
-            grayscale_script=self.config_.get("grayscale_script", str(DEFAULT_GRAYSCALE_SCRIPT)),
-            hyperlink_gurps=self.hyperlink_gurps_check.isChecked(),
-            gurps_hyperlink_script=self.config_.get("gurps_hyperlink_script", str(DEFAULT_GURPS_HYPERLINK_SCRIPT)),
+            convert_grayscale=self.convert_grayscale_check.isChecked(), grayscale_script=grayscale_script,
+            hyperlink_gurps=self.hyperlink_gurps_check.isChecked(), gurps_hyperlink_script=gurps_hyperlink_script,
             hyperlink_mongoose=self.hyperlink_mongoose_check.isChecked(),
-            mongoose_hyperlink_script=self.config_.get(
-                "mongoose_hyperlink_script", str(DEFAULT_MONGOOSE_HYPERLINK_SCRIPT)
-            ),
+            mongoose_hyperlink_script=mongoose_hyperlink_script,
         )
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)

@@ -1,9 +1,15 @@
-"""User preferences (DriveThruRPG API key, account name) stored in their
-own file -- deliberately *not* in config.yaml, whose own top comment says
-"never hardcode [the API key] here" since that file is meant to be safe to
-share/commit. This one isn't: it can hold a real secret, so it's kept
-separate, gitignored (see .gitignore), and written with owner-only file
-permissions.
+"""User preferences (DriveThruRPG API key, account name, and sibling-
+script paths) stored in their own file -- deliberately *not* in
+config.yaml, whose own top comment says "never hardcode [the API key]
+here" since that file is meant to be safe to share/commit. This one
+isn't: the API key is a real secret, so it's kept separate, gitignored
+(see .gitignore), and written with owner-only file permissions. The
+sibling-script paths (`gurps_hyperlink_script`/`mongoose_hyperlink_script`/
+`grayscale_script`, see rpg_hyperlink.py/rpg_grayscale.py) aren't secrets,
+but they're still personal/machine-specific absolute paths with the same
+"doesn't belong in a file meant to go public" problem -- they ride along
+in this same file for that reason, not because they need 0600 protection
+too.
 
 **This changes this project's previous "the API key only ever comes from
 DTRPG_API_KEY" policy** (still stated that way in older docs/comments
@@ -38,6 +44,16 @@ DEFAULT_PREFERENCES_PATH = Path("data/preferences.yaml")
 class Preferences:
     api_key: str = ""
     dtrpg_name: str = ""
+    # Paths to sibling-project scripts (see rpg_hyperlink.py/
+    # rpg_grayscale.py) -- not secrets, but still personal/machine-
+    # specific absolute paths that have no business in config.yaml (a
+    # file meant to stay safe to share/commit), so they live here
+    # alongside the API key for the same underlying reason, even though
+    # they don't need the same 0600 file-permission protection a real
+    # secret does.
+    gurps_hyperlink_script: str = ""
+    mongoose_hyperlink_script: str = ""
+    grayscale_script: str = ""
 
 
 def load_preferences(path: str | Path = DEFAULT_PREFERENCES_PATH) -> Preferences:
@@ -52,6 +68,9 @@ def load_preferences(path: str | Path = DEFAULT_PREFERENCES_PATH) -> Preferences
     return Preferences(
         api_key=data.get("api_key") or "",
         dtrpg_name=data.get("dtrpg_name") or "",
+        gurps_hyperlink_script=data.get("gurps_hyperlink_script") or "",
+        mongoose_hyperlink_script=data.get("mongoose_hyperlink_script") or "",
+        grayscale_script=data.get("grayscale_script") or "",
     )
 
 
@@ -71,3 +90,18 @@ def resolve_api_key(prefs: Preferences) -> str:
     override for people who have, so nothing changes for anyone already
     relying on the environment variable."""
     return os.environ.get("DTRPG_API_KEY") or prefs.api_key
+
+
+def resolve_path(preference_value: str, config_value: str | None, default: "str | Path") -> str:
+    """Same three-source resolution shape as resolve_api_key(), for
+    personal path-like settings (the sibling-script paths in
+    rpg_hyperlink.py/rpg_grayscale.py) that can be set via the saved
+    preferences file, a config.yaml key, or neither. Unlike
+    resolve_api_key() -- where DTRPG_API_KEY deliberately wins over a
+    saved preference, to protect anyone already relying on the
+    environment variable from before Preferences existed -- the saved
+    preference wins here: these settings were only ever configurable via
+    a config.yaml placeholder as a stopgap alongside the features that
+    use them, so there's no pre-existing workflow a preference could
+    silently override."""
+    return preference_value or config_value or str(default)

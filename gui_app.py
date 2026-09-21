@@ -66,7 +66,14 @@ from PyQt6.QtWidgets import (
 from dtrpg_client import DtrpgClient
 from matcher import load_known_urls, load_manual_overrides, run_scan_batch, scan_pdfs
 from pdf_writer import write_approved
-from preferences import DEFAULT_PREFERENCES_PATH, Preferences, load_preferences, resolve_api_key, save_preferences
+from preferences import (
+    DEFAULT_PREFERENCES_PATH,
+    Preferences,
+    load_preferences,
+    resolve_api_key,
+    resolve_path,
+    save_preferences,
+)
 from provenance import Status
 from renamer import apply_rename, plan_rename
 from review import ReviewRow, load_review, save_review
@@ -272,6 +279,23 @@ def build_client_safe(config: dict) -> DtrpgClient:
         api_key=api_key,
         cache_dir=config.get("data_dir", "data"),
         catalog_rate_limit_seconds=config.get("dtrpg", {}).get("catalog_rate_limit_seconds", 1.0),
+    )
+
+
+def resolve_script_paths(config: dict) -> tuple[str, str, str]:
+    """(gurps_hyperlink_script, mongoose_hyperlink_script, grayscale_script),
+    each resolved via preferences.resolve_path() -- a saved Preferences
+    value wins, then config.yaml's own key, then the hardcoded placeholder
+    default. Shared by every tab that needs one of these three paths
+    (WritePdfsTab/AllTab here, TagTab in gui_tag_flow.py) so they can't
+    drift into resolving this differently from each other."""
+    prefs = load_preferences(config.get("preferences", DEFAULT_PREFERENCES_PATH))
+    return (
+        resolve_path(prefs.gurps_hyperlink_script, config.get("gurps_hyperlink_script"), DEFAULT_GURPS_HYPERLINK_SCRIPT),
+        resolve_path(
+            prefs.mongoose_hyperlink_script, config.get("mongoose_hyperlink_script"), DEFAULT_MONGOOSE_HYPERLINK_SCRIPT
+        ),
+        resolve_path(prefs.grayscale_script, config.get("grayscale_script"), DEFAULT_GRAYSCALE_SCRIPT),
     )
 
 
@@ -590,11 +614,7 @@ class WritePdfsTab(QWidget):
             return
         self.run_button.setEnabled(False)
         review_csv = Path(self.config_.get("review_csv", "data/review.csv"))
-        grayscale_script = self.config_.get("grayscale_script", str(DEFAULT_GRAYSCALE_SCRIPT))
-        gurps_hyperlink_script = self.config_.get("gurps_hyperlink_script", str(DEFAULT_GURPS_HYPERLINK_SCRIPT))
-        mongoose_hyperlink_script = self.config_.get(
-            "mongoose_hyperlink_script", str(DEFAULT_MONGOOSE_HYPERLINK_SCRIPT)
-        )
+        gurps_hyperlink_script, mongoose_hyperlink_script, grayscale_script = resolve_script_paths(self.config_)
         self.runner.start(
             self._worker, review_csv, root, self.bookorbit_check.isChecked(), self.convert_images_check.isChecked(),
             self.convert_grayscale_check.isChecked(), grayscale_script,
@@ -775,7 +795,7 @@ class AllTab(QWidget):
         review_csv = Path(self.config_.get("review_csv", "data/review.csv"))
         manual_overrides_path = Path(self.config_.get("manual_overrides", "data/manual_overrides.yaml"))
         thresholds = self.config_.get("matching", {})
-        grayscale_script = self.config_.get("grayscale_script", str(DEFAULT_GRAYSCALE_SCRIPT))
+        _gurps, _mongoose, grayscale_script = resolve_script_paths(self.config_)
         self.runner.start(
             self._worker, root, review_csv, manual_overrides_path, thresholds,
             self.refresh_check.isChecked(), self.apply_review_check.isChecked(), self.bookorbit_check.isChecked(),
@@ -1001,11 +1021,13 @@ class ReviewTab(QWidget):
 
 
 class PreferencesTab(QWidget):
-    """Saved API key + DriveThruRPG name -- see preferences.py's module
-    docstring for why these live in their own gitignored, owner-only-
-    permissioned file rather than config.yaml. The API key field is
-    masked by default (a real secret), with a checkbox to reveal it,
-    matching preferences_tui.py's equivalent in the TUI."""
+    """Saved API key + DriveThruRPG name + sibling-script paths -- see
+    preferences.py's module docstring for why these live in their own
+    gitignored, owner-only-permissioned file rather than config.yaml. The
+    API key field is masked by default (a real secret), with a checkbox
+    to reveal it, matching preferences_tui.py's equivalent in the TUI.
+    The three script-path fields aren't secrets, so they're always shown
+    in plain text -- only the API key gets the mask/reveal treatment."""
 
     def __init__(self, config: dict):
         super().__init__()
@@ -1014,9 +1036,10 @@ class PreferencesTab(QWidget):
 
         layout = QVBoxLayout(self)
         layout.addWidget(_make_description_label(
-            f"Your DriveThruRPG API key and account name, saved to {self.preferences_path} -- "
-            "not config.yaml, which is meant to be safe to share/commit. An existing "
-            "DTRPG_API_KEY environment variable always takes priority over what's saved here."
+            f"Your DriveThruRPG API key, account name, and optional sibling-script paths, saved "
+            f"to {self.preferences_path} -- not config.yaml, which is meant to be safe to "
+            "share/commit. An existing DTRPG_API_KEY environment variable always takes priority "
+            "over what's saved here."
         ))
 
         form = QFormLayout()
@@ -1030,7 +1053,22 @@ class PreferencesTab(QWidget):
 
         self.name_edit = QLineEdit(prefs.dtrpg_name)
         form.addRow("DriveThruRPG Name:", self.name_edit)
+
+        self.gurps_hyperlink_script_edit = QLineEdit(prefs.gurps_hyperlink_script)
+        form.addRow("GURPS hyperlink script:", self._path_row(self.gurps_hyperlink_script_edit))
+
+        self.mongoose_hyperlink_script_edit = QLineEdit(prefs.mongoose_hyperlink_script)
+        form.addRow("Mongoose hyperlink script:", self._path_row(self.mongoose_hyperlink_script_edit))
+
+        self.grayscale_script_edit = QLineEdit(prefs.grayscale_script)
+        form.addRow("Grayscale script:", self._path_row(self.grayscale_script_edit))
+
         layout.addLayout(form)
+        layout.addWidget(_make_hint_label(
+            "The three script paths above are only used by the matching checkboxes on the Tag/"
+            "Write PDFs/All tabs (--hyperlink-gurps/--hyperlink-mongoose/--convert-grayscale) -- "
+            "leave them blank if you don't use those."
+        ))
 
         save_row = QHBoxLayout()
         self.save_button = QPushButton("Save Preferences")
@@ -1042,11 +1080,32 @@ class PreferencesTab(QWidget):
         layout.addLayout(save_row)
         layout.addStretch(1)
 
+    def _path_row(self, edit: QLineEdit) -> QWidget:
+        row = QWidget()
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.addWidget(edit, 1)
+        browse_button = QPushButton("Browse...")
+        browse_button.clicked.connect(lambda: self._browse_script(edit))
+        row_layout.addWidget(browse_button)
+        return row
+
+    def _browse_script(self, edit: QLineEdit) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Select script", edit.text() or "", "Python scripts (*.py)")
+        if path:
+            edit.setText(path)
+
     def _toggle_show(self, checked: bool) -> None:
         self.api_key_edit.setEchoMode(QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password)
 
     def _save(self) -> None:
-        prefs = Preferences(api_key=self.api_key_edit.text().strip(), dtrpg_name=self.name_edit.text().strip())
+        prefs = Preferences(
+            api_key=self.api_key_edit.text().strip(),
+            dtrpg_name=self.name_edit.text().strip(),
+            gurps_hyperlink_script=self.gurps_hyperlink_script_edit.text().strip(),
+            mongoose_hyperlink_script=self.mongoose_hyperlink_script_edit.text().strip(),
+            grayscale_script=self.grayscale_script_edit.text().strip(),
+        )
         save_preferences(prefs, self.preferences_path)
         self.status_label.setText(f"Saved to {self.preferences_path}")
 
