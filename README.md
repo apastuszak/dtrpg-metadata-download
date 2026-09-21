@@ -12,7 +12,7 @@ export DTRPG_API_KEY=...   # an Application Key from your DriveThruRPG account p
 ./dtrpg-metadata-download.py --help
 ```
 
-The first run resolves and caches pikepdf/rapidfuzz/PyYAML/requests/lxml/textual/pymupdf/pillow automatically (a few seconds); every run after that is instant. No `.venv` directory, no `pip install` step, nothing to activate.
+The first run resolves and caches pikepdf/rapidfuzz/PyYAML/requests/lxml/textual/pymupdf/pillow/PyQt6 automatically (a few seconds); every run after that is instant. No `.venv` directory, no `pip install` step, nothing to activate — this covers every subcommand, including `gui`.
 
 Don't have `uv`? The classic path still works:
 
