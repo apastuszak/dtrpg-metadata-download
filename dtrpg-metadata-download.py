@@ -10,6 +10,7 @@
 #     "textual>=0.60",
 #     "pymupdf>=1.24",
 #     "pillow>=10.0",
+#     "PyQt6>=6.6",
 # ]
 # ///
 """CLI entry point for the RPG PDF metadata pipeline.
@@ -87,11 +88,10 @@
         without renaming anything.
 
     gui
-        Launch a desktop GUI (Tkinter, see gui_app.py/gui_tag_flow.py)
-        covering every subcommand above in one window. Requires a Python
-        with Tk bindings, a system-level build feature no dependency
-        manager (uv/pip) controls — if it's missing, a clear error names
-        the fix rather than raising a raw traceback.
+        Launch a desktop GUI (PyQt6, see gui_app.py/gui_tag_flow.py)
+        covering every subcommand above in one window. PyQt6 is a normal
+        dependency (installed automatically via `uv run`, same as every
+        other dependency here) — no system-level prerequisite involved.
 
     preferences
         View/edit your saved DriveThruRPG API key and account name (a
@@ -317,30 +317,23 @@ def cmd_tag(args: argparse.Namespace, config: dict) -> None:
 
 def cmd_gui(args: argparse.Namespace, config: dict) -> None:
     """Launch the desktop GUI (gui_app.py), which covers every subcommand
-    above in one window. tkinter is imported lazily, here and only here --
-    never at module level -- because Tk bindings are a *system*-level
-    Python build feature, not something PEP 723/uv/pip declare or install
-    like every other dependency in this project. Whether any given Python
-    interpreter has them varies by OS/distribution/build and isn't
-    something this project can guarantee (verified inconsistent even
-    across otherwise-identical `uv`-managed installs on the same machine
-    while developing this feature) -- so rather than assert a specific
-    cause, this just makes the failure obvious and actionable instead of
-    a raw traceback. A module-level import would also break every other
-    subcommand on a Tk-less interpreter; a lazy import here means only
-    `gui` is affected."""
+    above in one window. PyQt6 is imported lazily, here and only here, so
+    that a missing GUI dependency only affects `gui` and not every other
+    subcommand -- but unlike the Tk-based GUI this replaced, PyQt6 is an
+    ordinary PEP 723/uv/pip dependency, not a system-level Python build
+    feature, so there's no OS-specific install step to walk anyone
+    through: under `uv run --script` (the primary supported path), uv
+    resolves and installs it automatically and reports its own failures
+    clearly. This guard only exists for the requirements.txt+venv path,
+    where forgetting `pip install -r requirements.txt` after this
+    dependency was added is a plausible, easy mistake."""
     try:
-        import tkinter  # noqa: F401
+        import PyQt6.QtWidgets  # noqa: F401
     except ModuleNotFoundError:
         sys.exit(
-            f"tkinter is not available in this Python ({sys.executable}).\n"
-            "The GUI needs a Python built with Tk support. Fixes:\n"
-            "  - try running with a different Python on your machine (system\n"
-            "    Python, a Homebrew/python.org install, etc.) -- e.g.:\n"
-            "      uv run --python-preference only-system ./dtrpg-metadata-download.py gui\n"
-            "  - or install Tk bindings for whichever Python you're using:\n"
-            "      macOS (Homebrew):   brew install python-tk\n"
-            "      Debian/Ubuntu:      sudo apt install python3-tk"
+            "PyQt6 is not installed in this Python.\n"
+            "Run this via 'uv run ./dtrpg-metadata-download.py gui' (recommended, "
+            "installs it automatically) or 'pip install -r requirements.txt' in your virtualenv."
         )
     import gui_app
 
@@ -420,7 +413,7 @@ def main() -> None:
     rename_parser.set_defaults(func=cmd_rename)
 
     gui_parser = subparsers.add_parser(
-        "gui", help="Launch the desktop GUI (Tkinter), covering every subcommand above"
+        "gui", help="Launch the desktop GUI (PyQt6), covering every subcommand above"
     )
     gui_parser.set_defaults(func=cmd_gui)
 

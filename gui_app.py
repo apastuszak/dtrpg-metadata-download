@@ -1,4 +1,4 @@
-"""Tkinter desktop GUI for dtrpg-metadata-download, covering every
+"""PyQt6 desktop GUI for dtrpg-metadata-download, covering every
 subcommand in one window (Tag/Scan/Review/Write PDFs/Rename/All).
 
 Presentation layer only, exactly like tag_tui.py is for `tag` alone: every
@@ -8,34 +8,60 @@ call -- none of those modules know or care that a GUI exists. The Tag
 tab's own flow/dialog code lives in gui_tag_flow.py (mirroring tag_tui.py's
 size and scope), imported here as one more tab.
 
-tkinter itself is never imported at this module's top level from
-dtrpg-metadata-download.py -- see cmd_gui()'s docstring there for why (Tk
-bindings are a *system*-level prerequisite uv's managed Python builds
-don't have, unlike every pip dependency this project declares via PEP
-723). This module is only ever imported after that check has already
-passed, so it's free to import tkinter normally itself.
+This replaced an earlier Tkinter version of this GUI. The switch was
+prompted by an unresolved widget-rendering bug (a custom-bordered,
+scrollable Description field that misaligned and never showed a focus
+ring on one real machine, despite being verified correct by every means
+short of running it there) that turned out to be the latest in a run of
+subtle Tk/Tcl platform-rendering quirks this project kept hitting -- all
+traceable to Tk delegating widget painting to native OS APIs. Qt paints
+its own widgets, so this whole class of bug doesn't have room to exist;
+see CLAUDE.md's "Desktop GUI" section for the fuller history.
 
 Threading: every tab that can block (network calls, pikepdf I/O) runs its
-work on a background daemon thread via UiTaskRunner, which drains a plain
-string queue into that tab's log Text widget through root.after() polling
--- Tkinter widgets may only be touched from the main thread, so a worker
-never does that directly. Only one job per tab at a time (the Run button
-is disabled while busy); no job queue/executor needed for that reason.
-The Tag tab needs a richer version of this same idea (a blocking
-request/response round trip, not just fire-and-forget log lines) -- see
-gui_tag_flow.py for why and how.
+work on a background QThread via UiTaskRunner, whose log lines cross back
+to the GUI thread through a queued Qt signal connection -- event-driven,
+no polling loop needed (unlike the Tkinter version's queue.Queue +
+root.after() polling). Only one job per tab at a time (the Run button is
+disabled while busy). The Tag tab needs a richer version of this same
+idea (a blocking request/response round trip for its interactive
+dialogs, not just fire-and-forget log lines) -- see gui_tag_flow.py.
 """
 
 from __future__ import annotations
 
-import os
-import queue
-import threading
-import tkinter as tk
-import webbrowser
+import sys
 from collections import Counter
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from typing import Callable
+
+from PyQt6.QtCore import QObject, QRectF, Qt, QThread, pyqtSignal
+from PyQt6.QtGui import QColor, QPainter, QPen
+from PyQt6.QtWidgets import (
+    QAbstractItemView,
+    QApplication,
+    QButtonGroup,
+    QCheckBox,
+    QComboBox,
+    QFileDialog,
+    QFormLayout,
+    QFrame,
+    QGraphicsEffect,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMessageBox,
+    QPlainTextEdit,
+    QPushButton,
+    QRadioButton,
+    QStyledItemDelegate,
+    QTableWidget,
+    QTableWidgetItem,
+    QTabWidget,
+    QVBoxLayout,
+    QWidget,
+)
 
 from dtrpg_client import DtrpgClient
 from matcher import load_known_urls, load_manual_overrides, run_scan_batch, scan_pdfs
@@ -44,8 +70,6 @@ from preferences import DEFAULT_PREFERENCES_PATH, Preferences, load_preferences,
 from provenance import Status
 from renamer import apply_rename, plan_rename
 from review import ReviewRow, load_review, save_review
-
-POLL_MS = 50
 
 # Shared checkbox explanatory text -- defined once so WritePdfsTab/AllTab
 # (here) and TagTab (gui_tag_flow.py) can't drift apart on wording for the
@@ -61,6 +85,157 @@ CONVERT_IMAGES_HINT = (
     "in the PDF. This WILL increase the file size."
 )
 RENAME_HINT = "Renames the file after the metadata update, using the format: Series Name - Book Name.pdf"
+
+# QLineEdit gets a native-looking grey border (blue on focus) for free from
+# Qt's macOS style, since qmacstyle draws it the way a real NSTextField
+# would. QPlainTextEdit/QTextEdit don't get that same native treatment --
+# their frame is just a generic QFrame panel (a plain black/dark sunken
+# rectangle on this style, with no focus-color change at all) since Qt has
+# no equivalent native-control mapping for a multi-line text view the way
+# it does for a single-line field. This is a real, verified Qt/macOS
+# styling gap, not a leftover from the Tkinter version this GUI replaced
+# (which had the identical visual symptom for the identical underlying
+# reason -- Tk's plain Text widget doesn't get single-line Entry's native
+# treatment either -- but had to be worked around by hand there, since Tk
+# has no declarative focus-state styling; Qt's QSS supports a `:focus`
+# pseudo-state natively, so this is one applied stylesheet rule instead
+# of manual FocusIn/FocusOut bindings and a forced repaint).
+#
+# Applied per-widget via _style_text_edit(), not app-wide via
+# QApplication.setStyleSheet() -- that was tried first and was a real
+# regression, not just an unnecessary broad brush: setting *any*
+# stylesheet on the QApplication (even one whose only selector is
+# QPlainTextEdit) makes Qt route *all* widget painting through its
+# QStyleSheetStyle proxy instead of the native macOS style, which is
+# exactly what was suppressing QLineEdit's own native blue focus glow
+# app-wide (confirmed by a real screenshot: every field's blue focus ring
+# disappeared, not just the ones this stylesheet targets). A stylesheet
+# set directly on one widget only affects that widget (and its children),
+# leaving sibling QLineEdits on native rendering untouched.
+_TEXT_BORDER_COLOR = "#ebebeb"
+_TEXT_BORDER_FOCUS_COLOR = "#0a84ff"
+_TEXT_EDIT_STYLE = f"""
+QPlainTextEdit {{
+    border: 1px solid {_TEXT_BORDER_COLOR};
+    border-radius: 5px;
+}}
+QPlainTextEdit:focus {{
+    border: 1px solid {_TEXT_BORDER_FOCUS_COLOR};
+}}
+"""
+
+
+class _FocusRingEffect(QGraphicsEffect):
+    """Paints a soft rounded-rectangle ring around a widget when enabled
+    -- Qt's own QGraphicsDropShadowEffect was tried first and rejected
+    after a direct side-by-side screenshot comparison: a real macOS
+    NSTextField focus ring (sampled from a real screenshot) is a fairly
+    uniform-width, pale, mostly-flat band, while QGraphicsDropShadowEffect's
+    Gaussian blur inherently produces a darker/denser edge that fades out
+    over a distance no matter how its blur radius/opacity were tuned --
+    visibly thinner and more "shadow-like", less "ring-like", than the
+    real thing. A QGraphicsEffect subclass with its own draw() gives full
+    control over the band's shape instead of fighting a Gaussian falloff.
+    QGraphicsEffect (unlike a plain paintEvent override) can paint outside
+    a widget's own geometry -- boundingRectFor() below is what makes Qt
+    reserve that extra space instead of clipping the ring away."""
+
+    RING_WIDTH = 3.0  # logical px, close to the ~3.5px measured from a real focused QLineEdit
+    RING_MARGIN = 0.0  # flush against the widget's own border -- a real screenshot showed a
+    # visible gap here at 2.0px, which native doesn't have: the ring sits right up against the
+    # control's own border with no white space between them.
+    RING_RADIUS = 6.0  # logical px -- 8 looked distinctly rounder than native's own corners
+
+    def boundingRectFor(self, rect: QRectF) -> QRectF:
+        pad = self.RING_WIDTH + self.RING_MARGIN
+        return rect.adjusted(-pad, -pad, pad, pad)
+
+    def draw(self, painter: QPainter) -> None:
+        source_rect = self.sourceBoundingRect()
+        pen = QPen(QColor(0x0A, 0x84, 0xFF, 130))
+        pen.setWidthF(self.RING_WIDTH)
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        offset = self.RING_MARGIN + self.RING_WIDTH / 2
+        ring_rect = source_rect.adjusted(-offset, -offset, offset, offset)
+        painter.drawRoundedRect(ring_rect, self.RING_RADIUS, self.RING_RADIUS)
+        painter.restore()
+        self.drawSource(painter)
+
+
+class _StyledTextEdit(QPlainTextEdit):
+    """A QPlainTextEdit that actually looks and behaves like the other
+    fields around it -- three real, independently-verified rendering gaps
+    a bare QPlainTextEdit + a stylesheet still didn't fix, each confirmed
+    with an actual screenshot before being called done (this project's
+    established verify-against-the-real-thing habit, not just reasoning
+    about what Qt "should" do):
+
+    1. QPlainTextEdit is a QAbstractScrollArea, which paints its own
+       native QFrame panel independently of a QSS `border` property --
+       setting the QSS border alone left that native frame still visible
+       along the four straight edges, with only the QSS's rounded corners
+       showing through where the square native frame didn't cover.
+       Fixed by disabling the native frame (setFrameShape(NoFrame)) so
+       only the QSS-drawn border remains.
+    2. `_TEXT_BORDER_COLOR` originally guessed a plausible-looking grey
+       (#a3a3a3) -- it rendered clearly darker than a real QLineEdit's
+       native border once both were on screen together, closer to black
+       than grey by comparison. Fixed by sampling the actual rendered
+       pixel color of a real QLineEdit's border from a screenshot
+       (#ebebeb) and matching it exactly, rather than eyeballing a value.
+    3. The `:focus` QSS pseudo-state was never repainting on a real focus
+       change at all, even with the border/frame fixes above and a
+       confirmed-correct hasFocus()==True: QAbstractScrollArea delivers
+       keyboard focus through its internal viewport() child, not the
+       outer widget the stylesheet targets, so the outer widget never got
+       its own focusInEvent()-triggered repaint the way a plain QWidget
+       (e.g. QLineEdit) would. Confirmed by forcing
+       style().unpolish()/.polish()/.update() by hand after setFocus()
+       and seeing the blue border finally appear in a screenshot that was
+       otherwise identical. Fixed below by doing exactly that
+       automatically on every focus change, which is what Qt would
+       normally do on its own for a plain QWidget.
+    4. Even with 1-3 fixed, a real focused QLineEdit doesn't just get a
+       thicker/bluer 1px border -- pixel-sampling a real screenshot showed
+       macOS actually draws a separate soft ~3px ring *outside* the
+       control's own (still-thin) border, which a flat QSS `border` can
+       never reproduce. A `2px solid` QSS border, then a
+       QGraphicsDropShadowEffect, were each tried and each compared
+       directly against a real screenshot side by side with the real
+       thing -- both were visibly wrong in a different way (too flat;
+       too dark/thin and shadow-like instead of an even pale band).
+       Replaced with `_FocusRingEffect` above (a custom QGraphicsEffect,
+       not a stock one), which paints the ring shape directly instead of
+       approximating it through a border property or a blur algorithm --
+       see that class's own docstring for why the stock effect wasn't
+       enough.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setStyleSheet(_TEXT_EDIT_STYLE)
+        self._focus_glow = _FocusRingEffect(self)
+        self._focus_glow.setEnabled(False)
+        self.setGraphicsEffect(self._focus_glow)
+
+    def _repolish(self) -> None:
+        self.style().unpolish(self)
+        self.style().polish(self)
+        self.update()
+
+    def focusInEvent(self, event) -> None:  # noqa: N802
+        super().focusInEvent(event)
+        self._focus_glow.setEnabled(True)
+        self._repolish()
+
+    def focusOutEvent(self, event) -> None:  # noqa: N802
+        super().focusOutEvent(event)
+        self._focus_glow.setEnabled(False)
+        self._repolish()
 
 
 def build_client_safe(config: dict) -> DtrpgClient:
@@ -83,103 +258,120 @@ def build_client_safe(config: dict) -> DtrpgClient:
     )
 
 
-class UiTaskRunner:
-    """Runs one target function on a background daemon thread and drains
-    its plain-string progress queue into a log Text widget via
-    root.after() polling. The worker function receives `self.log` as a
-    plain callable progress hook -- calling it just queues a string, so
-    it's safe to call from the worker thread; only _poll() (main thread)
-    ever touches the Text widget itself."""
+class _FnWorker(QObject):
+    """Runs one plain function on whatever thread it's moved to, then
+    emits `finished`. `log` is a bound UiTaskRunner.log -- already safe to
+    call from this (non-GUI) thread, since it only emits a Qt signal
+    (thread-safe by construction) rather than touching a widget directly."""
 
-    def __init__(self, root: tk.Misc, log_widget: tk.Text, on_done=None):
-        self.root = root
+    finished = pyqtSignal()
+
+    def __init__(self, fn: Callable, args: tuple, kwargs: dict, log: Callable[[str], None]):
+        super().__init__()
+        self._fn = fn
+        self._args = args
+        self._kwargs = kwargs
+        self._log = log
+
+    def run(self) -> None:
+        try:
+            self._fn(*self._args, **self._kwargs)
+        except Exception as exc:
+            self._log(f"ERROR: {exc}")
+        self.finished.emit()
+
+
+class UiTaskRunner(QObject):
+    """Runs one target function on a background QThread and forwards its
+    plain-string progress calls to a log widget. Replaces the Tkinter
+    version's queue.Queue()+root.after() polling with genuine event-driven
+    delivery -- Qt automatically marshals a signal emitted from a worker
+    thread onto the thread its connected slot's receiver lives on (here,
+    the GUI thread), so `log()` is safe to call from the worker thread
+    without any polling loop on this side. Only one job at a time (the Run
+    button disables itself while busy); no job queue/executor needed."""
+
+    log_line = pyqtSignal(str)
+
+    def __init__(self, log_widget: QPlainTextEdit, on_done: Callable[[], None] | None = None):
+        super().__init__()
         self.log_widget = log_widget
         self.on_done = on_done
-        self._queue: queue.Queue[str] = queue.Queue()
-        self._thread: threading.Thread | None = None
-        self._polling = False
+        self.log_line.connect(self._append)
+        self._thread: QThread | None = None
+        self._worker: _FnWorker | None = None
 
     def busy(self) -> bool:
-        return self._thread is not None and self._thread.is_alive()
+        return self._thread is not None and self._thread.isRunning()
 
-    def start(self, fn, *args, **kwargs) -> None:
+    def start(self, fn: Callable, *args, **kwargs) -> None:
         if self.busy():
             return
-
-        def _run() -> None:
-            try:
-                fn(*args, **kwargs)
-            except Exception as exc:
-                self._queue.put(f"ERROR: {exc}")
-
-        self._thread = threading.Thread(target=_run, daemon=True)
+        self._thread = QThread()
+        self._worker = _FnWorker(fn, args, kwargs, self.log)
+        self._worker.moveToThread(self._thread)
+        self._thread.started.connect(self._worker.run)
+        self._worker.finished.connect(self._on_finished)
         self._thread.start()
-        if not self._polling:
-            self._polling = True
-            self.root.after(POLL_MS, self._poll)
 
     def log(self, line: str) -> None:
-        self._queue.put(line)
+        self.log_line.emit(line)
 
-    def _poll(self) -> None:
-        try:
-            while True:
-                line = self._queue.get_nowait()
-                self.log_widget.configure(state="normal")
-                self.log_widget.insert("end", line + "\n")
-                self.log_widget.see("end")
-                self.log_widget.configure(state="disabled")
-        except queue.Empty:
-            pass
-        if self.busy():
-            self.root.after(POLL_MS, self._poll)
-        else:
-            self._polling = False
-            if self.on_done is not None:
-                self.on_done()
+    def _append(self, line: str) -> None:
+        self.log_widget.appendPlainText(line)
+
+    def _on_finished(self) -> None:
+        if self._thread is not None:
+            self._thread.quit()
+            self._thread.wait()
+        self._thread = None
+        self._worker = None
+        if self.on_done is not None:
+            self.on_done()
 
 
-def _make_description_label(parent: tk.Widget, text: str) -> ttk.Label:
+def _make_description_label(text: str) -> QLabel:
     """Short explanatory text at the top of a tab, saying what that tab
     does -- default (not muted) text color, since it's the primary
     orientation for the whole tab rather than a secondary caveat like
     _make_hint_label() below."""
-    return ttk.Label(parent, text=text, wraplength=620, justify="left")
-
-
-def _make_hint_label(parent: tk.Widget, text: str) -> ttk.Label:
-    """Small muted explanatory text under a checkbox -- Tkinter Labels
-    don't auto-wrap, so wraplength is set explicitly (matches this
-    window's ~950px width minus padding)."""
-    return ttk.Label(parent, text=text, foreground="#666666", wraplength=620, justify="left")
-
-
-def _make_link_label(parent: tk.Widget, url: str) -> ttk.Label:
-    """A clickable link-styled Label that opens `url` in the system
-    browser -- ttk has no built-in hyperlink widget, so this fakes one
-    with a colored/underlined font and a click binding."""
-    label = ttk.Label(parent, text=url, foreground="#1a73e8", cursor="hand2", font=("TkDefaultFont", 9, "underline"))
-    label.bind("<Button-1>", lambda _e: webbrowser.open(url))
+    label = QLabel(text)
+    label.setWordWrap(True)
     return label
 
 
-def _make_log_widget(parent: tk.Widget, row: int, columnspan: int) -> tk.Text:
-    frame = ttk.Frame(parent)
-    frame.grid(row=row, column=0, columnspan=columnspan, sticky="nsew", pady=(8, 0))
-    frame.rowconfigure(0, weight=1)
-    frame.columnconfigure(0, weight=1)
-    text = tk.Text(frame, height=12, state="disabled", wrap="word")
-    scroll = ttk.Scrollbar(frame, orient="vertical", command=text.yview)
-    text.configure(yscrollcommand=scroll.set)
-    text.grid(row=0, column=0, sticky="nsew")
-    scroll.grid(row=0, column=1, sticky="ns")
-    return text
+def _make_hint_label(text: str) -> QLabel:
+    """Small muted explanatory text under a checkbox."""
+    label = QLabel(text)
+    label.setWordWrap(True)
+    label.setStyleSheet("color: #666666;")
+    return label
+
+
+def _make_link_label(url: str) -> QLabel:
+    """A real clickable hyperlink label -- unlike the Tkinter version,
+    which had to fake this with a colored/underlined font and a manual
+    webbrowser.open() click binding (ttk has no hyperlink widget), Qt's
+    QLabel supports rich text and opening links itself."""
+    label = QLabel(f'<a href="{url}">{url}</a>')
+    label.setTextFormat(Qt.TextFormat.RichText)
+    label.setOpenExternalLinks(True)
+    return label
+
+
+def _make_log_widget() -> QPlainTextEdit:
+    widget = _StyledTextEdit()
+    widget.setReadOnly(True)
+    return widget
 
 
 # ---------------------------------------------------------------------------
-# Shared scan/write-pdfs logic -- factored out once so ScanTab/WritePdfsTab/
-# AllTab don't each keep their own copy (the same reasoning that moved
-# cmd_scan's loop into matcher.run_scan_batch()).
+# Shared scan/write-pdfs/rename logic -- factored out once so ScanTab/
+# WritePdfsTab/RenameTab/AllTab don't each keep their own copy (the same
+# reasoning that moved cmd_scan's loop into matcher.run_scan_batch()).
+# None of these functions touch Qt (or touched tkinter before them) --
+# they take a plain `log` callable, so the Tk->Qt port needed no changes
+# to their bodies at all, only to their callers.
 # ---------------------------------------------------------------------------
 
 
@@ -241,175 +433,187 @@ def _rename_one(pdf_path: Path, dry_run: bool, log) -> str:
 # ---------------------------------------------------------------------------
 
 
-class ScanTab(ttk.Frame):
-    def __init__(self, parent: tk.Widget, config: dict):
-        super().__init__(parent, padding=10)
+class ScanTab(QWidget):
+    def __init__(self, config: dict):
+        super().__init__()
         self.config_ = config
-        self.root_var = tk.StringVar(value=config.get("root", ""))
-        self.refresh_var = tk.BooleanVar(value=False)
-        self.apply_review_var = tk.BooleanVar(value=False)
 
-        _make_description_label(
-            self,
+        layout = QVBoxLayout(self)
+        layout.addWidget(_make_description_label(
             "Matches every PDF under a folder against DriveThruRPG and writes the results to "
             "review.csv -- never touches your PDFs directly. Approve matches here or in the "
-            "Review tab, then use Write PDFs (or All) to apply them.",
-        ).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 8))
+            "Review tab, then use Write PDFs (or All) to apply them."
+        ))
 
-        ttk.Label(self, text="Root folder:").grid(row=1, column=0, sticky="w")
-        ttk.Entry(self, textvariable=self.root_var, width=50).grid(row=1, column=1, sticky="we")
-        ttk.Button(self, text="Browse...", command=self._browse).grid(row=1, column=2)
-        ttk.Checkbutton(
-            self, text="Refresh library (--refresh-library)", variable=self.refresh_var
-        ).grid(row=2, column=0, columnspan=3, sticky="w")
-        ttk.Checkbutton(
-            self, text="Only match new files (--apply-review)", variable=self.apply_review_var
-        ).grid(row=3, column=0, columnspan=3, sticky="w")
-        self.run_button = ttk.Button(self, text="Run Scan", command=self._run)
-        self.run_button.grid(row=4, column=0, sticky="w", pady=(6, 0))
+        root_row = QHBoxLayout()
+        root_row.addWidget(QLabel("Root folder:"))
+        self.root_edit = QLineEdit(config.get("root", ""))
+        root_row.addWidget(self.root_edit, 1)
+        browse_button = QPushButton("Browse...")
+        browse_button.clicked.connect(self._browse)
+        root_row.addWidget(browse_button)
+        layout.addLayout(root_row)
 
-        self.log = _make_log_widget(self, row=5, columnspan=3)
-        self.columnconfigure(1, weight=1)
-        self.rowconfigure(5, weight=1)
-        self.runner = UiTaskRunner(self, self.log, on_done=self._on_done)
+        self.refresh_check = QCheckBox("Refresh library (--refresh-library)")
+        layout.addWidget(self.refresh_check)
+        self.apply_review_check = QCheckBox("Only match new files (--apply-review)")
+        layout.addWidget(self.apply_review_check)
+
+        self.run_button = QPushButton("Run Scan")
+        self.run_button.clicked.connect(self._run)
+        layout.addWidget(self.run_button, alignment=Qt.AlignmentFlag.AlignLeft)
+
+        self.log = _make_log_widget()
+        layout.addWidget(self.log, 1)
+        self.runner = UiTaskRunner(self.log, on_done=self._on_done)
 
     def _browse(self) -> None:
-        d = filedialog.askdirectory(initialdir=self.root_var.get() or ".")
+        d = QFileDialog.getExistingDirectory(self, "Root folder", self.root_edit.text() or ".")
         if d:
-            self.root_var.set(d)
+            self.root_edit.setText(d)
 
     def _run(self) -> None:
-        root = self.root_var.get().strip()
+        root = self.root_edit.text().strip()
         if not root:
-            messagebox.showerror("Scan", "No root folder given.")
+            QMessageBox.critical(self, "Scan", "No root folder given.")
             return
-        self.run_button.configure(state="disabled")
+        self.run_button.setEnabled(False)
         review_csv = Path(self.config_.get("review_csv", "data/review.csv"))
         manual_overrides_path = Path(self.config_.get("manual_overrides", "data/manual_overrides.yaml"))
         thresholds = self.config_.get("matching", {})
         self.runner.start(
             _do_scan, self.config_, self.runner.log, root, review_csv, manual_overrides_path,
-            thresholds, self.refresh_var.get(), self.apply_review_var.get(),
+            thresholds, self.refresh_check.isChecked(), self.apply_review_check.isChecked(),
         )
 
     def _on_done(self) -> None:
-        self.run_button.configure(state="normal")
+        self.run_button.setEnabled(True)
 
 
-class WritePdfsTab(ttk.Frame):
-    def __init__(self, parent: tk.Widget, config: dict):
-        super().__init__(parent, padding=10)
+class WritePdfsTab(QWidget):
+    def __init__(self, config: dict):
+        super().__init__()
         self.config_ = config
-        self.root_var = tk.StringVar(value=config.get("root", ""))
-        self.bookorbit_var = tk.BooleanVar(value=False)
-        self.convert_images_var = tk.BooleanVar(value=False)
 
-        _make_description_label(
-            self,
+        layout = QVBoxLayout(self)
+        layout.addWidget(_make_description_label(
             "Writes metadata into every PDF whose review.csv row is approved or auto-accepted -- "
-            "this step never matches files itself. Run Scan (and approve rows in Review) first.",
-        ).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 8))
+            "this step never matches files itself. Run Scan (and approve rows in Review) first."
+        ))
 
-        ttk.Label(self, text="Root folder:").grid(row=1, column=0, sticky="w")
-        ttk.Entry(self, textvariable=self.root_var, width=50).grid(row=1, column=1, sticky="we")
-        ttk.Button(self, text="Browse...", command=self._browse).grid(row=1, column=2)
+        root_row = QHBoxLayout()
+        root_row.addWidget(QLabel("Root folder:"))
+        self.root_edit = QLineEdit(config.get("root", ""))
+        root_row.addWidget(self.root_edit, 1)
+        browse_button = QPushButton("Browse...")
+        browse_button.clicked.connect(self._browse)
+        root_row.addWidget(browse_button)
+        layout.addLayout(root_row)
 
-        ttk.Checkbutton(
-            self, text="BookOrbit mode (--bookorbit-mode)", variable=self.bookorbit_var
-        ).grid(row=2, column=0, columnspan=3, sticky="w")
-        _make_hint_label(self, BOOKORBIT_HINT).grid(row=3, column=0, columnspan=3, sticky="w", padx=(20, 0))
-        _make_link_label(self, BOOKORBIT_URL).grid(row=4, column=0, columnspan=3, sticky="w", padx=(20, 0))
+        self.bookorbit_check = QCheckBox("BookOrbit mode (--bookorbit-mode)")
+        layout.addWidget(self.bookorbit_check)
+        layout.addWidget(_make_hint_label(BOOKORBIT_HINT))
+        layout.addWidget(_make_link_label(BOOKORBIT_URL))
 
-        ttk.Checkbutton(
-            self, text="Convert all images to RGB JPEG (--convert-images)", variable=self.convert_images_var
-        ).grid(row=5, column=0, columnspan=3, sticky="w", pady=(6, 0))
-        _make_hint_label(self, CONVERT_IMAGES_HINT).grid(row=6, column=0, columnspan=3, sticky="w", padx=(20, 0))
+        self.convert_images_check = QCheckBox("Convert all images to RGB JPEG (--convert-images)")
+        layout.addWidget(self.convert_images_check)
+        layout.addWidget(_make_hint_label(CONVERT_IMAGES_HINT))
 
-        self.run_button = ttk.Button(self, text="Write Approved PDFs", command=self._run)
-        self.run_button.grid(row=7, column=0, sticky="w", pady=(10, 0))
+        self.run_button = QPushButton("Write Approved PDFs")
+        self.run_button.clicked.connect(self._run)
+        layout.addWidget(self.run_button, alignment=Qt.AlignmentFlag.AlignLeft)
 
-        self.log = _make_log_widget(self, row=8, columnspan=3)
-        self.columnconfigure(1, weight=1)
-        self.rowconfigure(8, weight=1)
-        self.runner = UiTaskRunner(self, self.log, on_done=self._on_done)
+        self.log = _make_log_widget()
+        layout.addWidget(self.log, 1)
+        self.runner = UiTaskRunner(self.log, on_done=self._on_done)
 
     def _browse(self) -> None:
-        d = filedialog.askdirectory(initialdir=self.root_var.get() or ".")
+        d = QFileDialog.getExistingDirectory(self, "Root folder", self.root_edit.text() or ".")
         if d:
-            self.root_var.set(d)
+            self.root_edit.setText(d)
 
     def _run(self) -> None:
-        root = self.root_var.get().strip()
+        root = self.root_edit.text().strip()
         if not root:
-            messagebox.showerror("Write PDFs", "No root folder given.")
+            QMessageBox.critical(self, "Write PDFs", "No root folder given.")
             return
-        self.run_button.configure(state="disabled")
+        self.run_button.setEnabled(False)
         review_csv = Path(self.config_.get("review_csv", "data/review.csv"))
-        self.runner.start(self._worker, review_csv, root, self.bookorbit_var.get(), self.convert_images_var.get())
+        self.runner.start(self._worker, review_csv, root, self.bookorbit_check.isChecked(), self.convert_images_check.isChecked())
 
     def _worker(self, review_csv: Path, root: str, bookorbit_mode: bool, convert_images: bool) -> None:
         rows = load_review(review_csv)
         _do_write_pdfs(self.runner.log, rows, root, bookorbit_mode, convert_images)
 
     def _on_done(self) -> None:
-        self.run_button.configure(state="normal")
+        self.run_button.setEnabled(True)
 
 
-class RenameTab(ttk.Frame):
-    def __init__(self, parent: tk.Widget, config: dict):
-        super().__init__(parent, padding=10)
+class RenameTab(QWidget):
+    def __init__(self, config: dict):
+        super().__init__()
         self.config_ = config
-        self.mode_var = tk.StringVar(value="root")
-        self.path_var = tk.StringVar(value=config.get("root", ""))
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(_make_description_label(
+            "Renames an already-tagged PDF (and its .bak/.opf/.metadata.json sidecars) to "
+            '"Series Name - Book Name.pdf", using the title/series recorded in its '
+            ".metadata.json sidecar. Untagged or already-correctly-named files are skipped."
+        ))
+
+        mode_row = QHBoxLayout()
+        self.file_radio = QRadioButton("Single file")
+        self.root_radio = QRadioButton("Whole folder")
+        self.root_radio.setChecked(True)
+        self.mode_group = QButtonGroup(self)
+        self.mode_group.addButton(self.file_radio)
+        self.mode_group.addButton(self.root_radio)
+        mode_row.addWidget(self.file_radio)
+        mode_row.addWidget(self.root_radio)
+        mode_row.addStretch(1)
+        layout.addLayout(mode_row)
+
+        path_row = QHBoxLayout()
+        self.path_edit = QLineEdit(config.get("root", ""))
+        path_row.addWidget(self.path_edit, 1)
+        browse_button = QPushButton("Browse...")
+        browse_button.clicked.connect(self._browse)
+        path_row.addWidget(browse_button)
+        layout.addLayout(path_row)
+
         # False by default, matching the CLI's own --dry-run flag (which
         # is action="store_true" -- off unless passed, so `rename` really
         # renames by default). Defaulting this checkbox to True would
         # invert that: clicking "Run Rename" without noticing/unchecking
-        # it first would silently only preview, never actually renaming.
-        self.dry_run_var = tk.BooleanVar(value=False)
+        # it first would silently only preview, never actually renaming --
+        # a real bug this GUI shipped with once already (see CLAUDE.md).
+        self.dry_run_check = QCheckBox("Dry run (preview only)")
+        layout.addWidget(self.dry_run_check)
 
-        _make_description_label(
-            self,
-            "Renames an already-tagged PDF (and its .bak/.opf/.metadata.json sidecars) to "
-            '"Series Name - Book Name.pdf", using the title/series recorded in its '
-            ".metadata.json sidecar. Untagged or already-correctly-named files are skipped.",
-        ).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 8))
+        self.run_button = QPushButton("Run Rename")
+        self.run_button.clicked.connect(self._run)
+        layout.addWidget(self.run_button, alignment=Qt.AlignmentFlag.AlignLeft)
 
-        ttk.Radiobutton(self, text="Single file", value="file", variable=self.mode_var).grid(
-            row=1, column=0, sticky="w"
-        )
-        ttk.Radiobutton(self, text="Whole folder", value="root", variable=self.mode_var).grid(
-            row=1, column=1, sticky="w"
-        )
-        ttk.Entry(self, textvariable=self.path_var, width=50).grid(row=2, column=0, columnspan=2, sticky="we")
-        ttk.Button(self, text="Browse...", command=self._browse).grid(row=2, column=2)
-        ttk.Checkbutton(self, text="Dry run (preview only)", variable=self.dry_run_var).grid(
-            row=3, column=0, columnspan=3, sticky="w"
-        )
-        self.run_button = ttk.Button(self, text="Run Rename", command=self._run)
-        self.run_button.grid(row=4, column=0, sticky="w", pady=(6, 0))
-
-        self.log = _make_log_widget(self, row=5, columnspan=3)
-        self.columnconfigure(0, weight=1)
-        self.columnconfigure(1, weight=1)
-        self.rowconfigure(5, weight=1)
-        self.runner = UiTaskRunner(self, self.log, on_done=self._on_done)
+        self.log = _make_log_widget()
+        layout.addWidget(self.log, 1)
+        self.runner = UiTaskRunner(self.log, on_done=self._on_done)
 
     def _browse(self) -> None:
-        if self.mode_var.get() == "file":
-            p = filedialog.askopenfilename(filetypes=[("PDF files", "*.pdf")])
+        if self.file_radio.isChecked():
+            p, _ = QFileDialog.getOpenFileName(self, "Select PDF", "", "PDF files (*.pdf)")
         else:
-            p = filedialog.askdirectory(initialdir=self.path_var.get() or ".")
+            p = QFileDialog.getExistingDirectory(self, "Root folder", self.path_edit.text() or ".")
         if p:
-            self.path_var.set(p)
+            self.path_edit.setText(p)
 
     def _run(self) -> None:
-        path = self.path_var.get().strip()
+        path = self.path_edit.text().strip()
         if not path:
-            messagebox.showerror("Rename", "No file/folder given.")
+            QMessageBox.critical(self, "Rename", "No file/folder given.")
             return
-        self.run_button.configure(state="disabled")
-        self.runner.start(self._worker, self.mode_var.get(), path, self.dry_run_var.get())
+        self.run_button.setEnabled(False)
+        mode = "file" if self.file_radio.isChecked() else "root"
+        self.runner.start(self._worker, mode, path, self.dry_run_check.isChecked())
 
     def _worker(self, mode: str, path: str, dry_run: bool) -> None:
         log = self.runner.log
@@ -437,72 +641,69 @@ class RenameTab(ttk.Frame):
         log(summary)
 
     def _on_done(self) -> None:
-        self.run_button.configure(state="normal")
+        self.run_button.setEnabled(True)
 
 
-class AllTab(ttk.Frame):
-    def __init__(self, parent: tk.Widget, config: dict):
-        super().__init__(parent, padding=10)
+class AllTab(QWidget):
+    def __init__(self, config: dict):
+        super().__init__()
         self.config_ = config
-        self.root_var = tk.StringVar(value=config.get("root", ""))
-        self.refresh_var = tk.BooleanVar(value=False)
-        self.apply_review_var = tk.BooleanVar(value=False)
-        self.bookorbit_var = tk.BooleanVar(value=False)
-        self.convert_images_var = tk.BooleanVar(value=False)
 
-        _make_description_label(
-            self,
+        layout = QVBoxLayout(self)
+        layout.addWidget(_make_description_label(
             "Runs Scan, then Write PDFs, in one pass -- still gated by review.csv status, so "
-            "anything left unapproved (needs-review/no-match) isn't written.",
-        ).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 8))
+            "anything left unapproved (needs-review/no-match) isn't written."
+        ))
 
-        ttk.Label(self, text="Root folder:").grid(row=1, column=0, sticky="w")
-        ttk.Entry(self, textvariable=self.root_var, width=50).grid(row=1, column=1, sticky="we")
-        ttk.Button(self, text="Browse...", command=self._browse).grid(row=1, column=2)
-        ttk.Checkbutton(
-            self, text="Refresh library (--refresh-library)", variable=self.refresh_var
-        ).grid(row=2, column=0, columnspan=3, sticky="w")
-        ttk.Checkbutton(
-            self, text="Only match new files (--apply-review)", variable=self.apply_review_var
-        ).grid(row=3, column=0, columnspan=3, sticky="w")
+        root_row = QHBoxLayout()
+        root_row.addWidget(QLabel("Root folder:"))
+        self.root_edit = QLineEdit(config.get("root", ""))
+        root_row.addWidget(self.root_edit, 1)
+        browse_button = QPushButton("Browse...")
+        browse_button.clicked.connect(self._browse)
+        root_row.addWidget(browse_button)
+        layout.addLayout(root_row)
 
-        ttk.Checkbutton(
-            self, text="BookOrbit mode (--bookorbit-mode)", variable=self.bookorbit_var
-        ).grid(row=4, column=0, columnspan=3, sticky="w", pady=(6, 0))
-        _make_hint_label(self, BOOKORBIT_HINT).grid(row=5, column=0, columnspan=3, sticky="w", padx=(20, 0))
-        _make_link_label(self, BOOKORBIT_URL).grid(row=6, column=0, columnspan=3, sticky="w", padx=(20, 0))
+        self.refresh_check = QCheckBox("Refresh library (--refresh-library)")
+        layout.addWidget(self.refresh_check)
+        self.apply_review_check = QCheckBox("Only match new files (--apply-review)")
+        layout.addWidget(self.apply_review_check)
 
-        ttk.Checkbutton(
-            self, text="Convert all images to RGB JPEG (--convert-images)", variable=self.convert_images_var
-        ).grid(row=7, column=0, columnspan=3, sticky="w", pady=(6, 0))
-        _make_hint_label(self, CONVERT_IMAGES_HINT).grid(row=8, column=0, columnspan=3, sticky="w", padx=(20, 0))
+        self.bookorbit_check = QCheckBox("BookOrbit mode (--bookorbit-mode)")
+        layout.addWidget(self.bookorbit_check)
+        layout.addWidget(_make_hint_label(BOOKORBIT_HINT))
+        layout.addWidget(_make_link_label(BOOKORBIT_URL))
 
-        self.run_button = ttk.Button(self, text="Run Scan + Write PDFs", command=self._run)
-        self.run_button.grid(row=9, column=0, sticky="w", pady=(10, 0))
+        self.convert_images_check = QCheckBox("Convert all images to RGB JPEG (--convert-images)")
+        layout.addWidget(self.convert_images_check)
+        layout.addWidget(_make_hint_label(CONVERT_IMAGES_HINT))
 
-        self.log = _make_log_widget(self, row=10, columnspan=3)
-        self.columnconfigure(1, weight=1)
-        self.rowconfigure(10, weight=1)
-        self.runner = UiTaskRunner(self, self.log, on_done=self._on_done)
+        self.run_button = QPushButton("Run Scan + Write PDFs")
+        self.run_button.clicked.connect(self._run)
+        layout.addWidget(self.run_button, alignment=Qt.AlignmentFlag.AlignLeft)
+
+        self.log = _make_log_widget()
+        layout.addWidget(self.log, 1)
+        self.runner = UiTaskRunner(self.log, on_done=self._on_done)
 
     def _browse(self) -> None:
-        d = filedialog.askdirectory(initialdir=self.root_var.get() or ".")
+        d = QFileDialog.getExistingDirectory(self, "Root folder", self.root_edit.text() or ".")
         if d:
-            self.root_var.set(d)
+            self.root_edit.setText(d)
 
     def _run(self) -> None:
-        root = self.root_var.get().strip()
+        root = self.root_edit.text().strip()
         if not root:
-            messagebox.showerror("All", "No root folder given.")
+            QMessageBox.critical(self, "All", "No root folder given.")
             return
-        self.run_button.configure(state="disabled")
+        self.run_button.setEnabled(False)
         review_csv = Path(self.config_.get("review_csv", "data/review.csv"))
         manual_overrides_path = Path(self.config_.get("manual_overrides", "data/manual_overrides.yaml"))
         thresholds = self.config_.get("matching", {})
         self.runner.start(
             self._worker, root, review_csv, manual_overrides_path, thresholds,
-            self.refresh_var.get(), self.apply_review_var.get(), self.bookorbit_var.get(),
-            self.convert_images_var.get(),
+            self.refresh_check.isChecked(), self.apply_review_check.isChecked(), self.bookorbit_check.isChecked(),
+            self.convert_images_check.isChecked(),
         )
 
     def _worker(
@@ -514,23 +715,67 @@ class AllTab(ttk.Frame):
         _do_write_pdfs(log, merged, root, bookorbit_mode, convert_images)
 
     def _on_done(self) -> None:
-        self.run_button.configure(state="normal")
+        self.run_button.setEnabled(True)
 
 
-class ReviewTab(ttk.Frame):
+class StatusDelegate(QStyledItemDelegate):
+    """Editor for the Review grid's `status` column: a closed-choice
+    QComboBox locked to Status's four values -- free text here would
+    silently break ReviewRow.is_approved()'s exact string match.
+    Structurally impossible to enter anything else, replacing the Tkinter
+    version's hand-rolled .bbox()-hit-tested ttk.Combobox overlay (which
+    had its own real bug: Treeview.identify_column() and .bbox() disagreed
+    about column boundaries on one Tk build -- see CLAUDE.md). Qt's item
+    delegates place/size the editor internally, so there's no manual hit-
+    testing left to get wrong."""
+
+    def createEditor(self, parent, option, index):  # noqa: N802 (Qt override naming)
+        combo = QComboBox(parent)
+        combo.addItems([s.value for s in Status])
+        combo.activated.connect(self._commit_and_close)
+        return combo
+
+    def _commit_and_close(self, _index: int) -> None:
+        editor = self.sender()
+        self.commitData.emit(editor)
+        self.closeEditor.emit(editor)
+
+    def setEditorData(self, editor, index):  # noqa: N802
+        current = index.data(Qt.ItemDataRole.DisplayRole) or ""
+        pos = editor.findText(current)
+        if pos >= 0:
+            editor.setCurrentIndex(pos)
+
+    def setModelData(self, editor, model, index):  # noqa: N802
+        model.setData(index, editor.currentText(), Qt.ItemDataRole.EditRole)
+
+
+class _DescriptionEdit(_StyledTextEdit):
+    """QPlainTextEdit has no built-in "editing finished" signal the way
+    QLineEdit does -- this adds one on focus-out, so the Review tab's
+    detail form can commit a description edit the same way it commits
+    every other field (on losing focus), without needing a separate
+    explicit "apply" button."""
+
+    focus_lost = pyqtSignal()
+
+    def focusOutEvent(self, event) -> None:  # noqa: N802
+        super().focusOutEvent(event)
+        self.focus_lost.emit()
+
+
+class ReviewTab(QWidget):
     """The scan -> approve -> write-pdfs workflow's approval step, done
     entirely in-GUI instead of handing off to a spreadsheet app. Reads/
-    writes review.csv unchanged (review.load_review/save_review); a
-    ttk.Treeview has no built-in cell editing, so:
-      - `status` gets a ttk.Combobox overlay locked to Status's four
-        values -- free text here would silently break
-        ReviewRow.is_approved()'s exact string match.
-      - `series`/`series_index` get a plain ttk.Entry overlay -- short,
-        common one-off corrections.
-      - everything else (publisher/authors/tags/product_url/isbn, and a
-        multi-line Text for description) is edited via the detail form
-        below the grid, populated on row selection.
-    Both surfaces write into the same in-memory rows_by_filename dict (the
+    writes review.csv unchanged (review.load_review/save_review).
+    `status`/`series`/`series_index` are editable directly in the grid
+    (status via StatusDelegate above; series/series_index via Qt's own
+    default line-edit cell editor -- no custom delegate needed for those,
+    see StatusDelegate's docstring for why a delegate is only needed where
+    free text would be wrong). Everything else (publisher/authors/tags/
+    product_url/isbn, and a multi-line field for description) is edited
+    via the detail form below the grid, populated on row selection. Both
+    surfaces write into the same in-memory rows_by_filename dict (the
     single source of truth) so the grid and the detail form can't diverge.
     """
 
@@ -538,63 +783,58 @@ class ReviewTab(ttk.Frame):
         "filename", "matched_title", "series", "series_index",
         "publisher", "confidence_score", "source", "status", "isbn",
     ]
-    OVERLAY_COLUMNS = {"status", "series", "series_index"}
+    EDITABLE_COLUMNS = {"series", "series_index", "status"}
     DETAIL_FIELDS = ["publisher", "authors", "tags", "product_url", "isbn"]
 
-    def __init__(self, parent: tk.Widget, config: dict):
-        super().__init__(parent, padding=10)
+    def __init__(self, config: dict):
+        super().__init__()
         self.review_csv = Path(config.get("review_csv", "data/review.csv"))
         self.rows_by_filename: dict[str, ReviewRow] = {}
+        self._row_of_filename: dict[str, int] = {}
         self._selected_filename: str | None = None
-        self._editor: tk.Widget | None = None
 
-        _make_description_label(
-            self,
+        layout = QVBoxLayout(self)
+        layout.addWidget(_make_description_label(
             "Approve or edit matches from review.csv directly -- change a row's status, fix its "
             "series, or edit its description -- then Save. Reload picks up a fresh Scan or an "
-            "external hand-edit.",
-        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
+            "external hand-edit."
+        ))
 
-        toolbar = ttk.Frame(self)
-        toolbar.grid(row=1, column=0, columnspan=2, sticky="we")
-        ttk.Button(toolbar, text="Reload", command=self.reload).pack(side="left")
-        ttk.Button(toolbar, text="Save", command=self.save).pack(side="left", padx=(6, 0))
-        self.counts_label = ttk.Label(toolbar, text="")
-        self.counts_label.pack(side="left", padx=(16, 0))
+        toolbar = QHBoxLayout()
+        reload_button = QPushButton("Reload")
+        reload_button.clicked.connect(self.reload)
+        toolbar.addWidget(reload_button)
+        save_button = QPushButton("Save")
+        save_button.clicked.connect(self.save)
+        toolbar.addWidget(save_button)
+        self.counts_label = QLabel("")
+        toolbar.addWidget(self.counts_label)
+        toolbar.addStretch(1)
+        layout.addLayout(toolbar)
 
-        self.tree = ttk.Treeview(self, columns=self.GRID_COLUMNS, show="headings", height=14)
-        for col in self.GRID_COLUMNS:
-            self.tree.heading(col, text=col)
-            self.tree.column(col, width=100, stretch=True)
-        self.tree.grid(row=2, column=0, sticky="nsew")
-        tree_scroll = ttk.Scrollbar(self, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=tree_scroll.set)
-        tree_scroll.grid(row=2, column=1, sticky="ns")
-        self.tree.bind("<Double-1>", self._begin_edit)
-        self.tree.bind("<<TreeviewSelect>>", self._on_select)
+        self.table = QTableWidget(0, len(self.GRID_COLUMNS))
+        self.table.setHorizontalHeaderLabels(self.GRID_COLUMNS)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setItemDelegateForColumn(self.GRID_COLUMNS.index("status"), StatusDelegate(self.table))
+        self.table.itemChanged.connect(self._on_item_changed)
+        self.table.currentCellChanged.connect(self._on_current_cell_changed)
+        layout.addWidget(self.table, 1)
 
-        detail = ttk.LabelFrame(self, text="Details for selected row")
-        detail.grid(row=3, column=0, columnspan=2, sticky="nsew", pady=(8, 0))
-        detail.columnconfigure(1, weight=1)
-
-        self.detail_vars: dict[str, tk.StringVar] = {}
-        r = 0
+        detail_box = QGroupBox("Details for selected row")
+        detail_layout = QFormLayout(detail_box)
+        self.detail_edits: dict[str, QLineEdit] = {}
         for field in self.DETAIL_FIELDS:
-            ttk.Label(detail, text=f"{field}:").grid(row=r, column=0, sticky="w")
-            var = tk.StringVar()
-            entry = ttk.Entry(detail, textvariable=var, width=60)
-            entry.grid(row=r, column=1, sticky="we")
-            entry.bind("<FocusOut>", lambda _e, f=field: self._commit_detail_field(f))
-            self.detail_vars[field] = var
-            r += 1
+            edit = QLineEdit()
+            edit.editingFinished.connect(lambda f=field: self._commit_detail_field(f))
+            detail_layout.addRow(f"{field}:", edit)
+            self.detail_edits[field] = edit
 
-        ttk.Label(detail, text="description:").grid(row=r, column=0, sticky="nw")
-        self.description_text = tk.Text(detail, height=5, width=60, wrap="word")
-        self.description_text.grid(row=r, column=1, sticky="we")
-        self.description_text.bind("<FocusOut>", lambda _e: self._commit_description())
-
-        self.columnconfigure(0, weight=1)
-        self.rowconfigure(2, weight=1)
+        self.description_edit = _DescriptionEdit()
+        self.description_edit.setFixedHeight(100)
+        self.description_edit.focus_lost.connect(self._commit_description)
+        detail_layout.addRow("description:", self.description_edit)
+        layout.addWidget(detail_box)
 
         self.reload()
 
@@ -602,182 +842,170 @@ class ReviewTab(ttk.Frame):
         rows = load_review(self.review_csv)
         self.rows_by_filename = {row.filename: row for row in rows}
         self._selected_filename = None
-        self._populate_tree()
+        self._populate_table()
 
     def save(self) -> None:
         save_review(self.review_csv, list(self.rows_by_filename.values()))
-        messagebox.showinfo("Review", f"Saved {len(self.rows_by_filename)} rows to {self.review_csv}")
+        QMessageBox.information(self, "Review", f"Saved {len(self.rows_by_filename)} rows to {self.review_csv}")
 
-    def _populate_tree(self) -> None:
-        self.tree.delete(*self.tree.get_children())
-        for filename, row in self.rows_by_filename.items():
-            values = [getattr(row, col) for col in self.GRID_COLUMNS]
-            self.tree.insert("", "end", iid=filename, values=values)
+    def _populate_table(self) -> None:
+        # Must block signals here -- QTableWidget.itemChanged fires for
+        # setItem() just as it does for a real user edit, and without this
+        # guard, populating N rows would fire N spurious commits into
+        # rows_by_filename (each one populating from data that's still
+        # only partially loaded) before the table is even done being
+        # built. No Tkinter analog: ttk.Treeview has no equivalent signal
+        # that fires during bulk insert.
+        self.table.blockSignals(True)
+        rows = list(self.rows_by_filename.values())
+        self.table.setRowCount(len(rows))
+        self._row_of_filename = {}
+        for r, row in enumerate(rows):
+            self._row_of_filename[row.filename] = r
+            for c, col in enumerate(self.GRID_COLUMNS):
+                item = QTableWidgetItem(getattr(row, col))
+                if col not in self.EDITABLE_COLUMNS:
+                    item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                self.table.setItem(r, c, item)
+        self.table.blockSignals(False)
         self._refresh_counts()
 
     def _refresh_counts(self) -> None:
         counts = Counter(row.status for row in self.rows_by_filename.values())
         summary = ", ".join(f"{status}={count}" for status, count in sorted(counts.items()))
-        self.counts_label.configure(text=f"{len(self.rows_by_filename)} rows: {summary}")
+        self.counts_label.setText(f"{len(self.rows_by_filename)} rows: {summary}")
 
-    def _on_select(self, _event=None) -> None:
-        selected = self.tree.selection()
-        if not selected:
+    def _row_filename(self, row_index: int) -> str | None:
+        item = self.table.item(row_index, self.GRID_COLUMNS.index("filename"))
+        return item.text() if item is not None else None
+
+    def _on_current_cell_changed(self, current_row: int, _current_col: int, _prev_row: int, _prev_col: int) -> None:
+        if current_row < 0:
             self._selected_filename = None
             return
-        filename = selected[0]
+        filename = self._row_filename(current_row)
         self._selected_filename = filename
+        if filename is None:
+            return
         row = self.rows_by_filename[filename]
         for field in self.DETAIL_FIELDS:
-            self.detail_vars[field].set(getattr(row, field))
-        self.description_text.delete("1.0", "end")
-        self.description_text.insert("1.0", row.description)
+            self.detail_edits[field].setText(getattr(row, field))
+        self.description_edit.setPlainText(row.description)
+
+    def _on_item_changed(self, item: QTableWidgetItem) -> None:
+        filename = self._row_filename(item.row())
+        if filename is None:
+            return
+        col = self.GRID_COLUMNS[item.column()]
+        setattr(self.rows_by_filename[filename], col, item.text())
+        if col == "status":
+            self._refresh_counts()
 
     def _commit_detail_field(self, field: str) -> None:
         if self._selected_filename is None:
             return
         row = self.rows_by_filename[self._selected_filename]
-        setattr(row, field, self.detail_vars[field].get())
+        setattr(row, field, self.detail_edits[field].text())
         if field in self.GRID_COLUMNS:
-            self.tree.set(self._selected_filename, field, getattr(row, field))
+            self._set_table_cell(self._selected_filename, field, getattr(row, field))
 
     def _commit_description(self) -> None:
         if self._selected_filename is None:
             return
-        self.rows_by_filename[self._selected_filename].description = self.description_text.get("1.0", "end-1c")
+        self.rows_by_filename[self._selected_filename].description = self.description_edit.toPlainText()
 
-    def _begin_edit(self, event) -> None:
-        if self._editor is not None:
-            self._editor.destroy()
-            self._editor = None
-        if self.tree.identify("region", event.x, event.y) != "cell":
+    def _set_table_cell(self, filename: str, col_name: str, value: str) -> None:
+        row_index = self._row_of_filename.get(filename)
+        if row_index is None:
             return
-        row_id = self.tree.identify_row(event.y)
-        if not row_id:
-            return
-        # Deliberately not using identify_column()'s "#N" result here --
-        # verified empirically (a throwaway script comparing bbox(item,
-        # name) for every column against identify_column() at that exact
-        # point) that the two disagreed on this Tk build: bbox said
-        # "status" started at x=700, but identify_column(702) reported
-        # the column one to its left ("source"). Hit-testing directly
-        # against each column's own bbox sidesteps whatever's causing
-        # that mismatch, rather than trusting either API's numbering.
-        col_name = None
-        for candidate in self.GRID_COLUMNS:
-            bbox = self.tree.bbox(row_id, candidate)
-            if bbox and bbox[0] <= event.x < bbox[0] + bbox[2]:
-                col_name = candidate
-                break
-        if col_name is None or col_name not in self.OVERLAY_COLUMNS:
-            return
-        x, y, width, height = bbox
-        current = self.tree.set(row_id, col_name)
-
-        if col_name == "status":
-            editor: tk.Widget = ttk.Combobox(self.tree, values=[s.value for s in Status], state="readonly")
-            editor.set(current)
-        else:
-            editor = ttk.Entry(self.tree)
-            editor.insert(0, current)
-            editor.select_range(0, "end")
-        editor.place(x=x, y=y, width=width, height=height)
-        editor.focus_set()
-        self._editor = editor
-
-        def commit(_event=None) -> None:
-            new_value = editor.get()
-            self.tree.set(row_id, col_name, new_value)
-            setattr(self.rows_by_filename[row_id], col_name, new_value)
-            if col_name == "status":
-                self._refresh_counts()
-            editor.destroy()
-            self._editor = None
-
-        editor.bind("<Return>", commit)
-        editor.bind("<FocusOut>", commit)
-        if col_name == "status":
-            editor.bind("<<ComboboxSelected>>", commit)
+        self.table.blockSignals(True)
+        self.table.item(row_index, self.GRID_COLUMNS.index(col_name)).setText(value)
+        self.table.blockSignals(False)
 
 
-class PreferencesTab(ttk.Frame):
+class PreferencesTab(QWidget):
     """Saved API key + DriveThruRPG name -- see preferences.py's module
     docstring for why these live in their own gitignored, owner-only-
     permissioned file rather than config.yaml. The API key field is
     masked by default (a real secret), with a checkbox to reveal it,
     matching preferences_tui.py's equivalent in the TUI."""
 
-    def __init__(self, parent: tk.Widget, config: dict):
-        super().__init__(parent, padding=10)
+    def __init__(self, config: dict):
+        super().__init__()
         self.preferences_path = Path(config.get("preferences", str(DEFAULT_PREFERENCES_PATH)))
         prefs = load_preferences(self.preferences_path)
 
-        _make_description_label(
-            self,
+        layout = QVBoxLayout(self)
+        layout.addWidget(_make_description_label(
             f"Your DriveThruRPG API key and account name, saved to {self.preferences_path} -- "
             "not config.yaml, which is meant to be safe to share/commit. An existing "
-            "DTRPG_API_KEY environment variable always takes priority over what's saved here.",
-        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
+            "DTRPG_API_KEY environment variable always takes priority over what's saved here."
+        ))
 
-        self.api_key_var = tk.StringVar(value=prefs.api_key)
-        self.show_key_var = tk.BooleanVar(value=False)
-        self.name_var = tk.StringVar(value=prefs.dtrpg_name)
+        form = QFormLayout()
+        self.api_key_edit = QLineEdit(prefs.api_key)
+        self.api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        form.addRow("API Key:", self.api_key_edit)
 
-        ttk.Label(self, text="API Key:").grid(row=1, column=0, sticky="w")
-        self.api_key_entry = ttk.Entry(self, textvariable=self.api_key_var, width=50, show="*")
-        self.api_key_entry.grid(row=1, column=1, sticky="we")
-        ttk.Checkbutton(
-            self, text="Show API key", variable=self.show_key_var, command=self._toggle_show
-        ).grid(row=2, column=1, sticky="w")
+        self.show_key_check = QCheckBox("Show API key")
+        self.show_key_check.toggled.connect(self._toggle_show)
+        form.addRow("", self.show_key_check)
 
-        ttk.Label(self, text="DriveThruRPG Name:").grid(row=3, column=0, sticky="w", pady=(8, 0))
-        ttk.Entry(self, textvariable=self.name_var, width=50).grid(row=3, column=1, sticky="we", pady=(8, 0))
+        self.name_edit = QLineEdit(prefs.dtrpg_name)
+        form.addRow("DriveThruRPG Name:", self.name_edit)
+        layout.addLayout(form)
 
-        self.save_button = ttk.Button(self, text="Save Preferences", command=self._save)
-        self.save_button.grid(row=4, column=0, sticky="w", pady=(10, 0))
-        self.status_label = ttk.Label(self, text="")
-        self.status_label.grid(row=4, column=1, sticky="w", pady=(10, 0))
+        save_row = QHBoxLayout()
+        self.save_button = QPushButton("Save Preferences")
+        self.save_button.clicked.connect(self._save)
+        save_row.addWidget(self.save_button)
+        self.status_label = QLabel("")
+        save_row.addWidget(self.status_label)
+        save_row.addStretch(1)
+        layout.addLayout(save_row)
+        layout.addStretch(1)
 
-        self.columnconfigure(1, weight=1)
-
-    def _toggle_show(self) -> None:
-        self.api_key_entry.configure(show="" if self.show_key_var.get() else "*")
+    def _toggle_show(self, checked: bool) -> None:
+        self.api_key_edit.setEchoMode(QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password)
 
     def _save(self) -> None:
-        prefs = Preferences(api_key=self.api_key_var.get().strip(), dtrpg_name=self.name_var.get().strip())
+        prefs = Preferences(api_key=self.api_key_edit.text().strip(), dtrpg_name=self.name_edit.text().strip())
         save_preferences(prefs, self.preferences_path)
-        self.status_label.configure(text=f"Saved to {self.preferences_path}")
+        self.status_label.setText(f"Saved to {self.preferences_path}")
 
 
-class GuiApp(tk.Tk):
+class GuiApp(QWidget):
     def __init__(self, config: dict):
         super().__init__()
-        self.title("dtrpg-metadata-download")
-        self.geometry("950x700")
+        self.setWindowTitle("dtrpg-metadata-download")
+        self.resize(950, 700)
 
         from gui_tag_flow import TagTab
 
-        notebook = ttk.Notebook(self)
-        notebook.pack(fill="both", expand=True)
-        self._tag_tab = TagTab(notebook, config)
-        notebook.add(self._tag_tab, text="Tag")
-        notebook.add(ScanTab(notebook, config), text="Scan")
-        notebook.add(ReviewTab(notebook, config), text="Review")
-        notebook.add(WritePdfsTab(notebook, config), text="Write PDFs")
-        notebook.add(RenameTab(notebook, config), text="Rename")
-        notebook.add(AllTab(notebook, config), text="All")
-        notebook.add(PreferencesTab(notebook, config), text="Preferences")
+        tabs = QTabWidget(self)
+        self._tag_tab = TagTab(config)
+        tabs.addTab(self._tag_tab, "Tag")
+        tabs.addTab(ScanTab(config), "Scan")
+        tabs.addTab(ReviewTab(config), "Review")
+        tabs.addTab(WritePdfsTab(config), "Write PDFs")
+        tabs.addTab(RenameTab(config), "Rename")
+        tabs.addTab(AllTab(config), "All")
+        tabs.addTab(PreferencesTab(config), "Preferences")
 
-        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        layout = QVBoxLayout(self)
+        layout.addWidget(tabs)
 
-    def _on_close(self) -> None:
+    def closeEvent(self, event) -> None:  # noqa: N802
         # Unblocks the Tag tab's worker thread if it's mid-run waiting on
         # a dialog answer that will now never come -- see TagTab.stop()'s
-        # own docstring for why this is a courtesy, not a correctness
-        # requirement (the worker is daemon=True either way).
+        # own docstring for why this is a best-effort courtesy, not a
+        # correctness requirement.
         self._tag_tab.stop()
-        self.destroy()
+        super().closeEvent(event)
 
 
 def run_gui(config: dict) -> None:
-    GuiApp(config).mainloop()
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = GuiApp(config)
+    window.show()
+    app.exec()

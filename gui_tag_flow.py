@@ -1,51 +1,75 @@
-"""Tag tab: Tkinter port of tag_tui.py's interactive flow (candidate
-list, manual entry, confirm-then-write, the batch/per-book series
-dialogs). Reuses tag_tui.py's pure helpers and result dataclasses
-directly -- resolve_series/build_manual_metadata/apply_edits/
-format_candidate_lines/do_rename/CandidateResult/ManualEntryResult/
-ConfirmResult -- rather than reimplementing any of that logic; only the
-*presentation* differs.
+"""Tag tab: PyQt6 port of tag_tui.py's interactive flow (candidate list,
+manual entry, confirm-then-write, the batch/per-book series dialogs).
+Reuses tag_tui.py's pure helpers and result dataclasses directly --
+resolve_series/build_manual_metadata/apply_edits/format_candidate_lines/
+do_rename/CandidateResult/ManualEntryResult/ConfirmResult -- rather than
+reimplementing any of that logic; only the *presentation* differs.
 
 The central problem this file solves: Textual's `push_screen_wait()`
-(push a screen, `await` until it's dismissed) has no Tkinter equivalent
--- Tkinter has no async event loop, and only the main thread may touch
-widgets. TagFlowController runs the same orchestration TagApp does
-(run/_process_one/_confirm_and_write/_manual_entry/_maybe_ask_series/
-_write_and_maybe_rename, ported near-verbatim from tag_tui.py) on a
-background daemon thread. Every place the original does
+(push a screen, `await` until it's dismissed) has no direct PyQt6
+equivalent, and the actual tagging work (network calls, pikepdf I/O) must
+run off the GUI thread so the window doesn't freeze -- but only the GUI
+thread may build/exec a QDialog. TagFlowController (a plain, framework-
+agnostic class -- an almost line-for-line port of TagApp's own
+orchestration methods from tag_tui.py) runs on a background QThread via
+TagWorker. Every place the original does
 `await self.push_screen_wait(SomeScreen(...))`, this does a blocking
 `self._ask(kind, payload)` call instead:
 
-  1. `_ask()` puts (kind, payload, a fresh single-slot response queue)
-     onto one shared request_queue, then blocks the *worker* thread on
-     that response queue's `.get()`.
-  2. TagTab's `root.after(POLL_MS, ...)` poll loop (main thread) drains
-     request_queue and calls the matching show_*_dialog() function,
-     which builds a tk.Toplevel, waits on it via `.wait_window()`
-     (Tkinter's own "block here until this window closes" primitive --
-     it re-enters Tk's event loop, so the dialog's own widgets keep
-     working while it's up), then puts the result on the response queue.
-  3. The worker thread's `.get()` unblocks and the controller continues.
+  1. `_ask()` builds a fresh single-slot `queue.Queue`, calls the
+     `notify` callback given to the controller (TagWorker._notify, which
+     just emits `dialog_requested`), then blocks the *worker* thread on
+     that queue's `.get()`. This part is functionally identical to
+     `tag_tui.py`'s Textual version and to this file's own earlier
+     Tkinter version -- queue.Queue is still the right primitive for a
+     one-shot cross-thread mailbox regardless of which GUI toolkit is
+     asking the question.
+  2. TagTab's `_on_dialog_requested` slot (connected to `dialog_requested`
+     with Qt's default auto/queued cross-thread connection, so it runs on
+     the GUI thread no matter which thread emitted the signal) builds the
+     matching QDialog subclass and calls `.exec()` -- Qt's own "block
+     here (this thread only) until this modal window closes" primitive,
+     playing the same role `Toplevel`+`wait_window()` played in the
+     Tkinter version. Once the dialog closes, its `.value` attribute is
+     read and put on the response queue.
+  3. The worker thread's `.get()` unblocks and `_ask()` returns.
 
-Verified concretely before relying on it (matching this project's
-verify-don't-assume habit): unlike Textual, a Tkinter Toplevel-level key
-binding (e.g. bind("m", ...)) *also* fires while a plain Entry has focus
-and is receiving that same keystroke as typed text -- so letter mnemonics
-("m" for manual entry, "q" for quit) are deliberately NOT bound globally
-on any dialog that also has a free-text Entry, since that would corrupt
-typing. Escape and Control-s were separately verified safe (neither
-inserts a character into a focused Entry) and are used instead, matching
-tag_tui.py's Escape-to-skip/cancel and ctrl+s-to-submit/confirm bindings.
+This is simpler than the Tkinter version needed to be: Qt's cross-thread
+signal delivery replaces both the shared `request_queue` *and* the
+`root.after(POLL_MS, ...)` polling loop that used to drain it -- there's
+no polling here at all, and (unlike Tkinter, where the main thread's
+`_poll()` and window-close handling both raced against an independent
+queue) a dialog request can never sit "pending" while the GUI thread does
+something else: `.exec()` blocks the entire GUI event loop until that one
+dialog closes, so by construction there's nothing else for the GUI thread
+to be doing at the same time.
 """
 
 from __future__ import annotations
 
 import queue
 import threading
-import tkinter as tk
 from dataclasses import replace
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+
+from PyQt6.QtCore import QObject, Qt, QThread, pyqtSignal, pyqtSlot
+from PyQt6.QtGui import QKeySequence, QShortcut
+from PyQt6.QtWidgets import (
+    QButtonGroup,
+    QCheckBox,
+    QDialog,
+    QFileDialog,
+    QFormLayout,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QListWidget,
+    QMessageBox,
+    QPushButton,
+    QRadioButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 from matcher import extract_product_id, find_candidates, load_known_urls, load_manual_overrides, row_from_match, scan_pdfs
 from pdf_writer import write_metadata
@@ -66,17 +90,19 @@ from gui_app import (
     BOOKORBIT_HINT,
     BOOKORBIT_URL,
     CONVERT_IMAGES_HINT,
-    POLL_MS,
     RENAME_HINT,
     _make_description_label,
     _make_hint_label,
     _make_link_label,
     _make_log_widget,
+    _StyledTextEdit,
     build_client_safe,
 )
 
 # ---------------------------------------------------------------------------
-# Orchestration -- runs on a background thread
+# Orchestration -- runs on a background thread. Framework-agnostic (no Qt
+# import here at all): it only needs a `notify(kind, payload, response_q)`
+# callback and a `log(line)` callback, both supplied by TagWorker below.
 # ---------------------------------------------------------------------------
 
 
@@ -97,7 +123,7 @@ class TagFlowController:
         bookorbit_mode: bool,
         rename: bool,
         root_mode: bool,
-        request_queue: "queue.Queue",
+        notify,
         log,
         stop_event: threading.Event,
         convert_images: bool = False,
@@ -111,7 +137,7 @@ class TagFlowController:
         self.convert_images = convert_images
         self.rename = rename
         self.root_mode = root_mode
-        self.request_queue = request_queue
+        self._notify = notify
         self._log_cb = log
         self.stop_event = stop_event
         self.history: list[str] = []
@@ -127,7 +153,7 @@ class TagFlowController:
         if self.stop_event.is_set():
             return self.quit_result(kind)
         response_q: queue.Queue = queue.Queue(maxsize=1)
-        self.request_queue.put((kind, payload, response_q))
+        self._notify(kind, payload, response_q)
         return response_q.get()
 
     @staticmethod
@@ -261,11 +287,12 @@ class TagFlowController:
         return replace(meta, series=series) if series else meta
 
     def _write_and_maybe_rename(self, path: Path, row: ReviewRow) -> None:
-        # Unlike tag_tui.py's TagApp, this controller already runs
-        # entirely on its own single worker thread (no further threading
-        # inside write_metadata()), and self._log() only appends to a
-        # plain list and puts onto a thread-safe queue.Queue -- safe to
-        # call directly here with no marshaling back to the main thread.
+        # This controller already runs entirely on its own single worker
+        # thread (no further threading inside write_metadata()), and
+        # self._log() only appends to a plain list and calls a plain
+        # callback (TagWorker._log, which just emits a Qt signal -- safe
+        # from any thread) -- safe to call directly here with no
+        # marshaling back to the GUI thread.
         result = write_metadata(
             path, row, bookorbit_mode=self.bookorbit_mode, convert_images=self.convert_images, log=self._log
         )
@@ -276,361 +303,400 @@ class TagFlowController:
                 self._log(outcome)
 
 
-# ---------------------------------------------------------------------------
-# Dialogs -- built on the main thread only, one per TagApp screen
-# ---------------------------------------------------------------------------
+class TagWorker(QObject):
+    """Lives on a background QThread; runs TagFlowController.run() there.
+    `dialog_requested` carries a fresh single-slot queue.Queue per
+    request -- TagFlowController._ask() blocks on that queue's .get() (a
+    worker-thread concern, unaffected by which thread eventually answers
+    it); this signal only handles the *notification* step, crossing from
+    the worker thread to whichever thread the connected slot's receiver
+    lives on (TagTab, on the GUI thread) via Qt's automatic queued
+    cross-thread signal delivery -- emitting a signal is safe from any
+    thread, unlike calling a GUI-thread object's methods directly."""
 
+    dialog_requested = pyqtSignal(str, dict, object)
+    log_line = pyqtSignal(str)
+    finished = pyqtSignal()
 
-def show_batch_series_dialog(parent: tk.Misc, payload: dict) -> str | None:
-    dialog = tk.Toplevel(parent)
-    dialog.title("Series for this batch")
-    dialog.transient(parent)
-    dialog.grab_set()
-    result = {"value": None}
-
-    ttk.Label(dialog, text="Series name for this batch:").pack(anchor="w", padx=10, pady=(10, 0))
-    ttk.Label(dialog, text="Leave blank if all books are not in the same series.").pack(anchor="w", padx=10)
-    var = tk.StringVar()
-    entry = ttk.Entry(dialog, textvariable=var, width=50)
-    entry.pack(fill="x", padx=10, pady=6)
-    entry.focus_set()
-
-    def submit(_event=None) -> None:
-        result["value"] = var.get().strip() or None
-        dialog.destroy()
-
-    ttk.Button(dialog, text="Continue", command=submit).pack(pady=(0, 10))
-    entry.bind("<Return>", submit)
-    dialog.protocol("WM_DELETE_WINDOW", submit)
-    dialog.wait_window()
-    return result["value"]
-
-
-def show_series_dialog(parent: tk.Misc, payload: dict) -> str:
-    book_title = payload["book_title"]
-    dialog = tk.Toplevel(parent)
-    dialog.title("Series")
-    dialog.transient(parent)
-    dialog.grab_set()
-    result = {"value": ""}
-
-    ttk.Label(dialog, text=f"Series for {book_title}:").pack(anchor="w", padx=10, pady=(10, 0))
-    ttk.Label(dialog, text="Leave blank for no series.").pack(anchor="w", padx=10)
-    var = tk.StringVar()
-    entry = ttk.Entry(dialog, textvariable=var, width=50)
-    entry.pack(fill="x", padx=10, pady=6)
-    entry.focus_set()
-
-    def submit(_event=None) -> None:
-        result["value"] = var.get().strip()
-        dialog.destroy()
-
-    ttk.Button(dialog, text="Continue", command=submit).pack(pady=(0, 10))
-    entry.bind("<Return>", submit)
-    dialog.protocol("WM_DELETE_WINDOW", submit)
-    dialog.wait_window()
-    return result["value"]
-
-
-def show_candidate_dialog(parent: tk.Misc, payload: dict) -> CandidateResult:
-    path: Path = payload["path"]
-    progress: str = payload["progress"]
-    candidates: list[tuple[ProductMetadata, float]] = payload["candidates"]
-
-    dialog = tk.Toplevel(parent)
-    dialog.title(f"{progress} Candidates for {path.name}".strip())
-    dialog.transient(parent)
-    dialog.grab_set()
-    dialog.geometry("620x460")
-
-    result = {"value": CandidateResult(action="skip")}
-
-    listbox: tk.Listbox | None = None
-    if candidates:
-        ttk.Label(
-            dialog, text=f"{progress} Choose a Book from the List Provided ({path.name}):".strip()
-        ).pack(anchor="w", padx=10, pady=(10, 0))
-        listbox = tk.Listbox(dialog, height=10)
-        for meta, score in candidates:
-            listbox.insert("end", format_candidate_lines(meta, score).splitlines()[0])
-        listbox.pack(fill="both", expand=True, padx=10, pady=6)
-        listbox.selection_set(0)
-    else:
-        ttk.Label(dialog, text=f"{progress} No candidates found for {path.name}.".strip()).pack(
-            anchor="w", padx=10, pady=(10, 0)
+    def __init__(
+        self, pdfs, client, manual_overrides, known_urls, thresholds,
+        bookorbit_mode, rename, root_mode, stop_event, convert_images=False,
+    ):
+        super().__init__()
+        self.controller = TagFlowController(
+            pdfs=pdfs, client=client, manual_overrides=manual_overrides, known_urls=known_urls,
+            thresholds=thresholds, bookorbit_mode=bookorbit_mode, rename=rename, root_mode=root_mode,
+            notify=self._notify, log=self._log, stop_event=stop_event, convert_images=convert_images,
         )
 
-    ttk.Label(dialog, text="Paste a DriveThruRPG URL, or type id:PRODUCT_ID:").pack(
-        anchor="w", padx=10, pady=(6, 0)
-    )
-    url_row = ttk.Frame(dialog)
-    url_row.pack(fill="x", padx=10, pady=(0, 6))
-    url_var = tk.StringVar()
-    url_entry = ttk.Entry(url_row, textvariable=url_var, width=42)
-    url_entry.pack(side="left", fill="x", expand=True)
+    def _notify(self, kind: str, payload: dict, response_q: "queue.Queue") -> None:
+        self.dialog_requested.emit(kind, payload, response_q)
 
-    def pick(_event=None) -> None:
-        if listbox is None:
-            return
-        selection = listbox.curselection()
-        if not selection:
-            return
-        result["value"] = CandidateResult(action="pick", index=selection[0])
-        dialog.destroy()
+    def _log(self, line: str) -> None:
+        self.log_line.emit(line)
 
-    def submit_url(_event=None) -> None:
-        text = url_var.get().strip()
+    def run(self) -> None:
+        self.controller.run()
+        self.finished.emit()
+
+
+# ---------------------------------------------------------------------------
+# Dialogs -- built and .exec()'d on the GUI thread only, one class per
+# TagApp screen. Each exposes a `.value` attribute (deliberately not named
+# `.result` -- QDialog already has a built-in `.result()` method returning
+# its Accepted/Rejected exec() code, which this isn't) holding the typed
+# result the caller reads once `.exec()` returns.
+# ---------------------------------------------------------------------------
+
+
+class BatchSeriesDialog(QDialog):
+    def __init__(self, parent, payload: dict):
+        super().__init__(parent)
+        self.setWindowTitle("Series for this batch")
+        self.value: str | None = None
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Series name for this batch:"))
+        layout.addWidget(QLabel("Leave blank if all books are not in the same series."))
+        self.edit = QLineEdit()
+        self.edit.returnPressed.connect(self._submit)
+        layout.addWidget(self.edit)
+        button = QPushButton("Continue")
+        button.clicked.connect(self._submit)
+        layout.addWidget(button)
+        self.edit.setFocus()
+
+    def _submit(self) -> None:
+        self.value = self.edit.text().strip() or None
+        self.accept()
+
+    def reject(self) -> None:
+        # No real "cancel" state for this dialog -- window-close/Escape
+        # still submits whatever's currently typed, matching the original
+        # Tkinter version's WM_DELETE_WINDOW-→submit behavior.
+        self.value = self.edit.text().strip() or None
+        super().reject()
+
+
+class SeriesDialog(QDialog):
+    def __init__(self, parent, payload: dict):
+        super().__init__(parent)
+        book_title = payload["book_title"]
+        self.setWindowTitle("Series")
+        self.value: str = ""
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(f"Series for {book_title}:"))
+        layout.addWidget(QLabel("Leave blank for no series."))
+        self.edit = QLineEdit()
+        self.edit.returnPressed.connect(self._submit)
+        layout.addWidget(self.edit)
+        button = QPushButton("Continue")
+        button.clicked.connect(self._submit)
+        layout.addWidget(button)
+        self.edit.setFocus()
+
+    def _submit(self) -> None:
+        self.value = self.edit.text().strip()
+        self.accept()
+
+    def reject(self) -> None:
+        self.value = self.edit.text().strip()
+        super().reject()
+
+
+class CandidateDialog(QDialog):
+    def __init__(self, parent, payload: dict):
+        super().__init__(parent)
+        path: Path = payload["path"]
+        progress: str = payload["progress"]
+        self.candidates: list[tuple[ProductMetadata, float]] = payload["candidates"]
+        self.setWindowTitle(f"{progress} Candidates for {path.name}".strip())
+        self.resize(620, 460)
+        self.value: CandidateResult = CandidateResult(action="skip")
+
+        layout = QVBoxLayout(self)
+        self.list_widget: QListWidget | None = None
+        if self.candidates:
+            layout.addWidget(QLabel(f"{progress} Choose a Book from the List Provided ({path.name}):".strip()))
+            self.list_widget = QListWidget()
+            for meta, score in self.candidates:
+                self.list_widget.addItem(format_candidate_lines(meta, score).splitlines()[0])
+            self.list_widget.setCurrentRow(0)
+            self.list_widget.itemDoubleClicked.connect(lambda _item: self._pick())
+            layout.addWidget(self.list_widget, 1)
+        else:
+            layout.addWidget(QLabel(f"{progress} No candidates found for {path.name}.".strip()))
+
+        layout.addWidget(QLabel("Paste a DriveThruRPG URL, or type id:PRODUCT_ID:"))
+        url_row = QHBoxLayout()
+        self.url_edit = QLineEdit()
+        self.url_edit.returnPressed.connect(self._submit_url)
+        url_row.addWidget(self.url_edit, 1)
+        use_url_button = QPushButton("Use URL")
+        use_url_button.clicked.connect(self._submit_url)
+        url_row.addWidget(use_url_button)
+        layout.addLayout(url_row)
+
+        buttons = QHBoxLayout()
+        self.pick_button: QPushButton | None = None
+        if self.list_widget is not None:
+            self.pick_button = QPushButton("Pick")
+            self.pick_button.clicked.connect(self._pick)
+            buttons.addWidget(self.pick_button)
+        self.manual_button = QPushButton("Manual entry")
+        self.manual_button.clicked.connect(self._manual)
+        buttons.addWidget(self.manual_button)
+        self.skip_button = QPushButton("Skip (Esc)")
+        self.skip_button.clicked.connect(self._skip)
+        buttons.addWidget(self.skip_button)
+        self.quit_button = QPushButton("Quit")
+        self.quit_button.clicked.connect(self._quit)
+        buttons.addWidget(self.quit_button)
+        layout.addLayout(buttons)
+
+        if self.list_widget is not None:
+            self.list_widget.setFocus()
+        else:
+            self.url_edit.setFocus()
+
+    def _pick(self) -> None:
+        if self.list_widget is None:
+            return
+        row = self.list_widget.currentRow()
+        if row < 0:
+            return
+        self.value = CandidateResult(action="pick", index=row)
+        self.accept()
+
+    def _submit_url(self) -> None:
+        text = self.url_edit.text().strip()
         if not text:
             return
         product_id = extract_product_id(text)
         if product_id:
-            result["value"] = CandidateResult(action="url", product_id=product_id)
-            dialog.destroy()
+            self.value = CandidateResult(action="url", product_id=product_id)
+            self.accept()
         else:
-            messagebox.showerror("Candidates", "Could not parse a product ID/URL from that.", parent=dialog)
+            QMessageBox.critical(self, "Candidates", "Could not parse a product ID/URL from that.")
 
-    def manual(_event=None) -> None:
-        result["value"] = CandidateResult(action="manual")
-        dialog.destroy()
+    def _manual(self) -> None:
+        self.value = CandidateResult(action="manual")
+        self.accept()
 
-    def skip(_event=None) -> None:
-        result["value"] = CandidateResult(action="skip")
-        dialog.destroy()
+    def _skip(self) -> None:
+        self.value = CandidateResult(action="skip")
+        self.accept()
 
-    def quit_batch() -> None:
-        result["value"] = CandidateResult(action="quit")
-        dialog.destroy()
+    def _quit(self) -> None:
+        self.value = CandidateResult(action="quit")
+        self.accept()
 
-    if listbox is not None:
-        listbox.bind("<Double-1>", pick)
-        listbox.bind("<Return>", pick)
-        listbox.focus_set()
-    else:
-        url_entry.focus_set()
-    url_entry.bind("<Return>", submit_url)
-    ttk.Button(url_row, text="Use URL", command=submit_url).pack(side="left", padx=(4, 0))
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        # Escape means Skip; window-close (the OS close button, handled
+        # by reject() below since it's never intercepted here) means
+        # Quit -- these are distinct outcomes today and must stay
+        # distinct, matching the original Tkinter version's Escape-vs-
+        # WM_DELETE_WINDOW split.
+        if event.key() == Qt.Key.Key_Escape:
+            self._skip()
+            return
+        super().keyPressEvent(event)
 
-    buttons = ttk.Frame(dialog)
-    buttons.pack(pady=(0, 10))
-    if listbox is not None:
-        ttk.Button(buttons, text="Pick", command=pick).pack(side="left", padx=4)
-    # No letter-mnemonic bindings here (m/q) -- verified that a Toplevel-
-    # level key binding also fires while the URL Entry above has focus
-    # and is receiving that same keystroke as typed text, which would
-    # corrupt pasting a URL containing "m" or "q". Buttons only for
-    # Manual entry/Quit; Escape (verified not to insert a character) is
-    # still bound for Skip.
-    ttk.Button(buttons, text="Manual entry", command=manual).pack(side="left", padx=4)
-    ttk.Button(buttons, text="Skip (Esc)", command=skip).pack(side="left", padx=4)
-    ttk.Button(buttons, text="Quit", command=quit_batch).pack(side="left", padx=4)
-
-    dialog.bind("<Escape>", skip)
-    dialog.protocol("WM_DELETE_WINDOW", quit_batch)
-
-    dialog.wait_window()
-    return result["value"]
+    def reject(self) -> None:
+        self.value = CandidateResult(action="quit")
+        super().reject()
 
 
-def show_manual_entry_dialog(parent: tk.Misc, payload: dict) -> ManualEntryResult:
-    path: Path = payload["path"]
-    progress: str = payload["progress"]
-    default_series: str | None = payload["default_series"]
+class ManualEntryDialog(QDialog):
+    def __init__(self, parent, payload: dict):
+        super().__init__(parent)
+        path: Path = payload["path"]
+        progress: str = payload["progress"]
+        self.default_series: str | None = payload["default_series"]
+        self.setWindowTitle(f"Manual entry -- {path.name}")
+        self.resize(540, 560)
+        self.value: ManualEntryResult = ManualEntryResult(action="cancel")
 
-    dialog = tk.Toplevel(parent)
-    dialog.title(f"Manual entry -- {path.name}")
-    dialog.transient(parent)
-    dialog.grab_set()
-    dialog.geometry("540x560")
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(f"{progress} Enter metadata for {path.name}".strip()))
 
-    result = {"value": ManualEntryResult(action="cancel")}
+        form = QFormLayout()
+        self.title_edit = QLineEdit()
+        form.addRow("Title (required):", self.title_edit)
+        self.publisher_edit = QLineEdit()
+        form.addRow("Publisher:", self.publisher_edit)
 
-    container = ttk.Frame(dialog, padding=10)
-    container.pack(fill="both", expand=True)
-    row = 0
-    ttk.Label(container, text=f"{progress} Enter metadata for {path.name}".strip()).grid(
-        row=row, column=0, columnspan=2, sticky="w"
-    )
-    row += 1
+        self.series_edit: QLineEdit | None = None
+        if self.default_series is not None:
+            form.addRow("Series (locked to this batch's answer):", QLabel(self.default_series or "(blank)"))
+        else:
+            self.series_edit = QLineEdit()
+            form.addRow("Series:", self.series_edit)
 
-    fields: dict[str, tk.StringVar] = {}
+        self.series_index_edit = QLineEdit()
+        form.addRow("Series index:", self.series_index_edit)
 
-    def add_field(label: str, key: str) -> ttk.Entry:
-        nonlocal row
-        ttk.Label(container, text=label).grid(row=row, column=0, sticky="w")
-        var = tk.StringVar()
-        entry = ttk.Entry(container, textvariable=var, width=40)
-        entry.grid(row=row, column=1, sticky="we")
-        fields[key] = var
-        row += 1
-        return entry
+        self.description_edit = _StyledTextEdit()
+        self.description_edit.setFixedHeight(120)
+        form.addRow("Description:", self.description_edit)
 
-    title_entry = add_field("Title (required):", "title")
-    add_field("Publisher:", "publisher")
+        self.tags_edit = QLineEdit()
+        form.addRow("Tags, semicolon-separated:", self.tags_edit)
+        self.isbn_edit = QLineEdit()
+        form.addRow("ISBN:", self.isbn_edit)
+        self.product_url_edit = QLineEdit()
+        form.addRow("Product URL (for your own reference):", self.product_url_edit)
+        layout.addLayout(form)
 
-    if default_series is not None:
-        ttk.Label(container, text=f"Series (locked to this batch's answer): {default_series or '(blank)'}").grid(
-            row=row, column=0, columnspan=2, sticky="w"
-        )
-        row += 1
-    else:
-        add_field("Series:", "series")
+        buttons = QHBoxLayout()
+        self.submit_button = QPushButton("Submit (ctrl+s)")
+        self.submit_button.clicked.connect(self._submit)
+        buttons.addWidget(self.submit_button)
+        self.cancel_button = QPushButton("Cancel (Esc)")
+        self.cancel_button.clicked.connect(self.reject)
+        buttons.addWidget(self.cancel_button)
+        layout.addLayout(buttons)
 
-    add_field("Series index:", "series_index")
+        # Control-s bound directly (not a global letter mnemonic) -- Qt
+        # shortcuts are scoped to the widget/window they're attached to,
+        # unlike Tkinter's Toplevel-level key bindings, which the original
+        # version had to avoid for single letters specifically because
+        # they *also* fired while a plain Entry had focus and was
+        # receiving that same keystroke as typed text. That hazard has no
+        # Qt equivalent; kept Ctrl+S/Escape-only anyway, matching the
+        # original UX rather than introducing new mnemonics just because
+        # Qt would allow them safely.
+        QShortcut(QKeySequence("Ctrl+S"), self, activated=self._submit)
+        self.title_edit.setFocus()
 
-    ttk.Label(container, text="Description:").grid(row=row, column=0, sticky="nw")
-    description_text = tk.Text(container, height=6, width=40, wrap="word")
-    description_text.grid(row=row, column=1, sticky="we")
-    row += 1
-
-    add_field("Tags, semicolon-separated:", "tags")
-    add_field("ISBN:", "isbn")
-    add_field("Product URL (for your own reference):", "product_url")
-
-    container.columnconfigure(1, weight=1)
-    title_entry.focus_set()
-
-    def submit(_event=None) -> None:
-        series_value = default_series if default_series is not None else fields["series"].get()
+    def _submit(self) -> None:
+        series_value = self.default_series if self.default_series is not None else self.series_edit.text()
         meta = build_manual_metadata(
-            title=fields["title"].get(),
-            publisher=fields["publisher"].get(),
+            title=self.title_edit.text(),
+            publisher=self.publisher_edit.text(),
             series=series_value,
-            series_index=fields["series_index"].get(),
-            description=description_text.get("1.0", "end-1c"),
-            tags_raw=fields["tags"].get(),
-            isbn=fields["isbn"].get(),
-            product_url=fields["product_url"].get(),
+            series_index=self.series_index_edit.text(),
+            description=self.description_edit.toPlainText(),
+            tags_raw=self.tags_edit.text(),
+            isbn=self.isbn_edit.text(),
+            product_url=self.product_url_edit.text(),
         )
         if meta is None:
-            messagebox.showerror("Manual entry", "Title is required.", parent=dialog)
-            title_entry.focus_set()
+            QMessageBox.critical(self, "Manual entry", "Title is required.")
+            self.title_edit.setFocus()
             return
-        result["value"] = ManualEntryResult(action="submit", meta=meta)
-        dialog.destroy()
+        self.value = ManualEntryResult(action="submit", meta=meta)
+        self.accept()
 
-    def cancel(_event=None) -> None:
-        result["value"] = ManualEntryResult(action="cancel")
-        dialog.destroy()
-
-    buttons = ttk.Frame(container)
-    buttons.grid(row=row, column=0, columnspan=2, pady=(10, 0))
-    ttk.Button(buttons, text="Submit (ctrl+s)", command=submit).pack(side="left", padx=4)
-    ttk.Button(buttons, text="Cancel (Esc)", command=cancel).pack(side="left", padx=4)
-
-    # Control-s / Escape verified safe to bind at the Toplevel level even
-    # with free-text Entry/Text widgets focused (neither inserts a
-    # character) -- unlike bare letter keys, see module docstring.
-    dialog.bind("<Control-s>", submit)
-    dialog.bind("<Escape>", cancel)
-    dialog.protocol("WM_DELETE_WINDOW", cancel)
-
-    dialog.wait_window()
-    return result["value"]
+    def reject(self) -> None:
+        self.value = ManualEntryResult(action="cancel")
+        super().reject()
 
 
-def show_confirm_dialog(parent: tk.Misc, payload: dict) -> ConfirmResult:
-    header: str = payload["header"]
-    meta: ProductMetadata = payload["meta"]
-    progress: str = payload["progress"]
+class ConfirmDialog(QDialog):
+    def __init__(self, parent, payload: dict):
+        super().__init__(parent)
+        header: str = payload["header"]
+        meta: ProductMetadata = payload["meta"]
+        progress: str = payload["progress"]
+        self.meta = meta
+        self.setWindowTitle("Confirm")
+        self.resize(560, 580)
+        self.value: ConfirmResult = ConfirmResult(action="skip")
 
-    dialog = tk.Toplevel(parent)
-    dialog.title("Confirm")
-    dialog.transient(parent)
-    dialog.grab_set()
-    dialog.geometry("560x580")
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(f"{progress} {header}".strip()))
+        if meta.authors:
+            layout.addWidget(QLabel(f"authors: {meta.authors_str()}"))
+        source_value = meta.source.value if hasattr(meta.source, "value") else meta.source
+        layout.addWidget(QLabel(f"source: {source_value}"))
 
-    result = {"value": ConfirmResult(action="skip")}
+        form = QFormLayout()
+        self.title_edit = QLineEdit(meta.title)
+        form.addRow("Title (required):", self.title_edit)
+        self.publisher_edit = QLineEdit(meta.publisher)
+        form.addRow("Publisher:", self.publisher_edit)
+        self.series_edit = QLineEdit(meta.series)
+        form.addRow("Series:", self.series_edit)
+        self.series_index_edit = QLineEdit(meta.series_index)
+        form.addRow("Series index:", self.series_index_edit)
 
-    container = ttk.Frame(dialog, padding=10)
-    container.pack(fill="both", expand=True)
-    row = 0
-    ttk.Label(container, text=f"{progress} {header}".strip()).grid(row=row, column=0, columnspan=2, sticky="w")
-    row += 1
-    if meta.authors:
-        ttk.Label(container, text=f"authors: {meta.authors_str()}").grid(row=row, column=0, columnspan=2, sticky="w")
-        row += 1
-    source_value = meta.source.value if hasattr(meta.source, "value") else meta.source
-    ttk.Label(container, text=f"source: {source_value}").grid(row=row, column=0, columnspan=2, sticky="w")
-    row += 1
+        self.description_edit = _StyledTextEdit()
+        self.description_edit.setPlainText(meta.description)
+        self.description_edit.setFixedHeight(120)
+        form.addRow("Description:", self.description_edit)
 
-    fields: dict[str, tk.StringVar] = {}
+        self.tags_edit = QLineEdit(meta.tags_str())
+        form.addRow("Tags, semicolon-separated:", self.tags_edit)
+        self.isbn_edit = QLineEdit(meta.isbn)
+        form.addRow("ISBN:", self.isbn_edit)
+        self.product_url_edit = QLineEdit(meta.product_url)
+        form.addRow("Product URL:", self.product_url_edit)
+        layout.addLayout(form)
 
-    def add_field(label: str, key: str, value: str) -> ttk.Entry:
-        nonlocal row
-        ttk.Label(container, text=label).grid(row=row, column=0, sticky="w")
-        var = tk.StringVar(value=value)
-        entry = ttk.Entry(container, textvariable=var, width=40)
-        entry.grid(row=row, column=1, sticky="we")
-        fields[key] = var
-        row += 1
-        return entry
+        buttons = QHBoxLayout()
+        self.confirm_button = QPushButton("Confirm (ctrl+s)")
+        self.confirm_button.setDefault(True)
+        self.confirm_button.clicked.connect(self._confirm)
+        buttons.addWidget(self.confirm_button)
+        skip_button = QPushButton("Skip (Esc)")
+        skip_button.clicked.connect(self._skip)
+        buttons.addWidget(skip_button)
+        quit_button = QPushButton("Quit")
+        quit_button.clicked.connect(self._quit)
+        buttons.addWidget(quit_button)
+        layout.addLayout(buttons)
 
-    title_entry = add_field("Title (required):", "title", meta.title)
-    add_field("Publisher:", "publisher", meta.publisher)
-    add_field("Series:", "series", meta.series)
-    add_field("Series index:", "series_index", meta.series_index)
+        QShortcut(QKeySequence("Ctrl+S"), self, activated=self._confirm)
+        self.confirm_button.setFocus()
 
-    ttk.Label(container, text="Description:").grid(row=row, column=0, sticky="nw")
-    description_text = tk.Text(container, height=6, width=40, wrap="word")
-    description_text.insert("1.0", meta.description)
-    description_text.grid(row=row, column=1, sticky="we")
-    row += 1
-
-    add_field("Tags, semicolon-separated:", "tags", meta.tags_str())
-    add_field("ISBN:", "isbn", meta.isbn)
-    add_field("Product URL:", "product_url", meta.product_url)
-
-    container.columnconfigure(1, weight=1)
-
-    def confirm(_event=None) -> None:
+    def _confirm(self) -> None:
         edited = apply_edits(
-            meta,
-            title=fields["title"].get(),
-            publisher=fields["publisher"].get(),
-            series=fields["series"].get(),
-            series_index=fields["series_index"].get(),
-            description=description_text.get("1.0", "end-1c"),
-            tags_raw=fields["tags"].get(),
-            isbn=fields["isbn"].get(),
-            product_url=fields["product_url"].get(),
+            self.meta,
+            title=self.title_edit.text(),
+            publisher=self.publisher_edit.text(),
+            series=self.series_edit.text(),
+            series_index=self.series_index_edit.text(),
+            description=self.description_edit.toPlainText(),
+            tags_raw=self.tags_edit.text(),
+            isbn=self.isbn_edit.text(),
+            product_url=self.product_url_edit.text(),
         )
         if edited is None:
-            messagebox.showerror("Confirm", "Title is required.", parent=dialog)
-            title_entry.focus_set()
+            QMessageBox.critical(self, "Confirm", "Title is required.")
+            self.title_edit.setFocus()
             return
-        result["value"] = ConfirmResult(action="confirm", meta=edited)
-        dialog.destroy()
+        self.value = ConfirmResult(action="confirm", meta=edited)
+        self.accept()
 
-    def skip(_event=None) -> None:
-        result["value"] = ConfirmResult(action="skip")
-        dialog.destroy()
+    def _skip(self) -> None:
+        self.value = ConfirmResult(action="skip")
+        self.accept()
 
-    def quit_batch() -> None:
-        result["value"] = ConfirmResult(action="quit")
-        dialog.destroy()
+    def _quit(self) -> None:
+        self.value = ConfirmResult(action="quit")
+        self.accept()
 
-    buttons = ttk.Frame(container)
-    buttons.grid(row=row, column=0, columnspan=2, pady=(10, 0))
-    confirm_button = ttk.Button(buttons, text="Confirm (ctrl+s)", command=confirm)
-    confirm_button.pack(side="left", padx=4)
-    ttk.Button(buttons, text="Skip (Esc)", command=skip).pack(side="left", padx=4)
-    ttk.Button(buttons, text="Quit", command=quit_batch).pack(side="left", padx=4)
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        # Same Escape-means-Skip / window-close-means-Quit split as
+        # CandidateDialog -- see its keyPressEvent for the full rationale.
+        if event.key() == Qt.Key.Key_Escape:
+            self._skip()
+            return
+        super().keyPressEvent(event)
 
-    dialog.bind("<Control-s>", confirm)
-    dialog.bind("<Escape>", skip)
-    dialog.protocol("WM_DELETE_WINDOW", quit_batch)
-    confirm_button.focus_set()
-
-    dialog.wait_window()
-    return result["value"]
+    def reject(self) -> None:
+        self.value = ConfirmResult(action="quit")
+        super().reject()
 
 
-_DIALOG_BUILDERS = {
-    "batch_series": show_batch_series_dialog,
-    "candidate": show_candidate_dialog,
-    "manual_entry": show_manual_entry_dialog,
-    "confirm": show_confirm_dialog,
-    "series": show_series_dialog,
+_DIALOG_CLASSES = {
+    "batch_series": BatchSeriesDialog,
+    "candidate": CandidateDialog,
+    "manual_entry": ManualEntryDialog,
+    "confirm": ConfirmDialog,
+    "series": SeriesDialog,
 }
 
 
@@ -639,93 +705,96 @@ _DIALOG_BUILDERS = {
 # ---------------------------------------------------------------------------
 
 
-class TagTab(ttk.Frame):
-    def __init__(self, parent: tk.Widget, config: dict):
-        super().__init__(parent, padding=10)
+class TagTab(QWidget):
+    def __init__(self, config: dict):
+        super().__init__()
         self.config_ = config
 
-        self.mode_var = tk.StringVar(value="root")
-        self.path_var = tk.StringVar(value=config.get("root", ""))
-        self.bookorbit_var = tk.BooleanVar(value=False)
-        self.convert_images_var = tk.BooleanVar(value=False)
-        self.rename_var = tk.BooleanVar(value=False)
-
-        _make_description_label(
-            self,
+        layout = QVBoxLayout(self)
+        layout.addWidget(_make_description_label(
             "Match and tag PDF(s) interactively -- choose a book from the list provided, enter "
             "metadata by hand, or paste a known URL, then confirm each one before it's written. "
-            "Works on a single file or every PDF in a folder; no review.csv involved.",
-        ).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 8))
+            "Works on a single file or every PDF in a folder; no review.csv involved."
+        ))
 
-        ttk.Radiobutton(self, text="Single file", value="file", variable=self.mode_var).grid(row=1, column=0, sticky="w")
-        ttk.Radiobutton(self, text="Whole folder", value="root", variable=self.mode_var).grid(row=1, column=1, sticky="w")
-        ttk.Entry(self, textvariable=self.path_var, width=50).grid(row=2, column=0, columnspan=2, sticky="we")
-        ttk.Button(self, text="Browse...", command=self._browse).grid(row=2, column=2)
+        mode_row = QHBoxLayout()
+        self.file_radio = QRadioButton("Single file")
+        self.root_radio = QRadioButton("Whole folder")
+        self.root_radio.setChecked(True)
+        self.mode_group = QButtonGroup(self)
+        self.mode_group.addButton(self.file_radio)
+        self.mode_group.addButton(self.root_radio)
+        mode_row.addWidget(self.file_radio)
+        mode_row.addWidget(self.root_radio)
+        mode_row.addStretch(1)
+        layout.addLayout(mode_row)
 
-        ttk.Checkbutton(self, text="BookOrbit mode (--bookorbit-mode)", variable=self.bookorbit_var).grid(
-            row=3, column=0, columnspan=3, sticky="w", pady=(6, 0)
-        )
-        _make_hint_label(self, BOOKORBIT_HINT).grid(row=4, column=0, columnspan=3, sticky="w", padx=(20, 0))
-        _make_link_label(self, BOOKORBIT_URL).grid(row=5, column=0, columnspan=3, sticky="w", padx=(20, 0))
+        path_row = QHBoxLayout()
+        self.path_edit = QLineEdit(config.get("root", ""))
+        path_row.addWidget(self.path_edit, 1)
+        browse_button = QPushButton("Browse...")
+        browse_button.clicked.connect(self._browse)
+        path_row.addWidget(browse_button)
+        layout.addLayout(path_row)
 
-        ttk.Checkbutton(
-            self, text="Convert all images to RGB JPEG (--convert-images)", variable=self.convert_images_var
-        ).grid(row=6, column=0, columnspan=3, sticky="w", pady=(6, 0))
-        _make_hint_label(self, CONVERT_IMAGES_HINT).grid(row=7, column=0, columnspan=3, sticky="w", padx=(20, 0))
+        self.bookorbit_check = QCheckBox("BookOrbit mode (--bookorbit-mode)")
+        layout.addWidget(self.bookorbit_check)
+        layout.addWidget(_make_hint_label(BOOKORBIT_HINT))
+        layout.addWidget(_make_link_label(BOOKORBIT_URL))
 
-        ttk.Checkbutton(self, text="Rename after write (--rename)", variable=self.rename_var).grid(
-            row=8, column=0, columnspan=3, sticky="w", pady=(6, 0)
-        )
-        _make_hint_label(self, RENAME_HINT).grid(row=9, column=0, columnspan=3, sticky="w", padx=(20, 0))
+        self.convert_images_check = QCheckBox("Convert all images to RGB JPEG (--convert-images)")
+        layout.addWidget(self.convert_images_check)
+        layout.addWidget(_make_hint_label(CONVERT_IMAGES_HINT))
 
-        self.start_button = ttk.Button(self, text="Start", command=self._start)
-        self.start_button.grid(row=10, column=0, sticky="w", pady=(10, 0))
+        self.rename_check = QCheckBox("Rename after write (--rename)")
+        layout.addWidget(self.rename_check)
+        layout.addWidget(_make_hint_label(RENAME_HINT))
 
-        self.log_widget = _make_log_widget(self, row=11, columnspan=3)
-        self.columnconfigure(0, weight=1)
-        self.columnconfigure(1, weight=1)
-        self.rowconfigure(11, weight=1)
+        self.start_button = QPushButton("Start")
+        self.start_button.clicked.connect(self._start)
+        layout.addWidget(self.start_button, alignment=Qt.AlignmentFlag.AlignLeft)
 
-        self.request_queue: queue.Queue = queue.Queue()
-        self.log_queue: queue.Queue = queue.Queue()
+        self.log_widget = _make_log_widget()
+        layout.addWidget(self.log_widget, 1)
+
         self.stop_event = threading.Event()
-        self._thread: threading.Thread | None = None
-        self._polling = False
+        self._thread: QThread | None = None
+        self._worker: TagWorker | None = None
 
     def _browse(self) -> None:
-        if self.mode_var.get() == "file":
-            p = filedialog.askopenfilename(filetypes=[("PDF files", "*.pdf")])
+        if self.file_radio.isChecked():
+            p, _ = QFileDialog.getOpenFileName(self, "Select PDF", "", "PDF files (*.pdf)")
         else:
-            p = filedialog.askdirectory(initialdir=self.path_var.get() or ".")
+            p = QFileDialog.getExistingDirectory(self, "Root folder", self.path_edit.text() or ".")
         if p:
-            self.path_var.set(p)
+            self.path_edit.setText(p)
 
     def _log_line(self, line: str) -> None:
-        self.log_queue.put(line)
+        self.log_widget.appendPlainText(line)
 
     def _start(self) -> None:
-        if self._thread is not None and self._thread.is_alive():
+        if self._thread is not None and self._thread.isRunning():
             return
-        path_str = self.path_var.get().strip()
+        path_str = self.path_edit.text().strip()
         if not path_str:
-            messagebox.showerror("Tag", "No file/folder given.")
+            QMessageBox.critical(self, "Tag", "No file/folder given.")
             return
 
-        root_mode = self.mode_var.get() == "root"
+        root_mode = self.root_radio.isChecked()
         if root_mode:
             root = Path(path_str)
             pdfs = scan_pdfs(root)
             if not pdfs:
-                messagebox.showerror("Tag", f"No PDFs found under {root}")
+                QMessageBox.critical(self, "Tag", f"No PDFs found under {root}")
                 return
             known_urls = load_known_urls(root)
         else:
             path = Path(path_str)
             if not path.exists():
-                messagebox.showerror("Tag", f"File not found: {path}")
+                QMessageBox.critical(self, "Tag", f"File not found: {path}")
                 return
             if path.suffix.lower() != ".pdf":
-                messagebox.showerror("Tag", f"Not a PDF: {path}")
+                QMessageBox.critical(self, "Tag", f"Not a PDF: {path}")
                 return
             pdfs = [path]
             known_urls = load_known_urls(path.parent)
@@ -733,63 +802,59 @@ class TagTab(ttk.Frame):
         try:
             client = build_client_safe(self.config_)
         except RuntimeError as exc:
-            messagebox.showerror("Tag", str(exc))
+            QMessageBox.critical(self, "Tag", str(exc))
             return
 
         manual_overrides_path = Path(self.config_.get("manual_overrides", "data/manual_overrides.yaml"))
         manual_overrides = load_manual_overrides(manual_overrides_path)
         thresholds = self.config_.get("matching", {})
 
-        self.request_queue = queue.Queue()
-        self.log_queue = queue.Queue()
         self.stop_event = threading.Event()
-        controller = TagFlowController(
+        self._thread = QThread()
+        self._worker = TagWorker(
             pdfs=pdfs, client=client, manual_overrides=manual_overrides, known_urls=known_urls,
-            thresholds=thresholds, bookorbit_mode=self.bookorbit_var.get(), rename=self.rename_var.get(),
-            root_mode=root_mode, request_queue=self.request_queue, log=self._log_line, stop_event=self.stop_event,
-            convert_images=self.convert_images_var.get(),
+            thresholds=thresholds, bookorbit_mode=self.bookorbit_check.isChecked(),
+            rename=self.rename_check.isChecked(), root_mode=root_mode, stop_event=self.stop_event,
+            convert_images=self.convert_images_check.isChecked(),
         )
-        self.start_button.configure(state="disabled")
-        self._thread = threading.Thread(target=controller.run, daemon=True)
+        self._worker.moveToThread(self._thread)
+        self._thread.started.connect(self._worker.run)
+        self._worker.log_line.connect(self._log_line)
+        self._worker.dialog_requested.connect(self._on_dialog_requested)
+        self._worker.finished.connect(self._on_run_finished)
+
+        self.start_button.setEnabled(False)
         self._thread.start()
-        if not self._polling:
-            self._polling = True
-            self.after(POLL_MS, self._poll)
 
-    def _poll(self) -> None:
-        try:
-            while True:
-                line = self.log_queue.get_nowait()
-                self.log_widget.configure(state="normal")
-                self.log_widget.insert("end", line + "\n")
-                self.log_widget.see("end")
-                self.log_widget.configure(state="disabled")
-        except queue.Empty:
-            pass
+    @pyqtSlot(str, dict, object)
+    def _on_dialog_requested(self, kind: str, payload: dict, response_q) -> None:
+        dialog = _DIALOG_CLASSES[kind](self, payload)
+        dialog.exec()
+        response_q.put(dialog.value)
 
-        try:
-            while True:
-                kind, payload, response_q = self.request_queue.get_nowait()
-                response_q.put(_DIALOG_BUILDERS[kind](self, payload))
-        except queue.Empty:
-            pass
-
-        if self._thread is not None and self._thread.is_alive():
-            self.after(POLL_MS, self._poll)
-        else:
-            self._polling = False
-            self.start_button.configure(state="normal")
+    def _on_run_finished(self) -> None:
+        if self._thread is not None:
+            self._thread.quit()
+            self._thread.wait()
+        self._thread = None
+        self._worker = None
+        self.start_button.setEnabled(True)
 
     def stop(self) -> None:
-        """Called when the whole GUI window is closing -- unblocks a
-        worker thread currently waiting on an unanswered dialog request
-        so it can't hang forever on an answer that will never come. The
-        worker thread is daemon=True regardless, so the process exits
-        cleanly either way; this just avoids leaving it stuck mid-run."""
+        """Called when the whole GUI window is closing. Setting
+        stop_event ensures the worker's *next* TagFlowController._ask()
+        call returns a quit result immediately rather than emitting a
+        fresh dialog request. Unlike the Tkinter version, there's no
+        separate pending-request backlog to drain here:
+        `_on_dialog_requested` runs `.exec()` synchronously on the GUI
+        thread, so by the time this method can even run, no dialog
+        request is left unanswered -- a modal dialog blocks the entire
+        GUI event loop while it's up, so the window can't be in the
+        process of closing at the same time one is open. The remaining
+        case (the worker still blocked on in-flight network/pikepdf I/O,
+        with no `_ask()` call pending yet) is simply abandoned, the same
+        as the Tkinter version's daemon thread was."""
         self.stop_event.set()
-        try:
-            while True:
-                kind, _payload, response_q = self.request_queue.get_nowait()
-                response_q.put(TagFlowController.quit_result(kind))
-        except queue.Empty:
-            pass
+        if self._thread is not None and self._thread.isRunning():
+            self._thread.quit()
+            self._thread.wait(200)

@@ -6,3 +6,4 @@ lxml>=4.9
 textual>=0.60
 pymupdf>=1.24
 pillow>=10.0
+PyQt6>=6.6

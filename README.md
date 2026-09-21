@@ -98,11 +98,11 @@ The `drivethrurpg_url` column accepts a full product URL, `id:PRODUCT_ID`, or a 
 ./dtrpg-metadata-download.py gui
 ```
 
-A Tkinter desktop window with a tab for every subcommand above — Tag (the same candidate-pick/manual-entry/confirm/series flow as the terminal UI, in dialog windows instead), Scan, Review (an editable table for `review.csv` — approve a row, tweak its series, edit its description — instead of opening it in a spreadsheet app), Write PDFs, Rename, All, and Preferences (your API key and DriveThruRPG name — see Setup above). Long-running work happens in the background so the window stays responsive.
+A PyQt6 desktop window with a tab for every subcommand above — Tag (the same candidate-pick/manual-entry/confirm/series flow as the terminal UI, in dialog windows instead), Scan, Review (an editable table for `review.csv` — approve a row, tweak its series, edit its description — instead of opening it in a spreadsheet app), Write PDFs, Rename, All, and Preferences (your API key and DriveThruRPG name — see Setup above). Long-running work happens in the background so the window stays responsive.
 
 The Tag, Write PDFs, and All tabs each have a **"Convert all images to RGB JPEG"** checkbox (`--convert-images` on the matching CLI subcommands) — see below.
 
-This needs a Python with Tk bindings, which is a system-level build feature — not a package `pip`/`uv` can install like every other dependency here. Most desktop Python installs (python.org installers, Homebrew, apt's `python3-tk`) already have it; if `gui` fails with a message about `tkinter`/`_tkinter`, it names the fix (try a different Python on your machine, or install Tk bindings for the one you're using).
+PyQt6 is a normal dependency, installed automatically the first time you run `gui` via `uv run --script` — no separate install step, unlike an earlier Tkinter-based version of this GUI, which needed a Python built with Tk bindings.
 
 ## What gets written
 
