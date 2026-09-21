@@ -18,6 +18,13 @@ preferences: data/preferences.yaml   # your API key + DriveThruRPG name -- gitig
 gurps_hyperlink_script: /path/to/hyperlink_pdf_universal.py
 mongoose_hyperlink_script: /path/to/hyperlink_pdf_mongoose.py
 
+# Optional, same as above: path to a separate sibling project's
+# PDF-to-grayscale script (see rpg_grayscale.py). Only used when
+# --convert-grayscale/the GUI's matching checkbox is turned on. Also
+# requires the real Ghostscript binary ('gs') on PATH -- a system
+# package, not something this project's own dependencies can provide.
+grayscale_script: /path/to/convert_pdf_to_grayscale.py
+
 matching:
   high_confidence_threshold: 90.0
   review_floor_threshold: 70.0

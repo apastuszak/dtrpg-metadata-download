@@ -100,7 +100,7 @@ The `drivethrurpg_url` column accepts a full product URL, `id:PRODUCT_ID`, or a 
 
 A PyQt6 desktop window with a tab for every subcommand above — Tag (the same candidate-pick/manual-entry/confirm/series flow as the terminal UI, in dialog windows instead), Scan, Review (an editable table for `review.csv` — approve a row, tweak its series, edit its description — instead of opening it in a spreadsheet app), Write PDFs, Rename, All, and Preferences (your API key and DriveThruRPG name — see Setup above). Long-running work happens in the background so the window stays responsive.
 
-The Tag, Write PDFs, and All tabs each have a **"Convert all images to RGB JPEG"** checkbox (`--convert-images` on the matching CLI subcommands) — see below.
+The Tag, Write PDFs, and All tabs each have **"Convert all images to RGB JPEG"** and **"Convert PDF to grayscale"** checkboxes (`--convert-images`/`--convert-grayscale` on the matching CLI subcommands — see below); checking one unchecks the other, since they're opposite operations on the same images.
 
 PyQt6 is a normal dependency, installed automatically the first time you run `gui` via `uv run --script` — no separate install step, unlike an earlier Tkinter-based version of this GUI, which needed a Python built with Tk bindings.
 
@@ -140,6 +140,10 @@ Available on `tag`, `write-pdfs`, and `all`. Instead of writing Calibre metadata
 #### `--convert-images`
 
 Available on `tag`, `write-pdfs`, and `all` (and as a checkbox in the GUI's Tag/Write PDFs/All tabs). Converts every CMYK, grayscale, and JPEG2000 (JPX) image in the PDF to standard RGB JPEG before metadata is written — useful for PDFs from print workflows, which often carry CMYK images and/or JPX compression that some readers (notably Apple's PDF renderer on macOS/iOS) handle poorly, showing images as missing or wrong-colored. Indexed/palette images (diagrams, pixel art) are kept lossless rather than run through JPEG, which would blur their sharp edges. CMYK images without their own embedded color profile are re-tagged with a real CMYK ICC profile first (macOS only — falls back to a plain conversion elsewhere), and converted images get an explicit sRGB profile rather than bare `/DeviceRGB`, both aimed at avoiding the color casts a naive conversion produces in some readers. Runs before metadata is written, never after, so it can't disturb the Calibre-specific XMP structure `--bookorbit-mode`'s sibling section above already went through the trouble of getting right. Off by default; ported from a separate tool ([mac-pdf-rgb-fix](https://github.com/apastuszak/mac-pdf-rgb-fix)) built specifically for this problem.
+
+#### `--convert-grayscale`
+
+Available on `tag`, `write-pdfs`, and `all` (and as a checkbox in the GUI's Tag/Write PDFs/All tabs). Converts the whole PDF to grayscale before metadata is written, using a separate sibling script on your machine (see `rpg_grayscale.py`) — set `grayscale_script` in `config.yaml` to that script's path first, or this is a no-op with a clear log line rather than a crash. Also requires the real Ghostscript binary (`gs`) on PATH — a system package (`brew install ghostscript` on macOS), not something this project's own dependencies can provide. Off by default, and mutually exclusive with `--convert-images` — checking one unchecks the other in the GUI, and the CLI refuses both flags together.
 
 #### `--hyperlink-gurps` / `--hyperlink-mongoose`
 

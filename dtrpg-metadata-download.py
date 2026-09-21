@@ -77,6 +77,16 @@
         (a different library from pikepdf) can't disturb the Calibre XMP
         pikepdf writes.
 
+    --convert-grayscale (on write-pdfs/all/tag): converts the whole PDF
+        to grayscale before metadata is written, via a separate sibling
+        project's script (see rpg_grayscale.py) whose path comes from
+        config.yaml's grayscale_script key. Requires the real Ghostscript
+        binary ('gs') on PATH -- a system package, not something PEP
+        723/uv/pip can install. Off by default, and mutually exclusive
+        with --convert-images (the opposite operation on the same
+        images) -- the GUI enforces this by unchecking one when the
+        other is checked.
+
     --hyperlink-gurps / --hyperlink-mongoose (on write-pdfs/tag):
         auto-hyperlinks in-text page/chapter references (see
         rpg_hyperlink.py), via a separate sibling project's script whose
@@ -137,6 +147,7 @@ from pdf_writer import write_approved
 from preferences import DEFAULT_PREFERENCES_PATH, load_preferences, resolve_api_key
 from renamer import apply_rename, plan_rename
 from review import load_review, save_review
+from rpg_grayscale import DEFAULT_GRAYSCALE_SCRIPT
 from rpg_hyperlink import DEFAULT_GURPS_HYPERLINK_SCRIPT, DEFAULT_MONGOOSE_HYPERLINK_SCRIPT
 from tag_tui import TagApp
 
@@ -226,6 +237,8 @@ def cmd_write_pdfs(args: argparse.Namespace, config: dict) -> None:
 
     results = write_approved(
         rows, root, bookorbit_mode=args.bookorbit_mode, convert_images=args.convert_images,
+        convert_grayscale=args.convert_grayscale,
+        grayscale_script=config.get("grayscale_script", DEFAULT_GRAYSCALE_SCRIPT),
         hyperlink_gurps=args.hyperlink_gurps,
         gurps_hyperlink_script=config.get("gurps_hyperlink_script", DEFAULT_GURPS_HYPERLINK_SCRIPT),
         hyperlink_mongoose=args.hyperlink_mongoose,
@@ -327,6 +340,8 @@ def cmd_tag(args: argparse.Namespace, config: dict) -> None:
         thresholds=thresholds,
         bookorbit_mode=args.bookorbit_mode,
         convert_images=args.convert_images,
+        convert_grayscale=args.convert_grayscale,
+        grayscale_script=config.get("grayscale_script", DEFAULT_GRAYSCALE_SCRIPT),
         hyperlink_gurps=args.hyperlink_gurps,
         gurps_hyperlink_script=config.get("gurps_hyperlink_script", DEFAULT_GURPS_HYPERLINK_SCRIPT),
         hyperlink_mongoose=args.hyperlink_mongoose,
@@ -397,6 +412,11 @@ def main() -> None:
     convert_images_help = (
         "Convert CMYK/grayscale/JPEG2000 images in the PDF to RGB JPEG before writing metadata"
     )
+    convert_grayscale_help = (
+        "Convert the whole PDF to grayscale before writing metadata, via a separate sibling script "
+        "(see rpg_grayscale.py; path configured by grayscale_script in config.yaml; requires Ghostscript "
+        "('gs') on PATH). Mutually exclusive with --convert-images."
+    )
     hyperlink_gurps_help = (
         "Auto-hyperlink in-text page/chapter references via a separate sibling GURPS-specific script "
         "(see rpg_hyperlink.py; path configured by gurps_hyperlink_script in config.yaml)"
@@ -410,7 +430,9 @@ def main() -> None:
     write_parser.add_argument("--root", help="Root folder of RPG PDFs (overrides config.yaml)")
     write_parser.add_argument("--review-csv", help="Path to review.csv (overrides config.yaml)")
     write_parser.add_argument("--bookorbit-mode", action="store_true", help=bookorbit_mode_help)
-    write_parser.add_argument("--convert-images", action="store_true", help=convert_images_help)
+    write_color_group = write_parser.add_mutually_exclusive_group()
+    write_color_group.add_argument("--convert-images", action="store_true", help=convert_images_help)
+    write_color_group.add_argument("--convert-grayscale", action="store_true", help=convert_grayscale_help)
     write_parser.add_argument("--hyperlink-gurps", action="store_true", help=hyperlink_gurps_help)
     write_parser.add_argument("--hyperlink-mongoose", action="store_true", help=hyperlink_mongoose_help)
     write_parser.set_defaults(func=cmd_write_pdfs)
@@ -423,7 +445,9 @@ def main() -> None:
     all_parser.add_argument("--bookorbit-mode", action="store_true", help=bookorbit_mode_help)
     all_parser.add_argument("--hyperlink-gurps", action="store_true", help=hyperlink_gurps_help)
     all_parser.add_argument("--hyperlink-mongoose", action="store_true", help=hyperlink_mongoose_help)
-    all_parser.add_argument("--convert-images", action="store_true", help=convert_images_help)
+    all_color_group = all_parser.add_mutually_exclusive_group()
+    all_color_group.add_argument("--convert-images", action="store_true", help=convert_images_help)
+    all_color_group.add_argument("--convert-grayscale", action="store_true", help=convert_grayscale_help)
     all_parser.set_defaults(func=cmd_all)
 
     tag_parser = subparsers.add_parser("tag", help="Match and tag PDF(s) interactively, no review.csv")
@@ -431,7 +455,9 @@ def main() -> None:
     tag_group.add_argument("pdf", nargs="?", help="Path to a single PDF file to match and tag")
     tag_group.add_argument("--root", help="Process every PDF under this directory instead of a single file")
     tag_parser.add_argument("--bookorbit-mode", action="store_true", help=bookorbit_mode_help)
-    tag_parser.add_argument("--convert-images", action="store_true", help=convert_images_help)
+    tag_color_group = tag_parser.add_mutually_exclusive_group()
+    tag_color_group.add_argument("--convert-images", action="store_true", help=convert_images_help)
+    tag_color_group.add_argument("--convert-grayscale", action="store_true", help=convert_grayscale_help)
     tag_parser.add_argument("--hyperlink-gurps", action="store_true", help=hyperlink_gurps_help)
     tag_parser.add_argument("--hyperlink-mongoose", action="store_true", help=hyperlink_mongoose_help)
     tag_parser.add_argument(

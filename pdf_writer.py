@@ -98,6 +98,7 @@ from lxml.etree import QName
 
 from image_converter import convert_images_to_rgb
 from review import ReviewRow
+from rpg_grayscale import DEFAULT_GRAYSCALE_SCRIPT, convert_pdf_grayscale
 from rpg_hyperlink import DEFAULT_GURPS_HYPERLINK_SCRIPT, DEFAULT_MONGOOSE_HYPERLINK_SCRIPT, run_hyperlink_script
 from sidecar_writer import _split_isbn, write_bookorbit_opf, write_grimmory_sidecar
 
@@ -251,6 +252,8 @@ def write_metadata(
     row: ReviewRow,
     bookorbit_mode: bool = False,
     convert_images: bool = False,
+    convert_grayscale: bool = False,
+    grayscale_script: str | Path = DEFAULT_GRAYSCALE_SCRIPT,
     hyperlink_gurps: bool = False,
     gurps_hyperlink_script: str | Path = DEFAULT_GURPS_HYPERLINK_SCRIPT,
     hyperlink_mongoose: bool = False,
@@ -264,10 +267,16 @@ def write_metadata(
     stderr there since no Textual app is active) but never reach the
     TUI's or GUI's own visible log/notification surfaces, which have no
     connection to Python's logging module at all. Without an explicit
-    "starting" message here, --convert-images/--hyperlink-gurps/
-    --hyperlink-mongoose on a PDF with many images/pages can run for a
-    while with nothing visible happening in either UI, which looks
-    indistinguishable from a hang."""
+    "starting" message here, --convert-images/--convert-grayscale/
+    --hyperlink-gurps/--hyperlink-mongoose on a PDF with many images/pages
+    can run for a while with nothing visible happening in either UI, which
+    looks indistinguishable from a hang.
+
+    `convert_images` and `convert_grayscale` are opposite operations on
+    the same images -- mutual exclusivity is enforced up at the CLI
+    (argparse mutually-exclusive group) and GUI (checking one un-checks
+    the other) layers, not here; this function just runs whichever
+    step(s) it's told to, in the order given below."""
     if not path.exists():
         return WriteResult(path.name, False, "file not found")
 
@@ -299,6 +308,24 @@ def write_metadata(
             )
             if log is not None:
                 log(f"Converted {result.converted} image(s) in {path.name} ({result.skipped} already fine/skipped)")
+
+    if convert_grayscale:
+        # Also runs before pikepdf opens the file below, same reasoning as
+        # --convert-images above -- verified directly (not just reasoned
+        # through) that a link annotation survives Ghostscript's
+        # grayscale pass (see rpg_grayscale.py's module docstring), so
+        # running this before the hyperlink steps below is safe. A file
+        # never gets both --convert-images and --convert-grayscale (see
+        # the mutual-exclusivity note above), so there's no meaningful
+        # ordering question between the two of them.
+        logger.info("Converting %s to grayscale...", path.name)
+        gray_result = convert_pdf_grayscale(path, grayscale_script, log=log)
+        if not gray_result.success:
+            logger.warning("Grayscale conversion failed for %s: %s", path.name, gray_result.message)
+            if log is not None:
+                log(f"Grayscale conversion failed for {path.name}: {gray_result.message}")
+        else:
+            logger.info("Converted %s to grayscale", path.name)
 
     # Both also run before pikepdf opens the file below, same reasoning as
     # --convert-images above -- verified directly (not just reasoned
@@ -456,6 +483,8 @@ def write_approved(
     root: str | Path,
     bookorbit_mode: bool = False,
     convert_images: bool = False,
+    convert_grayscale: bool = False,
+    grayscale_script: str | Path = DEFAULT_GRAYSCALE_SCRIPT,
     hyperlink_gurps: bool = False,
     gurps_hyperlink_script: str | Path = DEFAULT_GURPS_HYPERLINK_SCRIPT,
     hyperlink_mongoose: bool = False,
@@ -474,6 +503,7 @@ def write_approved(
         results.append(
             write_metadata(
                 matches[0], row, bookorbit_mode=bookorbit_mode, convert_images=convert_images,
+                convert_grayscale=convert_grayscale, grayscale_script=grayscale_script,
                 hyperlink_gurps=hyperlink_gurps, gurps_hyperlink_script=gurps_hyperlink_script,
                 hyperlink_mongoose=hyperlink_mongoose, mongoose_hyperlink_script=mongoose_hyperlink_script,
                 log=log,

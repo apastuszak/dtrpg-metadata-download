@@ -90,6 +90,7 @@ from tag_tui import (
 from gui_app import (
     BOOKORBIT_HINT,
     BOOKORBIT_URL,
+    CONVERT_GRAYSCALE_HINT,
     CONVERT_IMAGES_HINT,
     HYPERLINK_GURPS_HINT,
     HYPERLINK_MONGOOSE_HINT,
@@ -98,9 +99,11 @@ from gui_app import (
     _make_hint_label,
     _make_link_label,
     _make_log_widget,
+    _make_mutually_exclusive,
     _StyledTextEdit,
     build_client_safe,
 )
+from rpg_grayscale import DEFAULT_GRAYSCALE_SCRIPT
 from rpg_hyperlink import DEFAULT_GURPS_HYPERLINK_SCRIPT, DEFAULT_MONGOOSE_HYPERLINK_SCRIPT
 
 # ---------------------------------------------------------------------------
@@ -131,6 +134,8 @@ class TagFlowController:
         log,
         stop_event: threading.Event,
         convert_images: bool = False,
+        convert_grayscale: bool = False,
+        grayscale_script: str | Path = DEFAULT_GRAYSCALE_SCRIPT,
         hyperlink_gurps: bool = False,
         gurps_hyperlink_script: str | Path = DEFAULT_GURPS_HYPERLINK_SCRIPT,
         hyperlink_mongoose: bool = False,
@@ -143,6 +148,8 @@ class TagFlowController:
         self.thresholds = thresholds
         self.bookorbit_mode = bookorbit_mode
         self.convert_images = convert_images
+        self.convert_grayscale = convert_grayscale
+        self.grayscale_script = grayscale_script
         self.hyperlink_gurps = hyperlink_gurps
         self.gurps_hyperlink_script = gurps_hyperlink_script
         self.hyperlink_mongoose = hyperlink_mongoose
@@ -307,6 +314,7 @@ class TagFlowController:
         # marshaling back to the GUI thread.
         result = write_metadata(
             path, row, bookorbit_mode=self.bookorbit_mode, convert_images=self.convert_images,
+            convert_grayscale=self.convert_grayscale, grayscale_script=self.grayscale_script,
             hyperlink_gurps=self.hyperlink_gurps, gurps_hyperlink_script=self.gurps_hyperlink_script,
             hyperlink_mongoose=self.hyperlink_mongoose, mongoose_hyperlink_script=self.mongoose_hyperlink_script,
             log=self._log,
@@ -336,6 +344,7 @@ class TagWorker(QObject):
     def __init__(
         self, pdfs, client, manual_overrides, known_urls, thresholds,
         bookorbit_mode, rename, root_mode, stop_event, convert_images=False,
+        convert_grayscale=False, grayscale_script=DEFAULT_GRAYSCALE_SCRIPT,
         hyperlink_gurps=False, gurps_hyperlink_script=DEFAULT_GURPS_HYPERLINK_SCRIPT,
         hyperlink_mongoose=False, mongoose_hyperlink_script=DEFAULT_MONGOOSE_HYPERLINK_SCRIPT,
     ):
@@ -344,6 +353,7 @@ class TagWorker(QObject):
             pdfs=pdfs, client=client, manual_overrides=manual_overrides, known_urls=known_urls,
             thresholds=thresholds, bookorbit_mode=bookorbit_mode, rename=rename, root_mode=root_mode,
             notify=self._notify, log=self._log, stop_event=stop_event, convert_images=convert_images,
+            convert_grayscale=convert_grayscale, grayscale_script=grayscale_script,
             hyperlink_gurps=hyperlink_gurps, gurps_hyperlink_script=gurps_hyperlink_script,
             hyperlink_mongoose=hyperlink_mongoose, mongoose_hyperlink_script=mongoose_hyperlink_script,
         )
@@ -799,6 +809,11 @@ class TagTab(QWidget):
         layout.addWidget(self.convert_images_check)
         layout.addWidget(_make_hint_label(CONVERT_IMAGES_HINT))
 
+        self.convert_grayscale_check = QCheckBox("Convert PDF to grayscale (--convert-grayscale)")
+        layout.addWidget(self.convert_grayscale_check)
+        layout.addWidget(_make_hint_label(CONVERT_GRAYSCALE_HINT))
+        _make_mutually_exclusive(self.convert_images_check, self.convert_grayscale_check)
+
         self.hyperlink_gurps_check = QCheckBox("Hyperlink GURPS page/chapter references (--hyperlink-gurps)")
         layout.addWidget(self.hyperlink_gurps_check)
         layout.addWidget(_make_hint_label(HYPERLINK_GURPS_HINT))
@@ -879,6 +894,8 @@ class TagTab(QWidget):
             thresholds=thresholds, bookorbit_mode=self.bookorbit_check.isChecked(),
             rename=self.rename_check.isChecked(), root_mode=root_mode, stop_event=self.stop_event,
             convert_images=self.convert_images_check.isChecked(),
+            convert_grayscale=self.convert_grayscale_check.isChecked(),
+            grayscale_script=self.config_.get("grayscale_script", str(DEFAULT_GRAYSCALE_SCRIPT)),
             hyperlink_gurps=self.hyperlink_gurps_check.isChecked(),
             gurps_hyperlink_script=self.config_.get("gurps_hyperlink_script", str(DEFAULT_GURPS_HYPERLINK_SCRIPT)),
             hyperlink_mongoose=self.hyperlink_mongoose_check.isChecked(),

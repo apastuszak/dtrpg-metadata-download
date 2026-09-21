@@ -70,6 +70,7 @@ from preferences import DEFAULT_PREFERENCES_PATH, Preferences, load_preferences,
 from provenance import Status
 from renamer import apply_rename, plan_rename
 from review import ReviewRow, load_review, save_review
+from rpg_grayscale import DEFAULT_GRAYSCALE_SCRIPT
 from rpg_hyperlink import DEFAULT_GURPS_HYPERLINK_SCRIPT, DEFAULT_MONGOOSE_HYPERLINK_SCRIPT
 
 # Shared checkbox explanatory text -- defined once so WritePdfsTab/AllTab
@@ -84,6 +85,11 @@ CONVERT_IMAGES_HINT = (
     "Converts all images in the PDF from CMYK to RGB, and all JPEG2000 images to JPEG. This can "
     "speed up file rendering on slower hardware, and can fix an issue on macOS with missing images "
     "in the PDF. This WILL increase the file size."
+)
+CONVERT_GRAYSCALE_HINT = (
+    "Converts the whole PDF to grayscale using a separate script on this machine (requires "
+    "Ghostscript -- 'gs' -- on PATH, and grayscale_script set in config.yaml). Mutually exclusive "
+    "with converting to RGB above -- checking one unchecks the other."
 )
 RENAME_HINT = "Renames the file after the metadata update, using the format: Series Name - Book Name.pdf"
 HYPERLINK_GURPS_HINT = (
@@ -376,6 +382,15 @@ def _make_log_widget() -> QPlainTextEdit:
     return widget
 
 
+def _make_mutually_exclusive(a: QCheckBox, b: QCheckBox) -> None:
+    """Checking either box unchecks the other -- used for --convert-images
+    vs --convert-grayscale (opposite operations on the same images).
+    `toggled` only fires on an actual state change, so `setChecked(False)`
+    on an already-unchecked box is a no-op, not an infinite signal loop."""
+    a.toggled.connect(lambda checked: b.setChecked(False) if checked else None)
+    b.toggled.connect(lambda checked: a.setChecked(False) if checked else None)
+
+
 # ---------------------------------------------------------------------------
 # Shared scan/write-pdfs/rename logic -- factored out once so ScanTab/
 # WritePdfsTab/RenameTab/AllTab don't each keep their own copy (the same
@@ -410,6 +425,7 @@ def _do_scan(
 
 def _do_write_pdfs(
     log, rows: list[ReviewRow], root: str, bookorbit_mode: bool, convert_images: bool = False,
+    convert_grayscale: bool = False, grayscale_script: str = str(DEFAULT_GRAYSCALE_SCRIPT),
     hyperlink_gurps: bool = False, gurps_hyperlink_script: str = str(DEFAULT_GURPS_HYPERLINK_SCRIPT),
     hyperlink_mongoose: bool = False, mongoose_hyperlink_script: str = str(DEFAULT_MONGOOSE_HYPERLINK_SCRIPT),
 ) -> None:
@@ -418,6 +434,7 @@ def _do_write_pdfs(
         return
     results = write_approved(
         rows, root, bookorbit_mode=bookorbit_mode, convert_images=convert_images,
+        convert_grayscale=convert_grayscale, grayscale_script=grayscale_script,
         hyperlink_gurps=hyperlink_gurps, gurps_hyperlink_script=gurps_hyperlink_script,
         hyperlink_mongoose=hyperlink_mongoose, mongoose_hyperlink_script=mongoose_hyperlink_script, log=log,
     )
@@ -538,6 +555,11 @@ class WritePdfsTab(QWidget):
         layout.addWidget(self.convert_images_check)
         layout.addWidget(_make_hint_label(CONVERT_IMAGES_HINT))
 
+        self.convert_grayscale_check = QCheckBox("Convert PDF to grayscale (--convert-grayscale)")
+        layout.addWidget(self.convert_grayscale_check)
+        layout.addWidget(_make_hint_label(CONVERT_GRAYSCALE_HINT))
+        _make_mutually_exclusive(self.convert_images_check, self.convert_grayscale_check)
+
         self.hyperlink_gurps_check = QCheckBox("Hyperlink GURPS page/chapter references (--hyperlink-gurps)")
         layout.addWidget(self.hyperlink_gurps_check)
         layout.addWidget(_make_hint_label(HYPERLINK_GURPS_HINT))
@@ -568,24 +590,28 @@ class WritePdfsTab(QWidget):
             return
         self.run_button.setEnabled(False)
         review_csv = Path(self.config_.get("review_csv", "data/review.csv"))
+        grayscale_script = self.config_.get("grayscale_script", str(DEFAULT_GRAYSCALE_SCRIPT))
         gurps_hyperlink_script = self.config_.get("gurps_hyperlink_script", str(DEFAULT_GURPS_HYPERLINK_SCRIPT))
         mongoose_hyperlink_script = self.config_.get(
             "mongoose_hyperlink_script", str(DEFAULT_MONGOOSE_HYPERLINK_SCRIPT)
         )
         self.runner.start(
             self._worker, review_csv, root, self.bookorbit_check.isChecked(), self.convert_images_check.isChecked(),
+            self.convert_grayscale_check.isChecked(), grayscale_script,
             self.hyperlink_gurps_check.isChecked(), gurps_hyperlink_script,
             self.hyperlink_mongoose_check.isChecked(), mongoose_hyperlink_script,
         )
 
     def _worker(
         self, review_csv: Path, root: str, bookorbit_mode: bool, convert_images: bool,
+        convert_grayscale: bool, grayscale_script: str,
         hyperlink_gurps: bool, gurps_hyperlink_script: str,
         hyperlink_mongoose: bool, mongoose_hyperlink_script: str,
     ) -> None:
         rows = load_review(review_csv)
         _do_write_pdfs(
             self.runner.log, rows, root, bookorbit_mode, convert_images,
+            convert_grayscale, grayscale_script,
             hyperlink_gurps, gurps_hyperlink_script, hyperlink_mongoose, mongoose_hyperlink_script,
         )
 
@@ -722,6 +748,11 @@ class AllTab(QWidget):
         layout.addWidget(self.convert_images_check)
         layout.addWidget(_make_hint_label(CONVERT_IMAGES_HINT))
 
+        self.convert_grayscale_check = QCheckBox("Convert PDF to grayscale (--convert-grayscale)")
+        layout.addWidget(self.convert_grayscale_check)
+        layout.addWidget(_make_hint_label(CONVERT_GRAYSCALE_HINT))
+        _make_mutually_exclusive(self.convert_images_check, self.convert_grayscale_check)
+
         self.run_button = QPushButton("Run Scan + Write PDFs")
         self.run_button.clicked.connect(self._run)
         layout.addWidget(self.run_button, alignment=Qt.AlignmentFlag.AlignLeft)
@@ -744,19 +775,21 @@ class AllTab(QWidget):
         review_csv = Path(self.config_.get("review_csv", "data/review.csv"))
         manual_overrides_path = Path(self.config_.get("manual_overrides", "data/manual_overrides.yaml"))
         thresholds = self.config_.get("matching", {})
+        grayscale_script = self.config_.get("grayscale_script", str(DEFAULT_GRAYSCALE_SCRIPT))
         self.runner.start(
             self._worker, root, review_csv, manual_overrides_path, thresholds,
             self.refresh_check.isChecked(), self.apply_review_check.isChecked(), self.bookorbit_check.isChecked(),
-            self.convert_images_check.isChecked(),
+            self.convert_images_check.isChecked(), self.convert_grayscale_check.isChecked(), grayscale_script,
         )
 
     def _worker(
         self, root: str, review_csv: Path, manual_overrides_path: Path, thresholds: dict,
         refresh_library: bool, apply_review: bool, bookorbit_mode: bool, convert_images: bool,
+        convert_grayscale: bool, grayscale_script: str,
     ) -> None:
         log = self.runner.log
         merged = _do_scan(self.config_, log, root, review_csv, manual_overrides_path, thresholds, refresh_library, apply_review)
-        _do_write_pdfs(log, merged, root, bookorbit_mode, convert_images)
+        _do_write_pdfs(log, merged, root, bookorbit_mode, convert_images, convert_grayscale, grayscale_script)
 
     def _on_done(self) -> None:
         self.run_button.setEnabled(True)
