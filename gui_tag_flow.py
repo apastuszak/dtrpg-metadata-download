@@ -60,6 +60,7 @@ from PyQt6.QtWidgets import (
     QDialog,
     QFileDialog,
     QFormLayout,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -428,16 +429,6 @@ class CandidateDialog(QDialog):
         else:
             layout.addWidget(QLabel(f"{progress} No candidates found for {path.name}.".strip()))
 
-        layout.addWidget(QLabel("Paste a DriveThruRPG URL, or type id:PRODUCT_ID:"))
-        url_row = QHBoxLayout()
-        self.url_edit = QLineEdit()
-        self.url_edit.returnPressed.connect(self._submit_url)
-        url_row.addWidget(self.url_edit, 1)
-        use_url_button = QPushButton("Use URL")
-        use_url_button.clicked.connect(self._submit_url)
-        url_row.addWidget(use_url_button)
-        layout.addLayout(url_row)
-
         buttons = QHBoxLayout()
         self.pick_button: QPushButton | None = None
         if self.list_widget is not None:
@@ -454,6 +445,26 @@ class CandidateDialog(QDialog):
         self.quit_button.clicked.connect(self._quit)
         buttons.addWidget(self.quit_button)
         layout.addLayout(buttons)
+
+        separator = QFrame()
+        separator.setFrameShape(QFrame.Shape.HLine)
+        separator.setFrameShadow(QFrame.Shadow.Sunken)
+        layout.addWidget(separator)
+
+        or_label = QLabel("–OR–")
+        or_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        or_label.setStyleSheet("font-weight: bold;")
+        layout.addWidget(or_label)
+
+        layout.addWidget(QLabel("Paste a DriveThruRPG URL, or type id:PRODUCT_ID:"))
+        url_row = QHBoxLayout()
+        self.url_edit = QLineEdit()
+        self.url_edit.returnPressed.connect(self._submit_url)
+        url_row.addWidget(self.url_edit, 1)
+        use_url_button = QPushButton("Use URL")
+        use_url_button.clicked.connect(self._submit_url)
+        url_row.addWidget(use_url_button)
+        layout.addLayout(url_row)
 
         if self.list_widget is not None:
             self.list_widget.setFocus()
