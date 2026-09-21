@@ -91,6 +91,7 @@ from gui_app import (
     BOOKORBIT_HINT,
     BOOKORBIT_URL,
     CONVERT_IMAGES_HINT,
+    HYPERLINK_GURPS_HINT,
     RENAME_HINT,
     _make_description_label,
     _make_hint_label,
@@ -99,6 +100,7 @@ from gui_app import (
     _StyledTextEdit,
     build_client_safe,
 )
+from gurps_hyperlink import DEFAULT_HYPERLINK_SCRIPT
 
 # ---------------------------------------------------------------------------
 # Orchestration -- runs on a background thread. Framework-agnostic (no Qt
@@ -128,6 +130,8 @@ class TagFlowController:
         log,
         stop_event: threading.Event,
         convert_images: bool = False,
+        hyperlink_gurps: bool = False,
+        gurps_hyperlink_script: str | Path = DEFAULT_HYPERLINK_SCRIPT,
     ):
         self.pdfs = pdfs
         self.client = client
@@ -136,6 +140,8 @@ class TagFlowController:
         self.thresholds = thresholds
         self.bookorbit_mode = bookorbit_mode
         self.convert_images = convert_images
+        self.hyperlink_gurps = hyperlink_gurps
+        self.gurps_hyperlink_script = gurps_hyperlink_script
         self.rename = rename
         self.root_mode = root_mode
         self._notify = notify
@@ -295,7 +301,9 @@ class TagFlowController:
         # from any thread) -- safe to call directly here with no
         # marshaling back to the GUI thread.
         result = write_metadata(
-            path, row, bookorbit_mode=self.bookorbit_mode, convert_images=self.convert_images, log=self._log
+            path, row, bookorbit_mode=self.bookorbit_mode, convert_images=self.convert_images,
+            hyperlink_gurps=self.hyperlink_gurps, gurps_hyperlink_script=self.gurps_hyperlink_script,
+            log=self._log,
         )
         self._log(f"Wrote metadata to {path.name}" if result.success else f"FAILED: {result.message}")
         if result.success and self.rename:
@@ -322,12 +330,14 @@ class TagWorker(QObject):
     def __init__(
         self, pdfs, client, manual_overrides, known_urls, thresholds,
         bookorbit_mode, rename, root_mode, stop_event, convert_images=False,
+        hyperlink_gurps=False, gurps_hyperlink_script=DEFAULT_HYPERLINK_SCRIPT,
     ):
         super().__init__()
         self.controller = TagFlowController(
             pdfs=pdfs, client=client, manual_overrides=manual_overrides, known_urls=known_urls,
             thresholds=thresholds, bookorbit_mode=bookorbit_mode, rename=rename, root_mode=root_mode,
             notify=self._notify, log=self._log, stop_event=stop_event, convert_images=convert_images,
+            hyperlink_gurps=hyperlink_gurps, gurps_hyperlink_script=gurps_hyperlink_script,
         )
 
     def _notify(self, kind: str, payload: dict, response_q: "queue.Queue") -> None:
@@ -348,6 +358,23 @@ class TagWorker(QObject):
 # its Accepted/Rejected exec() code, which this isn't) holding the typed
 # result the caller reads once `.exec()` returns.
 # ---------------------------------------------------------------------------
+
+
+def _plain_label(text: str) -> QLabel:
+    """A QLabel that can never render its text as rich text/HTML,
+    regardless of content. A bare QLabel(text) defaults to
+    Qt::AutoText, which auto-detects and renders anything that looks
+    like markup -- and title/authors here can come straight from
+    DriveThruRPG's *public* catalog (anyone can list a product there,
+    same attacker-reachable-content reasoning as the CSV-injection fix
+    in review.py), so a crafted title/author string could otherwise
+    inject formatting, fake links, or altered-looking text into a
+    screen whose whole purpose is showing the user exactly what's
+    about to be written. Security-audit finding, not something a user
+    reported."""
+    label = QLabel(text)
+    label.setTextFormat(Qt.TextFormat.PlainText)
+    return label
 
 
 class BatchSeriesDialog(QDialog):
@@ -387,7 +414,7 @@ class SeriesDialog(QDialog):
         self.value: str = ""
 
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel(f"Series for {book_title}:"))
+        layout.addWidget(_plain_label(f"Series for {book_title}:"))
         layout.addWidget(QLabel("Leave blank for no series."))
         self.edit = QLineEdit()
         self.edit.returnPressed.connect(self._submit)
@@ -623,9 +650,9 @@ class ConfirmDialog(QDialog):
         self.value: ConfirmResult = ConfirmResult(action="skip")
 
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel(f"{progress} {header}".strip()))
+        layout.addWidget(_plain_label(f"{progress} {header}".strip()))
         if meta.authors:
-            layout.addWidget(QLabel(f"authors: {meta.authors_str()}"))
+            layout.addWidget(_plain_label(f"authors: {meta.authors_str()}"))
         source_value = meta.source.value if hasattr(meta.source, "value") else meta.source
         layout.addWidget(QLabel(f"source: {source_value}"))
 
@@ -764,6 +791,10 @@ class TagTab(QWidget):
         layout.addWidget(self.convert_images_check)
         layout.addWidget(_make_hint_label(CONVERT_IMAGES_HINT))
 
+        self.hyperlink_gurps_check = QCheckBox("Hyperlink GURPS page/chapter references (--hyperlink-gurps)")
+        layout.addWidget(self.hyperlink_gurps_check)
+        layout.addWidget(_make_hint_label(HYPERLINK_GURPS_HINT))
+
         self.rename_check = QCheckBox("Rename after write (--rename)")
         layout.addWidget(self.rename_check)
         layout.addWidget(_make_hint_label(RENAME_HINT))
@@ -834,6 +865,8 @@ class TagTab(QWidget):
             thresholds=thresholds, bookorbit_mode=self.bookorbit_check.isChecked(),
             rename=self.rename_check.isChecked(), root_mode=root_mode, stop_event=self.stop_event,
             convert_images=self.convert_images_check.isChecked(),
+            hyperlink_gurps=self.hyperlink_gurps_check.isChecked(),
+            gurps_hyperlink_script=self.config_.get("gurps_hyperlink_script", str(DEFAULT_HYPERLINK_SCRIPT)),
         )
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)

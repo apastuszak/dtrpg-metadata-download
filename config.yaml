@@ -10,6 +10,13 @@ review_csv: data/review.csv
 manual_overrides: data/manual_overrides.yaml
 preferences: data/preferences.yaml   # your API key + DriveThruRPG name -- gitignored, never commit this file
 
+# Optional, and specific to your own machine: path to a separate sibling
+# project's hyperlink_pdf_universal.py (auto-hyperlinks in-text page/
+# chapter references in GURPS PDFs -- see gurps_hyperlink.py). Only used
+# when --hyperlink-gurps/the GUI's matching checkbox is turned on; safe
+# to leave as this placeholder otherwise.
+gurps_hyperlink_script: /path/to/hyperlink_pdf_universal.py
+
 matching:
   high_confidence_threshold: 90.0
   review_floor_threshold: 70.0

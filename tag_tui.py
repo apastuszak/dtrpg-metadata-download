@@ -60,6 +60,7 @@ from textual.widgets import Button, Footer, Header, Input, Label, OptionList, St
 from textual.widgets.option_list import Option
 
 from dtrpg_client import DtrpgClient
+from gurps_hyperlink import DEFAULT_HYPERLINK_SCRIPT
 from matcher import extract_product_id, find_candidates, row_from_match
 from pdf_writer import write_metadata
 from provenance import ProductMetadata, Source, Status
@@ -582,6 +583,8 @@ class TagApp(App[None]):
         rename: bool,
         root_mode: bool,
         convert_images: bool = False,
+        hyperlink_gurps: bool = False,
+        gurps_hyperlink_script: str | Path = DEFAULT_HYPERLINK_SCRIPT,
     ):
         super().__init__()
         self.pdfs = pdfs
@@ -591,6 +594,8 @@ class TagApp(App[None]):
         self.thresholds = thresholds
         self.bookorbit_mode = bookorbit_mode
         self.convert_images = convert_images
+        self.hyperlink_gurps = hyperlink_gurps
+        self.gurps_hyperlink_script = gurps_hyperlink_script
         self.rename = rename
         self.root_mode = root_mode
         self.history: list[str] = []
@@ -750,6 +755,7 @@ class TagApp(App[None]):
 
         result = await self._call(
             write_metadata, path, row, bookorbit_mode=self.bookorbit_mode, convert_images=self.convert_images,
+            hyperlink_gurps=self.hyperlink_gurps, gurps_hyperlink_script=self.gurps_hyperlink_script,
             log=log_line,
         )
         self._log(f"Wrote metadata to {path.name}" if result.success else f"FAILED: {result.message}")

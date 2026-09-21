@@ -64,6 +64,7 @@ from PyQt6.QtWidgets import (
 )
 
 from dtrpg_client import DtrpgClient
+from gurps_hyperlink import DEFAULT_HYPERLINK_SCRIPT
 from matcher import load_known_urls, load_manual_overrides, run_scan_batch, scan_pdfs
 from pdf_writer import write_approved
 from preferences import DEFAULT_PREFERENCES_PATH, Preferences, load_preferences, resolve_api_key, save_preferences
@@ -85,6 +86,11 @@ CONVERT_IMAGES_HINT = (
     "in the PDF. This WILL increase the file size."
 )
 RENAME_HINT = "Renames the file after the metadata update, using the format: Series Name - Book Name.pdf"
+HYPERLINK_GURPS_HINT = (
+    "Auto-hyperlinks in-text page and chapter references (e.g. \"see p. 208\") using a separate "
+    "GURPS-specific script on this machine. Only useful for GURPS PDFs; requires "
+    "gurps_hyperlink_script to be set in config.yaml."
+)
 
 # QLineEdit gets a native-looking grey border (blue on focus) for free from
 # Qt's macOS style, since qmacstyle draws it the way a real NSTextField
@@ -397,11 +403,17 @@ def _do_scan(
     return merged
 
 
-def _do_write_pdfs(log, rows: list[ReviewRow], root: str, bookorbit_mode: bool, convert_images: bool = False) -> None:
+def _do_write_pdfs(
+    log, rows: list[ReviewRow], root: str, bookorbit_mode: bool, convert_images: bool = False,
+    hyperlink_gurps: bool = False, gurps_hyperlink_script: str = str(DEFAULT_HYPERLINK_SCRIPT),
+) -> None:
     if not any(r.is_approved() for r in rows):
         log("No approved/auto-accepted rows to write.")
         return
-    results = write_approved(rows, root, bookorbit_mode=bookorbit_mode, convert_images=convert_images, log=log)
+    results = write_approved(
+        rows, root, bookorbit_mode=bookorbit_mode, convert_images=convert_images,
+        hyperlink_gurps=hyperlink_gurps, gurps_hyperlink_script=gurps_hyperlink_script, log=log,
+    )
     succeeded = sum(1 for r in results if r.success)
     log(f"Wrote metadata to {succeeded}/{len(results)} approved files")
     for r in results:
@@ -519,6 +531,10 @@ class WritePdfsTab(QWidget):
         layout.addWidget(self.convert_images_check)
         layout.addWidget(_make_hint_label(CONVERT_IMAGES_HINT))
 
+        self.hyperlink_gurps_check = QCheckBox("Hyperlink GURPS page/chapter references (--hyperlink-gurps)")
+        layout.addWidget(self.hyperlink_gurps_check)
+        layout.addWidget(_make_hint_label(HYPERLINK_GURPS_HINT))
+
         self.run_button = QPushButton("Write Approved PDFs")
         self.run_button.clicked.connect(self._run)
         layout.addWidget(self.run_button, alignment=Qt.AlignmentFlag.AlignLeft)
@@ -539,11 +555,18 @@ class WritePdfsTab(QWidget):
             return
         self.run_button.setEnabled(False)
         review_csv = Path(self.config_.get("review_csv", "data/review.csv"))
-        self.runner.start(self._worker, review_csv, root, self.bookorbit_check.isChecked(), self.convert_images_check.isChecked())
+        gurps_hyperlink_script = self.config_.get("gurps_hyperlink_script", str(DEFAULT_HYPERLINK_SCRIPT))
+        self.runner.start(
+            self._worker, review_csv, root, self.bookorbit_check.isChecked(), self.convert_images_check.isChecked(),
+            self.hyperlink_gurps_check.isChecked(), gurps_hyperlink_script,
+        )
 
-    def _worker(self, review_csv: Path, root: str, bookorbit_mode: bool, convert_images: bool) -> None:
+    def _worker(
+        self, review_csv: Path, root: str, bookorbit_mode: bool, convert_images: bool,
+        hyperlink_gurps: bool, gurps_hyperlink_script: str,
+    ) -> None:
         rows = load_review(review_csv)
-        _do_write_pdfs(self.runner.log, rows, root, bookorbit_mode, convert_images)
+        _do_write_pdfs(self.runner.log, rows, root, bookorbit_mode, convert_images, hyperlink_gurps, gurps_hyperlink_script)
 
     def _on_done(self) -> None:
         self.run_button.setEnabled(True)

@@ -96,6 +96,7 @@ import pikepdf
 from lxml import etree
 from lxml.etree import QName
 
+from gurps_hyperlink import DEFAULT_HYPERLINK_SCRIPT, hyperlink_gurps_pdf
 from image_converter import convert_images_to_rgb
 from review import ReviewRow
 from sidecar_writer import _split_isbn, write_bookorbit_opf, write_grimmory_sidecar
@@ -224,18 +225,20 @@ def write_metadata(
     row: ReviewRow,
     bookorbit_mode: bool = False,
     convert_images: bool = False,
+    hyperlink_gurps: bool = False,
+    gurps_hyperlink_script: str | Path = DEFAULT_HYPERLINK_SCRIPT,
     log: Callable[[str], None] | None = None,
 ) -> WriteResult:
     """`log`, if given, is called with human-readable progress lines for
-    the image-conversion step specifically -- separate from this
-    function's own `logger.info()`/`logger.warning()` calls, which cover
-    the plain CLI (visible by default; TextualHandler routes them to
+    the image-conversion/hyperlinking steps specifically -- separate from
+    this function's own `logger.info()`/`logger.warning()` calls, which
+    cover the plain CLI (visible by default; TextualHandler routes them to
     stderr there since no Textual app is active) but never reach the
     TUI's or GUI's own visible log/notification surfaces, which have no
     connection to Python's logging module at all. Without an explicit
-    "starting" message here, --convert-images on a PDF with many images
-    can run for a while with nothing visible happening in either UI,
-    which looks indistinguishable from a hang."""
+    "starting" message here, --convert-images/--hyperlink-gurps on a PDF
+    with many images/pages can run for a while with nothing visible
+    happening in either UI, which looks indistinguishable from a hang."""
     if not path.exists():
         return WriteResult(path.name, False, "file not found")
 
@@ -267,6 +270,34 @@ def write_metadata(
             )
             if log is not None:
                 log(f"Converted {result.converted} image(s) in {path.name} ({result.skipped} already fine/skipped)")
+
+    if hyperlink_gurps:
+        # Also runs before pikepdf opens the file below, same reasoning as
+        # --convert-images above -- verified directly (not just reasoned
+        # through) that a link annotation added via PyMuPDF's saveIncr()
+        # survives a subsequent pikepdf metadata rewrite, so this ordering
+        # is safe; see gurps_hyperlink.py's module docstring. Best-effort,
+        # same as --convert-images: a missing/misconfigured script or a
+        # book the detector can't make sense of must not fail a write that
+        # could otherwise succeed.
+        logger.info("Hyperlinking %s...", path.name)
+        if log is not None:
+            log(f"Hyperlinking {path.name}...")
+        hyperlink_result = hyperlink_gurps_pdf(path, gurps_hyperlink_script, log=log)
+        if not hyperlink_result.success:
+            logger.warning("Hyperlinking failed for %s: %s", path.name, hyperlink_result.message)
+            if log is not None:
+                log(f"Hyperlinking failed for {path.name}: {hyperlink_result.message}")
+        else:
+            logger.info(
+                "Added %d page-reference/%d chapter/%d TOC link(s) in %s",
+                hyperlink_result.added, hyperlink_result.chapter_added, hyperlink_result.toc_added, path.name,
+            )
+            if log is not None:
+                log(
+                    f"Added {hyperlink_result.added} page-reference, {hyperlink_result.chapter_added} chapter, "
+                    f"{hyperlink_result.toc_added} TOC link(s) in {path.name}"
+                )
 
     try:
         with pikepdf.open(path, allow_overwriting_input=True) as pdf:
@@ -408,6 +439,8 @@ def write_approved(
     root: str | Path,
     bookorbit_mode: bool = False,
     convert_images: bool = False,
+    hyperlink_gurps: bool = False,
+    gurps_hyperlink_script: str | Path = DEFAULT_HYPERLINK_SCRIPT,
     log: Callable[[str], None] | None = None,
 ) -> list[WriteResult]:
     root = Path(root)
@@ -420,7 +453,10 @@ def write_approved(
             results.append(WriteResult(row.filename, False, "file not found under root"))
             continue
         results.append(
-            write_metadata(matches[0], row, bookorbit_mode=bookorbit_mode, convert_images=convert_images, log=log)
+            write_metadata(
+                matches[0], row, bookorbit_mode=bookorbit_mode, convert_images=convert_images,
+                hyperlink_gurps=hyperlink_gurps, gurps_hyperlink_script=gurps_hyperlink_script, log=log,
+            )
         )
 
     succeeded = sum(1 for r in results if r.success)

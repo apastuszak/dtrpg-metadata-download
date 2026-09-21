@@ -77,6 +77,14 @@
         (a different library from pikepdf) can't disturb the Calibre XMP
         pikepdf writes.
 
+    --hyperlink-gurps (on write-pdfs/tag): auto-hyperlinks in-text page/
+        chapter references (see gurps_hyperlink.py), via a separate
+        sibling project's script whose path comes from config.yaml's
+        gurps_hyperlink_script key. Off by default, and a machine-
+        specific integration -- tuned for GURPS's own reference
+        conventions, not a general feature. Runs before the embedded-
+        metadata write, same reasoning as --convert-images.
+
     rename PDF_PATH | rename --root PATH [--dry-run]
         Rename a single already-tagged PDF, or every one under --root
         (plus its .bak/.opf/.metadata.json sidecars), to
@@ -122,6 +130,7 @@ import yaml
 from textual.logging import TextualHandler
 
 from dtrpg_client import DtrpgClient
+from gurps_hyperlink import DEFAULT_HYPERLINK_SCRIPT
 from matcher import load_known_urls, load_manual_overrides, run_scan_batch, scan_pdfs
 from pdf_writer import write_approved
 from preferences import DEFAULT_PREFERENCES_PATH, load_preferences, resolve_api_key
@@ -213,7 +222,11 @@ def cmd_write_pdfs(args: argparse.Namespace, config: dict) -> None:
         print("No approved/auto-accepted rows to write.")
         return
 
-    results = write_approved(rows, root, bookorbit_mode=args.bookorbit_mode, convert_images=args.convert_images)
+    results = write_approved(
+        rows, root, bookorbit_mode=args.bookorbit_mode, convert_images=args.convert_images,
+        hyperlink_gurps=args.hyperlink_gurps,
+        gurps_hyperlink_script=config.get("gurps_hyperlink_script", DEFAULT_HYPERLINK_SCRIPT),
+    )
     succeeded = sum(1 for r in results if r.success)
     print(f"Wrote metadata to {succeeded}/{len(results)} approved files")
     for r in results:
@@ -310,6 +323,8 @@ def cmd_tag(args: argparse.Namespace, config: dict) -> None:
         thresholds=thresholds,
         bookorbit_mode=args.bookorbit_mode,
         convert_images=args.convert_images,
+        hyperlink_gurps=args.hyperlink_gurps,
+        gurps_hyperlink_script=config.get("gurps_hyperlink_script", DEFAULT_HYPERLINK_SCRIPT),
         rename=args.rename,
         root_mode=bool(args.root),
     ).run()
@@ -376,12 +391,17 @@ def main() -> None:
     convert_images_help = (
         "Convert CMYK/grayscale/JPEG2000 images in the PDF to RGB JPEG before writing metadata"
     )
+    hyperlink_gurps_help = (
+        "Auto-hyperlink in-text page/chapter references via a separate sibling script "
+        "(see gurps_hyperlink.py; path configured by gurps_hyperlink_script in config.yaml)"
+    )
 
     write_parser = subparsers.add_parser("write-pdfs", help="Write approved metadata into PDFs")
     write_parser.add_argument("--root", help="Root folder of RPG PDFs (overrides config.yaml)")
     write_parser.add_argument("--review-csv", help="Path to review.csv (overrides config.yaml)")
     write_parser.add_argument("--bookorbit-mode", action="store_true", help=bookorbit_mode_help)
     write_parser.add_argument("--convert-images", action="store_true", help=convert_images_help)
+    write_parser.add_argument("--hyperlink-gurps", action="store_true", help=hyperlink_gurps_help)
     write_parser.set_defaults(func=cmd_write_pdfs)
 
     all_parser = subparsers.add_parser("all", help="Run scan, then write-pdfs")
@@ -390,6 +410,7 @@ def main() -> None:
     all_parser.add_argument("--refresh-library", action="store_true")
     all_parser.add_argument("--apply-review", action="store_true")
     all_parser.add_argument("--bookorbit-mode", action="store_true", help=bookorbit_mode_help)
+    all_parser.add_argument("--hyperlink-gurps", action="store_true", help=hyperlink_gurps_help)
     all_parser.add_argument("--convert-images", action="store_true", help=convert_images_help)
     all_parser.set_defaults(func=cmd_all)
 
@@ -399,6 +420,7 @@ def main() -> None:
     tag_group.add_argument("--root", help="Process every PDF under this directory instead of a single file")
     tag_parser.add_argument("--bookorbit-mode", action="store_true", help=bookorbit_mode_help)
     tag_parser.add_argument("--convert-images", action="store_true", help=convert_images_help)
+    tag_parser.add_argument("--hyperlink-gurps", action="store_true", help=hyperlink_gurps_help)
     tag_parser.add_argument(
         "--rename", action="store_true",
         help="Also rename the file (and its sidecars) to 'Series - Title' immediately after a successful write",
