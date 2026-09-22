@@ -65,6 +65,7 @@ from pdf_writer import write_metadata
 from provenance import ProductMetadata, Source, Status
 from renamer import apply_rename, plan_rename
 from review import ReviewRow
+from rpg_background_layer import DEFAULT_BACKGROUND_LAYER_SCRIPT
 from rpg_grayscale import DEFAULT_GRAYSCALE_SCRIPT
 from rpg_hyperlink import DEFAULT_GURPS_HYPERLINK_SCRIPT, DEFAULT_MONGOOSE_HYPERLINK_SCRIPT
 
@@ -586,6 +587,9 @@ class TagApp(App[None]):
         convert_images: bool = False,
         convert_grayscale: bool = False,
         grayscale_script: str | Path = DEFAULT_GRAYSCALE_SCRIPT,
+        background_layer: bool = False,
+        remove_background: bool = False,
+        background_layer_script: str | Path = DEFAULT_BACKGROUND_LAYER_SCRIPT,
         hyperlink_gurps: bool = False,
         gurps_hyperlink_script: str | Path = DEFAULT_GURPS_HYPERLINK_SCRIPT,
         hyperlink_mongoose: bool = False,
@@ -601,6 +605,9 @@ class TagApp(App[None]):
         self.convert_images = convert_images
         self.convert_grayscale = convert_grayscale
         self.grayscale_script = grayscale_script
+        self.background_layer = background_layer
+        self.remove_background = remove_background
+        self.background_layer_script = background_layer_script
         self.hyperlink_gurps = hyperlink_gurps
         self.gurps_hyperlink_script = gurps_hyperlink_script
         self.hyperlink_mongoose = hyperlink_mongoose
@@ -765,6 +772,8 @@ class TagApp(App[None]):
         result = await self._call(
             write_metadata, path, row, bookorbit_mode=self.bookorbit_mode, convert_images=self.convert_images,
             convert_grayscale=self.convert_grayscale, grayscale_script=self.grayscale_script,
+            background_layer=self.background_layer, remove_background=self.remove_background,
+            background_layer_script=self.background_layer_script,
             hyperlink_gurps=self.hyperlink_gurps, gurps_hyperlink_script=self.gurps_hyperlink_script,
             hyperlink_mongoose=self.hyperlink_mongoose, mongoose_hyperlink_script=self.mongoose_hyperlink_script,
             log=log_line,

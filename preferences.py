@@ -5,11 +5,11 @@ here" since that file is meant to be safe to share/commit. This one
 isn't: the API key is a real secret, so it's kept separate, gitignored
 (see .gitignore), and written with owner-only file permissions. The
 sibling-script paths (`gurps_hyperlink_script`/`mongoose_hyperlink_script`/
-`grayscale_script`, see rpg_hyperlink.py/rpg_grayscale.py) aren't secrets,
-but they're still personal/machine-specific absolute paths with the same
-"doesn't belong in a file meant to go public" problem -- they ride along
-in this same file for that reason, not because they need 0600 protection
-too.
+`grayscale_script`/`background_layer_script`, see rpg_hyperlink.py/
+rpg_grayscale.py/rpg_background_layer.py) aren't secrets, but they're
+still personal/machine-specific absolute paths with the same "doesn't
+belong in a file meant to go public" problem -- they ride along in this
+same file for that reason, not because they need 0600 protection too.
 
 **This changes this project's previous "the API key only ever comes from
 DTRPG_API_KEY" policy** (still stated that way in older docs/comments
@@ -54,6 +54,7 @@ class Preferences:
     gurps_hyperlink_script: str = ""
     mongoose_hyperlink_script: str = ""
     grayscale_script: str = ""
+    background_layer_script: str = ""
 
 
 def load_preferences(path: str | Path = DEFAULT_PREFERENCES_PATH) -> Preferences:
@@ -71,6 +72,7 @@ def load_preferences(path: str | Path = DEFAULT_PREFERENCES_PATH) -> Preferences
         gurps_hyperlink_script=data.get("gurps_hyperlink_script") or "",
         mongoose_hyperlink_script=data.get("mongoose_hyperlink_script") or "",
         grayscale_script=data.get("grayscale_script") or "",
+        background_layer_script=data.get("background_layer_script") or "",
     )
 
 

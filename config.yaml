@@ -25,6 +25,12 @@ mongoose_hyperlink_script: /path/to/hyperlink_pdf_mongoose.py
 # package, not something this project's own dependencies can provide.
 grayscale_script: /path/to/convert_pdf_to_grayscale.py
 
+# Optional, same as above: path to a separate sibling project's PDF
+# background-layer script (see rpg_background_layer.py). Only used when
+# --background-layer/--remove-background (or the GUI's matching
+# checkboxes) are turned on.
+background_layer_script: /path/to/castles_and_crusades_background_layer.py
+
 matching:
   high_confidence_threshold: 90.0
   review_floor_threshold: 70.0

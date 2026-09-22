@@ -98,6 +98,7 @@ from lxml.etree import QName
 
 from image_converter import convert_images_to_rgb
 from review import ReviewRow
+from rpg_background_layer import DEFAULT_BACKGROUND_LAYER_SCRIPT, apply_background_layer
 from rpg_grayscale import DEFAULT_GRAYSCALE_SCRIPT, convert_pdf_grayscale
 from rpg_hyperlink import DEFAULT_GURPS_HYPERLINK_SCRIPT, DEFAULT_MONGOOSE_HYPERLINK_SCRIPT, run_hyperlink_script
 from sidecar_writer import _split_isbn, write_bookorbit_opf, write_grimmory_sidecar
@@ -254,6 +255,9 @@ def write_metadata(
     convert_images: bool = False,
     convert_grayscale: bool = False,
     grayscale_script: str | Path = DEFAULT_GRAYSCALE_SCRIPT,
+    background_layer: bool = False,
+    remove_background: bool = False,
+    background_layer_script: str | Path = DEFAULT_BACKGROUND_LAYER_SCRIPT,
     hyperlink_gurps: bool = False,
     gurps_hyperlink_script: str | Path = DEFAULT_GURPS_HYPERLINK_SCRIPT,
     hyperlink_mongoose: bool = False,
@@ -268,15 +272,17 @@ def write_metadata(
     TUI's or GUI's own visible log/notification surfaces, which have no
     connection to Python's logging module at all. Without an explicit
     "starting" message here, --convert-images/--convert-grayscale/
-    --hyperlink-gurps/--hyperlink-mongoose on a PDF with many images/pages
-    can run for a while with nothing visible happening in either UI, which
-    looks indistinguishable from a hang.
+    --background-layer/--remove-background/--hyperlink-gurps/
+    --hyperlink-mongoose on a PDF with many images/pages can run for a
+    while with nothing visible happening in either UI, which looks
+    indistinguishable from a hang.
 
-    `convert_images` and `convert_grayscale` are opposite operations on
-    the same images -- mutual exclusivity is enforced up at the CLI
-    (argparse mutually-exclusive group) and GUI (checking one un-checks
-    the other) layers, not here; this function just runs whichever
-    step(s) it's told to, in the order given below."""
+    `convert_images`/`convert_grayscale` are opposite operations on the
+    same images, and `background_layer`/`remove_background` are opposite
+    operations on the same background -- both pairs' mutual exclusivity
+    is enforced up at the CLI (argparse mutually-exclusive group) and GUI
+    (checking one un-checks the other) layers, not here; this function
+    just runs whichever step(s) it's told to, in the order given below."""
     if not path.exists():
         return WriteResult(path.name, False, "file not found")
 
@@ -284,6 +290,29 @@ def write_metadata(
         _backup(path)
     except OSError as exc:
         return WriteResult(path.name, False, f"backup failed: {exc}")
+
+    if background_layer or remove_background:
+        # Runs first among the optional pre-pikepdf steps -- if the
+        # background is about to be removed entirely, there's no reason
+        # for a later --convert-images/--convert-grayscale pass to waste
+        # time re-encoding it first. Otherwise safe regardless of order:
+        # OCG tagging only ever touches an XObject's /OC key, completely
+        # disjoint from the image-encoding keys --convert-images/
+        # --convert-grayscale touch, or the /Annots links hyperlinking
+        # adds. Verified directly (not just reasoned through) that both
+        # modes survive a subsequent pikepdf metadata write intact -- see
+        # rpg_background_layer.py's module docstring.
+        action = "Removing background from" if remove_background else "Tagging background layer in"
+        logger.info("%s %s...", action, path.name)
+        if log is not None:
+            log(f"{action} {path.name}...")
+        bg_result = apply_background_layer(path, background_layer_script, remove=remove_background, log=log)
+        if not bg_result.success:
+            logger.warning("Background-layer step failed for %s: %s", path.name, bg_result.message)
+            if log is not None:
+                log(f"Background-layer step failed for {path.name}: {bg_result.message}")
+        else:
+            logger.info("Background-layer step succeeded for %s", path.name)
 
     if convert_images:
         # Deliberately runs before pikepdf ever opens the file below --
@@ -485,6 +514,9 @@ def write_approved(
     convert_images: bool = False,
     convert_grayscale: bool = False,
     grayscale_script: str | Path = DEFAULT_GRAYSCALE_SCRIPT,
+    background_layer: bool = False,
+    remove_background: bool = False,
+    background_layer_script: str | Path = DEFAULT_BACKGROUND_LAYER_SCRIPT,
     hyperlink_gurps: bool = False,
     gurps_hyperlink_script: str | Path = DEFAULT_GURPS_HYPERLINK_SCRIPT,
     hyperlink_mongoose: bool = False,
@@ -504,6 +536,8 @@ def write_approved(
             write_metadata(
                 matches[0], row, bookorbit_mode=bookorbit_mode, convert_images=convert_images,
                 convert_grayscale=convert_grayscale, grayscale_script=grayscale_script,
+                background_layer=background_layer, remove_background=remove_background,
+                background_layer_script=background_layer_script,
                 hyperlink_gurps=hyperlink_gurps, gurps_hyperlink_script=gurps_hyperlink_script,
                 hyperlink_mongoose=hyperlink_mongoose, mongoose_hyperlink_script=mongoose_hyperlink_script,
                 log=log,

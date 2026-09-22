@@ -88,12 +88,14 @@ from tag_tui import (
 )
 
 from gui_app import (
+    BACKGROUND_LAYER_HINT,
     BOOKORBIT_HINT,
     BOOKORBIT_URL,
     CONVERT_GRAYSCALE_HINT,
     CONVERT_IMAGES_HINT,
     HYPERLINK_GURPS_HINT,
     HYPERLINK_MONGOOSE_HINT,
+    REMOVE_BACKGROUND_HINT,
     RENAME_HINT,
     _make_description_label,
     _make_hint_label,
@@ -104,6 +106,7 @@ from gui_app import (
     build_client_safe,
     resolve_script_paths,
 )
+from rpg_background_layer import DEFAULT_BACKGROUND_LAYER_SCRIPT
 from rpg_grayscale import DEFAULT_GRAYSCALE_SCRIPT
 from rpg_hyperlink import DEFAULT_GURPS_HYPERLINK_SCRIPT, DEFAULT_MONGOOSE_HYPERLINK_SCRIPT
 
@@ -137,6 +140,9 @@ class TagFlowController:
         convert_images: bool = False,
         convert_grayscale: bool = False,
         grayscale_script: str | Path = DEFAULT_GRAYSCALE_SCRIPT,
+        background_layer: bool = False,
+        remove_background: bool = False,
+        background_layer_script: str | Path = DEFAULT_BACKGROUND_LAYER_SCRIPT,
         hyperlink_gurps: bool = False,
         gurps_hyperlink_script: str | Path = DEFAULT_GURPS_HYPERLINK_SCRIPT,
         hyperlink_mongoose: bool = False,
@@ -151,6 +157,9 @@ class TagFlowController:
         self.convert_images = convert_images
         self.convert_grayscale = convert_grayscale
         self.grayscale_script = grayscale_script
+        self.background_layer = background_layer
+        self.remove_background = remove_background
+        self.background_layer_script = background_layer_script
         self.hyperlink_gurps = hyperlink_gurps
         self.gurps_hyperlink_script = gurps_hyperlink_script
         self.hyperlink_mongoose = hyperlink_mongoose
@@ -316,6 +325,8 @@ class TagFlowController:
         result = write_metadata(
             path, row, bookorbit_mode=self.bookorbit_mode, convert_images=self.convert_images,
             convert_grayscale=self.convert_grayscale, grayscale_script=self.grayscale_script,
+            background_layer=self.background_layer, remove_background=self.remove_background,
+            background_layer_script=self.background_layer_script,
             hyperlink_gurps=self.hyperlink_gurps, gurps_hyperlink_script=self.gurps_hyperlink_script,
             hyperlink_mongoose=self.hyperlink_mongoose, mongoose_hyperlink_script=self.mongoose_hyperlink_script,
             log=self._log,
@@ -346,6 +357,8 @@ class TagWorker(QObject):
         self, pdfs, client, manual_overrides, known_urls, thresholds,
         bookorbit_mode, rename, root_mode, stop_event, convert_images=False,
         convert_grayscale=False, grayscale_script=DEFAULT_GRAYSCALE_SCRIPT,
+        background_layer=False, remove_background=False,
+        background_layer_script=DEFAULT_BACKGROUND_LAYER_SCRIPT,
         hyperlink_gurps=False, gurps_hyperlink_script=DEFAULT_GURPS_HYPERLINK_SCRIPT,
         hyperlink_mongoose=False, mongoose_hyperlink_script=DEFAULT_MONGOOSE_HYPERLINK_SCRIPT,
     ):
@@ -355,6 +368,8 @@ class TagWorker(QObject):
             thresholds=thresholds, bookorbit_mode=bookorbit_mode, rename=rename, root_mode=root_mode,
             notify=self._notify, log=self._log, stop_event=stop_event, convert_images=convert_images,
             convert_grayscale=convert_grayscale, grayscale_script=grayscale_script,
+            background_layer=background_layer, remove_background=remove_background,
+            background_layer_script=background_layer_script,
             hyperlink_gurps=hyperlink_gurps, gurps_hyperlink_script=gurps_hyperlink_script,
             hyperlink_mongoose=hyperlink_mongoose, mongoose_hyperlink_script=mongoose_hyperlink_script,
         )
@@ -825,6 +840,17 @@ class TagTab(QWidget):
         layout.addWidget(self.hyperlink_mongoose_check)
         layout.addWidget(_make_hint_label(HYPERLINK_MONGOOSE_HINT))
 
+        self.background_layer_check = QCheckBox(
+            "Tag background as its own layer -- Castles and Crusades only (--background-layer)"
+        )
+        layout.addWidget(self.background_layer_check)
+        layout.addWidget(_make_hint_label(BACKGROUND_LAYER_HINT))
+
+        self.remove_background_check = QCheckBox("Remove background -- Castles and Crusades only (--remove-background)")
+        layout.addWidget(self.remove_background_check)
+        layout.addWidget(_make_hint_label(REMOVE_BACKGROUND_HINT))
+        _make_mutually_exclusive(self.background_layer_check, self.remove_background_check)
+
         self.rename_check = QCheckBox("Rename after write (--rename)")
         layout.addWidget(self.rename_check)
         layout.addWidget(_make_hint_label(RENAME_HINT))
@@ -887,7 +913,9 @@ class TagTab(QWidget):
         manual_overrides_path = Path(self.config_.get("manual_overrides", "data/manual_overrides.yaml"))
         manual_overrides = load_manual_overrides(manual_overrides_path)
         thresholds = self.config_.get("matching", {})
-        gurps_hyperlink_script, mongoose_hyperlink_script, grayscale_script = resolve_script_paths(self.config_)
+        gurps_hyperlink_script, mongoose_hyperlink_script, grayscale_script, background_layer_script = (
+            resolve_script_paths(self.config_)
+        )
 
         self.stop_event = threading.Event()
         self._thread = QThread()
@@ -897,6 +925,9 @@ class TagTab(QWidget):
             rename=self.rename_check.isChecked(), root_mode=root_mode, stop_event=self.stop_event,
             convert_images=self.convert_images_check.isChecked(),
             convert_grayscale=self.convert_grayscale_check.isChecked(), grayscale_script=grayscale_script,
+            background_layer=self.background_layer_check.isChecked(),
+            remove_background=self.remove_background_check.isChecked(),
+            background_layer_script=background_layer_script,
             hyperlink_gurps=self.hyperlink_gurps_check.isChecked(), gurps_hyperlink_script=gurps_hyperlink_script,
             hyperlink_mongoose=self.hyperlink_mongoose_check.isChecked(),
             mongoose_hyperlink_script=mongoose_hyperlink_script,

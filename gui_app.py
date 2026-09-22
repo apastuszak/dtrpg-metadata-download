@@ -77,6 +77,7 @@ from preferences import (
 from provenance import Status
 from renamer import apply_rename, plan_rename
 from review import ReviewRow, load_review, save_review
+from rpg_background_layer import DEFAULT_BACKGROUND_LAYER_SCRIPT
 from rpg_grayscale import DEFAULT_GRAYSCALE_SCRIPT
 from rpg_hyperlink import DEFAULT_GURPS_HYPERLINK_SCRIPT, DEFAULT_MONGOOSE_HYPERLINK_SCRIPT
 
@@ -108,6 +109,17 @@ HYPERLINK_MONGOOSE_HINT = (
     "Auto-hyperlinks in-text page and chapter references using a separate script specific to "
     "Mongoose Publishing's Traveller line. Only useful for Mongoose Traveller PDFs; requires "
     "mongoose_hyperlink_script to be set in config.yaml."
+)
+BACKGROUND_LAYER_HINT = (
+    "Tags each page's full-page decorative background as a toggleable layer, using a separate "
+    "script on this machine. For Castles and Crusades rulebooks only; requires "
+    "background_layer_script to be set in config.yaml. Mutually exclusive with removing the "
+    "background below -- checking one unchecks the other."
+)
+REMOVE_BACKGROUND_HINT = (
+    "Deletes each page's full-page decorative background outright, using the same script as "
+    "above. For Castles and Crusades rulebooks only. Mutually exclusive with tagging the background "
+    "as a layer -- checking one unchecks the other."
 )
 
 # QLineEdit gets a native-looking grey border (blue on focus) for free from
@@ -282,13 +294,13 @@ def build_client_safe(config: dict) -> DtrpgClient:
     )
 
 
-def resolve_script_paths(config: dict) -> tuple[str, str, str]:
-    """(gurps_hyperlink_script, mongoose_hyperlink_script, grayscale_script),
-    each resolved via preferences.resolve_path() -- a saved Preferences
-    value wins, then config.yaml's own key, then the hardcoded placeholder
-    default. Shared by every tab that needs one of these three paths
-    (WritePdfsTab/AllTab here, TagTab in gui_tag_flow.py) so they can't
-    drift into resolving this differently from each other."""
+def resolve_script_paths(config: dict) -> tuple[str, str, str, str]:
+    """(gurps_hyperlink_script, mongoose_hyperlink_script, grayscale_script,
+    background_layer_script), each resolved via preferences.resolve_path()
+    -- a saved Preferences value wins, then config.yaml's own key, then
+    the hardcoded placeholder default. Shared by every tab that needs one
+    of these paths (WritePdfsTab/AllTab here, TagTab in gui_tag_flow.py)
+    so they can't drift into resolving this differently from each other."""
     prefs = load_preferences(config.get("preferences", DEFAULT_PREFERENCES_PATH))
     return (
         resolve_path(prefs.gurps_hyperlink_script, config.get("gurps_hyperlink_script"), DEFAULT_GURPS_HYPERLINK_SCRIPT),
@@ -296,6 +308,9 @@ def resolve_script_paths(config: dict) -> tuple[str, str, str]:
             prefs.mongoose_hyperlink_script, config.get("mongoose_hyperlink_script"), DEFAULT_MONGOOSE_HYPERLINK_SCRIPT
         ),
         resolve_path(prefs.grayscale_script, config.get("grayscale_script"), DEFAULT_GRAYSCALE_SCRIPT),
+        resolve_path(
+            prefs.background_layer_script, config.get("background_layer_script"), DEFAULT_BACKGROUND_LAYER_SCRIPT
+        ),
     )
 
 
@@ -450,6 +465,8 @@ def _do_scan(
 def _do_write_pdfs(
     log, rows: list[ReviewRow], root: str, bookorbit_mode: bool, convert_images: bool = False,
     convert_grayscale: bool = False, grayscale_script: str = str(DEFAULT_GRAYSCALE_SCRIPT),
+    background_layer: bool = False, remove_background: bool = False,
+    background_layer_script: str = str(DEFAULT_BACKGROUND_LAYER_SCRIPT),
     hyperlink_gurps: bool = False, gurps_hyperlink_script: str = str(DEFAULT_GURPS_HYPERLINK_SCRIPT),
     hyperlink_mongoose: bool = False, mongoose_hyperlink_script: str = str(DEFAULT_MONGOOSE_HYPERLINK_SCRIPT),
 ) -> None:
@@ -459,6 +476,8 @@ def _do_write_pdfs(
     results = write_approved(
         rows, root, bookorbit_mode=bookorbit_mode, convert_images=convert_images,
         convert_grayscale=convert_grayscale, grayscale_script=grayscale_script,
+        background_layer=background_layer, remove_background=remove_background,
+        background_layer_script=background_layer_script,
         hyperlink_gurps=hyperlink_gurps, gurps_hyperlink_script=gurps_hyperlink_script,
         hyperlink_mongoose=hyperlink_mongoose, mongoose_hyperlink_script=mongoose_hyperlink_script, log=log,
     )
@@ -594,6 +613,17 @@ class WritePdfsTab(QWidget):
         layout.addWidget(self.hyperlink_mongoose_check)
         layout.addWidget(_make_hint_label(HYPERLINK_MONGOOSE_HINT))
 
+        self.background_layer_check = QCheckBox(
+            "Tag background as its own layer -- Castles and Crusades only (--background-layer)"
+        )
+        layout.addWidget(self.background_layer_check)
+        layout.addWidget(_make_hint_label(BACKGROUND_LAYER_HINT))
+
+        self.remove_background_check = QCheckBox("Remove background -- Castles and Crusades only (--remove-background)")
+        layout.addWidget(self.remove_background_check)
+        layout.addWidget(_make_hint_label(REMOVE_BACKGROUND_HINT))
+        _make_mutually_exclusive(self.background_layer_check, self.remove_background_check)
+
         self.run_button = QPushButton("Write Approved PDFs")
         self.run_button.clicked.connect(self._run)
         layout.addWidget(self.run_button, alignment=Qt.AlignmentFlag.AlignLeft)
@@ -614,10 +644,14 @@ class WritePdfsTab(QWidget):
             return
         self.run_button.setEnabled(False)
         review_csv = Path(self.config_.get("review_csv", "data/review.csv"))
-        gurps_hyperlink_script, mongoose_hyperlink_script, grayscale_script = resolve_script_paths(self.config_)
+        gurps_hyperlink_script, mongoose_hyperlink_script, grayscale_script, background_layer_script = (
+            resolve_script_paths(self.config_)
+        )
         self.runner.start(
             self._worker, review_csv, root, self.bookorbit_check.isChecked(), self.convert_images_check.isChecked(),
             self.convert_grayscale_check.isChecked(), grayscale_script,
+            self.background_layer_check.isChecked(), self.remove_background_check.isChecked(),
+            background_layer_script,
             self.hyperlink_gurps_check.isChecked(), gurps_hyperlink_script,
             self.hyperlink_mongoose_check.isChecked(), mongoose_hyperlink_script,
         )
@@ -625,6 +659,7 @@ class WritePdfsTab(QWidget):
     def _worker(
         self, review_csv: Path, root: str, bookorbit_mode: bool, convert_images: bool,
         convert_grayscale: bool, grayscale_script: str,
+        background_layer: bool, remove_background: bool, background_layer_script: str,
         hyperlink_gurps: bool, gurps_hyperlink_script: str,
         hyperlink_mongoose: bool, mongoose_hyperlink_script: str,
     ) -> None:
@@ -632,6 +667,7 @@ class WritePdfsTab(QWidget):
         _do_write_pdfs(
             self.runner.log, rows, root, bookorbit_mode, convert_images,
             convert_grayscale, grayscale_script,
+            background_layer, remove_background, background_layer_script,
             hyperlink_gurps, gurps_hyperlink_script, hyperlink_mongoose, mongoose_hyperlink_script,
         )
 
@@ -795,7 +831,7 @@ class AllTab(QWidget):
         review_csv = Path(self.config_.get("review_csv", "data/review.csv"))
         manual_overrides_path = Path(self.config_.get("manual_overrides", "data/manual_overrides.yaml"))
         thresholds = self.config_.get("matching", {})
-        _gurps, _mongoose, grayscale_script = resolve_script_paths(self.config_)
+        _gurps, _mongoose, grayscale_script, _background_layer = resolve_script_paths(self.config_)
         self.runner.start(
             self._worker, root, review_csv, manual_overrides_path, thresholds,
             self.refresh_check.isChecked(), self.apply_review_check.isChecked(), self.bookorbit_check.isChecked(),
@@ -1026,7 +1062,7 @@ class PreferencesTab(QWidget):
     gitignored, owner-only-permissioned file rather than config.yaml. The
     API key field is masked by default (a real secret), with a checkbox
     to reveal it, matching preferences_tui.py's equivalent in the TUI.
-    The three script-path fields aren't secrets, so they're always shown
+    The four script-path fields aren't secrets, so they're always shown
     in plain text -- only the API key gets the mask/reveal treatment."""
 
     def __init__(self, config: dict):
@@ -1063,11 +1099,14 @@ class PreferencesTab(QWidget):
         self.grayscale_script_edit = QLineEdit(prefs.grayscale_script)
         form.addRow("Grayscale script:", self._path_row(self.grayscale_script_edit))
 
+        self.background_layer_script_edit = QLineEdit(prefs.background_layer_script)
+        form.addRow("Background layer script:", self._path_row(self.background_layer_script_edit))
+
         layout.addLayout(form)
         layout.addWidget(_make_hint_label(
-            "The three script paths above are only used by the matching checkboxes on the Tag/"
-            "Write PDFs/All tabs (--hyperlink-gurps/--hyperlink-mongoose/--convert-grayscale) -- "
-            "leave them blank if you don't use those."
+            "The four script paths above are only used by the matching checkboxes on the Tag/"
+            "Write PDFs/All tabs (--hyperlink-gurps/--hyperlink-mongoose/--convert-grayscale/"
+            "--background-layer/--remove-background) -- leave them blank if you don't use those."
         ))
 
         save_row = QHBoxLayout()
@@ -1105,6 +1144,7 @@ class PreferencesTab(QWidget):
             gurps_hyperlink_script=self.gurps_hyperlink_script_edit.text().strip(),
             mongoose_hyperlink_script=self.mongoose_hyperlink_script_edit.text().strip(),
             grayscale_script=self.grayscale_script_edit.text().strip(),
+            background_layer_script=self.background_layer_script_edit.text().strip(),
         )
         save_preferences(prefs, self.preferences_path)
         self.status_label.setText(f"Saved to {self.preferences_path}")

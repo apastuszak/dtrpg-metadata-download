@@ -23,7 +23,7 @@ export DTRPG_API_KEY=...
 ./.venv/bin/python dtrpg-metadata-download.py --help
 ```
 
-Copy `config.yaml` and adjust `root` (and anything else) for your machine. It's meant to stay free of secrets. The API key comes from `DTRPG_API_KEY` if it's set; otherwise, don't want to manage an environment variable? Run `./dtrpg-metadata-download.py preferences` (or use the Preferences tab in the GUI) to save it to `data/preferences.yaml` instead — gitignored and written with owner-only file permissions, but still a plaintext file on disk, a real (if smaller) step down from an environment variable that only ever lived in one shell session. `DTRPG_API_KEY` always wins over a saved preference if both are present. The same Preferences screen also has fields for the `--hyperlink-gurps`/`--hyperlink-mongoose`/`--convert-grayscale` sibling-script paths — the more convenient way to set those now, instead of hand-editing `config.yaml`'s placeholder keys (a saved preference wins over `config.yaml` for these).
+Copy `config.yaml` and adjust `root` (and anything else) for your machine. It's meant to stay free of secrets. The API key comes from `DTRPG_API_KEY` if it's set; otherwise, don't want to manage an environment variable? Run `./dtrpg-metadata-download.py preferences` (or use the Preferences tab in the GUI) to save it to `data/preferences.yaml` instead — gitignored and written with owner-only file permissions, but still a plaintext file on disk, a real (if smaller) step down from an environment variable that only ever lived in one shell session. `DTRPG_API_KEY` always wins over a saved preference if both are present. The same Preferences screen also has fields for the `--hyperlink-gurps`/`--hyperlink-mongoose`/`--convert-grayscale`/`--background-layer`/`--remove-background` sibling-script paths — the more convenient way to set those now, instead of hand-editing `config.yaml`'s placeholder keys (a saved preference wins over `config.yaml` for these).
 
 ## Usage
 
@@ -148,6 +148,10 @@ Available on `tag`, `write-pdfs`, and `all` (and as a checkbox in the GUI's Tag/
 #### `--hyperlink-gurps` / `--hyperlink-mongoose`
 
 Available on `tag` and `write-pdfs` (and as checkboxes in the GUI's Tag/Write PDFs tabs). Auto-hyperlinks in-text page and chapter references (e.g. "see p. 208") before metadata is written, using a separate sibling script on your machine (see `rpg_hyperlink.py`) — one tuned for GURPS, one for Mongoose Publishing's Traveller line. Set each script's path first, either in the Preferences tab/`preferences` subcommand (`gurps_hyperlink_script`/`mongoose_hyperlink_script`) or in `config.yaml`, or this is a no-op with a clear log line rather than a crash. Both off by default, and independent of each other. Each only makes sense for that publisher's own PDFs; these are machine-specific integrations, not a general feature of this project.
+
+#### `--background-layer` / `--remove-background`
+
+Available on `tag`, `write-pdfs`, and `all` (and as checkboxes in the GUI's Tag/Write PDFs tabs). Tags each page's full-page decorative background as a toggleable layer, or deletes it outright, before metadata is written, using a separate sibling script on your machine (see `rpg_background_layer.py`). For Castles and Crusades rulebooks only. Set the script's path first, either in the Preferences tab/`preferences` subcommand (`background_layer_script`) or in `config.yaml`, or this is a no-op with a clear log line rather than a crash. Off by default, and mutually exclusive with each other (opposite operations on the same background) — checking one unchecks the other in the GUI, and the CLI refuses both flags together. A machine-specific integration, not a general feature of this project.
 
 ### 3. `<name>.metadata.json` — Grimmory sidecar
 

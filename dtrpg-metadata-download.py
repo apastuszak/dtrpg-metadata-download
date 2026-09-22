@@ -97,6 +97,18 @@
         Traveller line), not a general feature. Both run before the
         embedded-metadata write, same reasoning as --convert-images.
 
+    --background-layer / --remove-background (on write-pdfs/all/tag):
+        tags each page's full-page decorative background as a toggleable
+        Optional Content Group layer, or deletes it outright, via a
+        separate sibling project's script (see rpg_background_layer.py)
+        whose path comes from config.yaml's background_layer_script key.
+        Off by default, mutually exclusive with each other, and a
+        machine-specific integration tuned for one specific PDF line
+        (Castles and Crusades) -- not a general feature. Runs first among
+        the optional pre-metadata-write steps, before --convert-images/
+        --convert-grayscale/hyperlinking, all of which still run before
+        the final embedded-metadata write either way.
+
     rename PDF_PATH | rename --root PATH [--dry-run]
         Rename a single already-tagged PDF, or every one under --root
         (plus its .bak/.opf/.metadata.json sidecars), to
@@ -147,6 +159,7 @@ from pdf_writer import write_approved
 from preferences import DEFAULT_PREFERENCES_PATH, load_preferences, resolve_api_key, resolve_path
 from renamer import apply_rename, plan_rename
 from review import load_review, save_review
+from rpg_background_layer import DEFAULT_BACKGROUND_LAYER_SCRIPT
 from rpg_grayscale import DEFAULT_GRAYSCALE_SCRIPT
 from rpg_hyperlink import DEFAULT_GURPS_HYPERLINK_SCRIPT, DEFAULT_MONGOOSE_HYPERLINK_SCRIPT
 from tag_tui import TagApp
@@ -178,12 +191,13 @@ def build_client(config: dict) -> DtrpgClient:
     )
 
 
-def _resolve_script_paths(config: dict) -> tuple[str, str, str]:
-    """(gurps_hyperlink_script, mongoose_hyperlink_script, grayscale_script),
-    each resolved via preferences.resolve_path() -- a saved Preferences
-    value wins, then config.yaml's own key, then the hardcoded placeholder
-    default. Shared by cmd_write_pdfs/cmd_all (via write_approved()) and
-    cmd_tag (via TagApp) so both read these the same way."""
+def _resolve_script_paths(config: dict) -> tuple[str, str, str, str]:
+    """(gurps_hyperlink_script, mongoose_hyperlink_script, grayscale_script,
+    background_layer_script), each resolved via preferences.resolve_path()
+    -- a saved Preferences value wins, then config.yaml's own key, then
+    the hardcoded placeholder default. Shared by cmd_write_pdfs/cmd_all
+    (via write_approved()) and cmd_tag (via TagApp) so both read these
+    the same way."""
     prefs = load_preferences(config.get("preferences", DEFAULT_PREFERENCES_PATH))
     return (
         resolve_path(prefs.gurps_hyperlink_script, config.get("gurps_hyperlink_script"), DEFAULT_GURPS_HYPERLINK_SCRIPT),
@@ -191,6 +205,9 @@ def _resolve_script_paths(config: dict) -> tuple[str, str, str]:
             prefs.mongoose_hyperlink_script, config.get("mongoose_hyperlink_script"), DEFAULT_MONGOOSE_HYPERLINK_SCRIPT
         ),
         resolve_path(prefs.grayscale_script, config.get("grayscale_script"), DEFAULT_GRAYSCALE_SCRIPT),
+        resolve_path(
+            prefs.background_layer_script, config.get("background_layer_script"), DEFAULT_BACKGROUND_LAYER_SCRIPT
+        ),
     )
 
 
@@ -251,10 +268,14 @@ def cmd_write_pdfs(args: argparse.Namespace, config: dict) -> None:
         print("No approved/auto-accepted rows to write.")
         return
 
-    gurps_hyperlink_script, mongoose_hyperlink_script, grayscale_script = _resolve_script_paths(config)
+    gurps_hyperlink_script, mongoose_hyperlink_script, grayscale_script, background_layer_script = (
+        _resolve_script_paths(config)
+    )
     results = write_approved(
         rows, root, bookorbit_mode=args.bookorbit_mode, convert_images=args.convert_images,
         convert_grayscale=args.convert_grayscale, grayscale_script=grayscale_script,
+        background_layer=args.background_layer, remove_background=args.remove_background,
+        background_layer_script=background_layer_script,
         hyperlink_gurps=args.hyperlink_gurps, gurps_hyperlink_script=gurps_hyperlink_script,
         hyperlink_mongoose=args.hyperlink_mongoose, mongoose_hyperlink_script=mongoose_hyperlink_script,
     )
@@ -346,7 +367,9 @@ def cmd_tag(args: argparse.Namespace, config: dict) -> None:
         client = build_client(config)
         known_urls = load_known_urls(path.parent)
 
-    gurps_hyperlink_script, mongoose_hyperlink_script, grayscale_script = _resolve_script_paths(config)
+    gurps_hyperlink_script, mongoose_hyperlink_script, grayscale_script, background_layer_script = (
+        _resolve_script_paths(config)
+    )
     TagApp(
         pdfs=pdfs,
         client=client,
@@ -357,6 +380,9 @@ def cmd_tag(args: argparse.Namespace, config: dict) -> None:
         convert_images=args.convert_images,
         convert_grayscale=args.convert_grayscale,
         grayscale_script=grayscale_script,
+        background_layer=args.background_layer,
+        remove_background=args.remove_background,
+        background_layer_script=background_layer_script,
         hyperlink_gurps=args.hyperlink_gurps,
         gurps_hyperlink_script=gurps_hyperlink_script,
         hyperlink_mongoose=args.hyperlink_mongoose,
@@ -440,6 +466,17 @@ def main() -> None:
         "Auto-hyperlink in-text page/chapter references via a separate sibling Mongoose-Traveller-"
         "specific script (see rpg_hyperlink.py; path configured by mongoose_hyperlink_script in config.yaml)"
     )
+    background_layer_help = (
+        "Tag each page's full-page decorative background as a toggleable Optional Content Group layer, "
+        "via a separate sibling script (see rpg_background_layer.py; path configured by "
+        "background_layer_script in config.yaml). For Castles and Crusades rulebooks only. Mutually "
+        "exclusive with --remove-background."
+    )
+    remove_background_help = (
+        "Delete each page's full-page decorative background outright, via the same sibling script as "
+        "--background-layer. For Castles and Crusades rulebooks only. Mutually exclusive with "
+        "--background-layer."
+    )
 
     write_parser = subparsers.add_parser("write-pdfs", help="Write approved metadata into PDFs")
     write_parser.add_argument("--root", help="Root folder of RPG PDFs (overrides config.yaml)")
@@ -450,6 +487,9 @@ def main() -> None:
     write_color_group.add_argument("--convert-grayscale", action="store_true", help=convert_grayscale_help)
     write_parser.add_argument("--hyperlink-gurps", action="store_true", help=hyperlink_gurps_help)
     write_parser.add_argument("--hyperlink-mongoose", action="store_true", help=hyperlink_mongoose_help)
+    write_bg_group = write_parser.add_mutually_exclusive_group()
+    write_bg_group.add_argument("--background-layer", action="store_true", help=background_layer_help)
+    write_bg_group.add_argument("--remove-background", action="store_true", help=remove_background_help)
     write_parser.set_defaults(func=cmd_write_pdfs)
 
     all_parser = subparsers.add_parser("all", help="Run scan, then write-pdfs")
@@ -463,6 +503,9 @@ def main() -> None:
     all_color_group = all_parser.add_mutually_exclusive_group()
     all_color_group.add_argument("--convert-images", action="store_true", help=convert_images_help)
     all_color_group.add_argument("--convert-grayscale", action="store_true", help=convert_grayscale_help)
+    all_bg_group = all_parser.add_mutually_exclusive_group()
+    all_bg_group.add_argument("--background-layer", action="store_true", help=background_layer_help)
+    all_bg_group.add_argument("--remove-background", action="store_true", help=remove_background_help)
     all_parser.set_defaults(func=cmd_all)
 
     tag_parser = subparsers.add_parser("tag", help="Match and tag PDF(s) interactively, no review.csv")
@@ -475,6 +518,9 @@ def main() -> None:
     tag_color_group.add_argument("--convert-grayscale", action="store_true", help=convert_grayscale_help)
     tag_parser.add_argument("--hyperlink-gurps", action="store_true", help=hyperlink_gurps_help)
     tag_parser.add_argument("--hyperlink-mongoose", action="store_true", help=hyperlink_mongoose_help)
+    tag_bg_group = tag_parser.add_mutually_exclusive_group()
+    tag_bg_group.add_argument("--background-layer", action="store_true", help=background_layer_help)
+    tag_bg_group.add_argument("--remove-background", action="store_true", help=remove_background_help)
     tag_parser.add_argument(
         "--rename", action="store_true",
         help="Also rename the file (and its sidecars) to 'Series - Title' immediately after a successful write",
