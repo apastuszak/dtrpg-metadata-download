@@ -123,7 +123,8 @@ def run_hyperlink_script(
     if not script_path.exists():
         return HyperlinkResult(
             success=False,
-            message=f"hyperlink script not found at {script_path} -- set it in config.yaml",
+            message=f"hyperlink script not found at {script_path} -- set it via 'preferences'/the GUI's "
+            "Preferences tab, or in config.yaml",
         )
 
     try:

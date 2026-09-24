@@ -96,25 +96,25 @@ CONVERT_IMAGES_HINT = (
 )
 CONVERT_GRAYSCALE_HINT = (
     "Converts the whole PDF to grayscale using a separate script on this machine (requires "
-    "Ghostscript -- 'gs' -- on PATH, and grayscale_script set in config.yaml). Mutually exclusive "
-    "with converting to RGB above -- checking one unchecks the other."
+    "Ghostscript -- 'gs' -- on PATH, and grayscale_script set in the Preferences tab, or in "
+    "config.yaml). Mutually exclusive with converting to RGB above -- checking one unchecks the other."
 )
 RENAME_HINT = "Renames the file after the metadata update, using the format: Series Name - Book Name.pdf"
 HYPERLINK_GURPS_HINT = (
     "Auto-hyperlinks in-text page and chapter references (e.g. \"see p. 208\") using a separate "
     "GURPS-specific script on this machine. Only useful for GURPS PDFs; requires "
-    "gurps_hyperlink_script to be set in config.yaml."
+    "gurps_hyperlink_script to be set in the Preferences tab, or in config.yaml."
 )
 HYPERLINK_MONGOOSE_HINT = (
     "Auto-hyperlinks in-text page and chapter references using a separate script specific to "
     "Mongoose Publishing's Traveller line. Only useful for Mongoose Traveller PDFs; requires "
-    "mongoose_hyperlink_script to be set in config.yaml."
+    "mongoose_hyperlink_script to be set in the Preferences tab, or in config.yaml."
 )
 BACKGROUND_LAYER_HINT = (
     "Tags each page's full-page decorative background as a toggleable layer, using a separate "
     "script on this machine. For Castles and Crusades rulebooks only; requires "
-    "background_layer_script to be set in config.yaml. Mutually exclusive with removing the "
-    "background below -- checking one unchecks the other."
+    "background_layer_script to be set in the Preferences tab, or in config.yaml. Mutually exclusive "
+    "with removing the background below -- checking one unchecks the other."
 )
 REMOVE_BACKGROUND_HINT = (
     "Deletes each page's full-page decorative background outright, using the same script as "

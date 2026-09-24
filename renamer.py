@@ -28,13 +28,19 @@ from pathlib import Path
 
 logger = logging.getLogger("renamer")
 
-_UNSAFE_CHARS_RE = re.compile(r"[/\x00]")
+_UNSAFE_CHARS_RE = re.compile(r'[/\\:*?"<>|\x00]')
 
 
 def _sanitize_component(text: str) -> str:
-    """Replace characters that are illegal in a filename on this
-    filesystem (just '/' and NUL — everything else, including ':',
-    is a legal Unix filename character)."""
+    """Replace characters that are illegal in a filename -- '/' and NUL
+    are the only ones illegal on a native Unix filesystem, but this also
+    replaces the Windows/SMB-reserved set (\\:*?"<>|) so a title/series
+    doesn't silently fail to write, or get mangled by the OS, if this
+    library is ever accessed over SMB/exFAT/a Windows-formatted drive --
+    not this project's primary target today, but cheap protection against
+    a real failure mode if that ever changes. See CLAUDE.md's note on this
+    function's path-traversal defense if this character set changes again;
+    it depends on '/' always being one of the replaced characters."""
     return _UNSAFE_CHARS_RE.sub("-", text).strip()
 
 

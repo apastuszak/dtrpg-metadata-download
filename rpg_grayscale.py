@@ -98,7 +98,8 @@ def convert_pdf_grayscale(
     if not script_path.exists():
         return GrayscaleResult(
             success=False,
-            message=f"grayscale script not found at {script_path} -- set it in config.yaml",
+            message=f"grayscale script not found at {script_path} -- set it via 'preferences'/the GUI's "
+            "Preferences tab, or in config.yaml",
         )
 
     try:

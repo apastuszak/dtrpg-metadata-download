@@ -79,7 +79,8 @@ def apply_background_layer(
     if not script_path.exists():
         return BackgroundLayerResult(
             success=False,
-            message=f"background-layer script not found at {script_path} -- set it in config.yaml",
+            message=f"background-layer script not found at {script_path} -- set it via 'preferences'/the "
+            "GUI's Preferences tab, or in config.yaml",
         )
 
     # Hidden prefix -- see rpg_hyperlink.py's run_hyperlink_script() for

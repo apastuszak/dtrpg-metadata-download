@@ -169,6 +169,17 @@ def load_manual_overrides(path: str | Path) -> dict[str, ProductMetadata]:
                 filename, source_value,
             )
             source = Source.MANUAL
+        product_url = meta.get("product_url") or ""
+        # A manual override previously had no way to carry a product_id at
+        # all -- an explicit `product_id:` key wins if given; otherwise
+        # derive one from `product_url` the same way a pasted URL/id: is
+        # already parsed everywhere else in this project (extract_product_id(),
+        # reused rather than reimplemented). Without this, a manually
+        # overridden book's dc:identifier is always empty, even when the
+        # override entry links straight to the real DriveThruRPG listing.
+        product_id = str(meta.get("product_id") or "").strip()
+        if not product_id and product_url:
+            product_id = extract_product_id(product_url) or ""
         overrides[filename] = ProductMetadata(
             title=meta.get("title") or "",
             series=meta.get("series") or "",
@@ -177,8 +188,9 @@ def load_manual_overrides(path: str | Path) -> dict[str, ProductMetadata]:
             authors=list(meta.get("authors") or []),
             tags=list(meta.get("tags") or []),
             description=meta.get("description") or "",
-            product_url=meta.get("product_url") or "",
+            product_url=product_url,
             source=source,
+            product_id=product_id,
             isbn=meta.get("isbn") or "",
         )
     return overrides

@@ -484,22 +484,24 @@ def main() -> None:
     )
     convert_grayscale_help = (
         "Convert the whole PDF to grayscale before writing metadata, via a separate sibling script "
-        "(see rpg_grayscale.py; path configured by grayscale_script in config.yaml; requires Ghostscript "
-        "('gs') on PATH). Mutually exclusive with --convert-images."
+        "(see rpg_grayscale.py; path set via 'preferences'/the GUI's Preferences tab, or grayscale_script "
+        "in config.yaml; requires Ghostscript ('gs') on PATH). Mutually exclusive with --convert-images."
     )
     hyperlink_gurps_help = (
         "Auto-hyperlink in-text page/chapter references via a separate sibling GURPS-specific script "
-        "(see rpg_hyperlink.py; path configured by gurps_hyperlink_script in config.yaml)"
+        "(see rpg_hyperlink.py; path set via 'preferences'/the GUI's Preferences tab, or "
+        "gurps_hyperlink_script in config.yaml)"
     )
     hyperlink_mongoose_help = (
         "Auto-hyperlink in-text page/chapter references via a separate sibling Mongoose-Traveller-"
-        "specific script (see rpg_hyperlink.py; path configured by mongoose_hyperlink_script in config.yaml)"
+        "specific script (see rpg_hyperlink.py; path set via 'preferences'/the GUI's Preferences tab, or "
+        "mongoose_hyperlink_script in config.yaml)"
     )
     background_layer_help = (
         "Tag each page's full-page decorative background as a toggleable Optional Content Group layer, "
-        "via a separate sibling script (see rpg_background_layer.py; path configured by "
-        "background_layer_script in config.yaml). For Castles and Crusades rulebooks only. Mutually "
-        "exclusive with --remove-background."
+        "via a separate sibling script (see rpg_background_layer.py; path set via 'preferences'/the "
+        "GUI's Preferences tab, or background_layer_script in config.yaml). For Castles and Crusades "
+        "rulebooks only. Mutually exclusive with --remove-background."
     )
     remove_background_help = (
         "Delete each page's full-page decorative background outright, via the same sibling script as "
