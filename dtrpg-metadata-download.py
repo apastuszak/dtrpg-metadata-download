@@ -168,11 +168,40 @@ logger = logging.getLogger("dtrpg-metadata-download")
 
 DEFAULT_CONFIG_PATH = Path(__file__).parent / "config.yaml"
 
+# config.yaml's own relative paths (its shipped "data/review.csv" etc.)
+# are documented/intended relative to config.yaml's own location, not to
+# whatever directory the tool happens to be invoked from -- deliberately
+# excludes "root", which behaves like a CLI argument (relative to the
+# caller's own cwd), not an internal data file.
+_CONFIG_RELATIVE_PATH_KEYS = (
+    "data_dir",
+    "review_csv",
+    "manual_overrides",
+    "preferences",
+    "gurps_hyperlink_script",
+    "mongoose_hyperlink_script",
+    "grayscale_script",
+    "background_layer_script",
+)
+
 
 def load_config(path: Path) -> dict:
     if not path.exists():
         return {}
-    return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    config = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    # Verified this was a real bug: running `tag` from inside a PDF
+    # library folder (rather than this project's own directory) silently
+    # created a stray data/ subfolder there and reported "No DriveThruRPG
+    # API key found" even with one already saved in the real
+    # data/preferences.yaml next to config.yaml -- every one of these
+    # values was being resolved against the current working directory
+    # instead of config.yaml's own location.
+    config_dir = path.resolve().parent
+    for key in _CONFIG_RELATIVE_PATH_KEYS:
+        value = config.get(key)
+        if value and not Path(value).is_absolute():
+            config[key] = str(config_dir / value)
+    return config
 
 
 def build_client(config: dict) -> DtrpgClient:

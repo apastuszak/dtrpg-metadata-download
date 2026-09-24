@@ -9,6 +9,8 @@ and left that way).
 from __future__ import annotations
 
 import csv
+import os
+import tempfile
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 
@@ -39,6 +41,7 @@ FIELDNAMES = [
     "product_url",
     "product_id",
     "isbn",
+    "edited",
 ]
 
 
@@ -58,9 +61,21 @@ class ReviewRow:
     product_url: str = ""
     product_id: str = ""
     isbn: str = ""
+    # Set by mark_edited() whenever a field is changed through the GUI's
+    # Review tab (see gui_app.py's ReviewTab), independently of `status`.
+    # merge_by_filename() below preserves any row with this set, not just
+    # ones flipped to `approved` -- a real gap this closes: editing an
+    # auto-accepted row's series in the Review tab, without also flipping
+    # its status, used to be silently lost on the next scan. Blank by
+    # default, so an old review.csv with no "edited" column loads exactly
+    # as before (nothing is retroactively treated as edited).
+    edited: str = ""
 
     def is_approved(self) -> bool:
         return self.status in (Status.APPROVED.value, Status.AUTO_ACCEPTED.value)
+
+    def mark_edited(self) -> None:
+        self.edited = "1"
 
 
 def _defang_formula(value: str | None) -> str | None:
@@ -93,8 +108,17 @@ def load_review(path: str | Path) -> list[ReviewRow]:
     with path.open(newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         known = {f.name for f in fields(ReviewRow)}
+        # csv.DictReader fills a short/hand-edited row's missing trailing
+        # columns with None (its restval default) -- review.csv is
+        # explicitly meant to be hand-edited, so this is an easy state to
+        # reach. Every ReviewRow field is typed str = "", and downstream
+        # code (e.g. pdf_writer's row.tags.split(";")) assumes that; a
+        # bare None here crashed with AttributeError partway through a
+        # write batch instead of being treated as "no data for this
+        # field", the same class of failure _refang_formula's own
+        # None-passthrough guard exists to prevent one step earlier.
         return [
-            ReviewRow(**{k: _refang_formula(v) for k, v in row.items() if k in known})
+            ReviewRow(**{k: (_refang_formula(v) or "") for k, v in row.items() if k in known})
             for row in reader
         ]
 
@@ -102,25 +126,45 @@ def load_review(path: str | Path) -> list[ReviewRow]:
 def save_review(path: str | Path, rows: list[ReviewRow]) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=FIELDNAMES)
-        writer.writeheader()
-        for row in rows:
-            writer.writerow({k: _defang_formula(v) for k, v in asdict(row).items()})
+    # Written to a temp file in the same directory, then swapped in with
+    # os.replace() (atomic on the same filesystem) rather than writing
+    # path.open("w", ...) directly -- a crash or kill partway through the
+    # old direct-write approach (e.g. mid-`scan --apply-review`, or the
+    # process dying while the GUI's Review tab saves) truncated
+    # review.csv, silently losing every approved/hand-edited row it held,
+    # not just whatever this particular save was trying to add.
+    tmp_fd, tmp_path_str = tempfile.mkstemp(
+        suffix=".csv", prefix=f".{path.name}.tmp-", dir=str(path.parent)
+    )
+    try:
+        with os.fdopen(tmp_fd, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=FIELDNAMES)
+            writer.writeheader()
+            for row in rows:
+                writer.writerow({k: _defang_formula(v) for k, v in asdict(row).items()})
+        os.replace(tmp_path_str, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_path_str)
+        except OSError:
+            pass
+        raise
 
 
 def merge_by_filename(existing: list[ReviewRow], fresh: list[ReviewRow]) -> list[ReviewRow]:
     """Merge freshly-matched rows into an existing review file.
 
-    Rows the user has already touched (status != no-match/needs-review
-    left untouched from a prior auto-run, i.e. anything the user flipped
-    to ``approved`` or hand-edited) are preserved as-is rather than
-    clobbered by a re-scan. New filenames are appended.
+    A prior row is preserved as-is (not clobbered by a re-scan) if it's
+    been flipped to ``approved``, or if `edited` is set -- the latter
+    closes a real gap `approved`-only checking used to have: editing an
+    auto-accepted row's series (say) in the GUI's Review tab, without
+    also flipping its status, used to be silently overwritten by the
+    next scan. New filenames are appended.
     """
     by_filename = {row.filename: row for row in existing}
     for row in fresh:
         prior = by_filename.get(row.filename)
-        if prior is not None and prior.status == Status.APPROVED.value:
+        if prior is not None and (prior.status == Status.APPROVED.value or prior.edited):
             continue
         by_filename[row.filename] = row
     return list(by_filename.values())

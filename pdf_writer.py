@@ -97,6 +97,7 @@ from lxml import etree
 from lxml.etree import QName
 
 from image_converter import convert_images_to_rgb
+from matcher import scan_pdfs
 from review import ReviewRow
 from rpg_background_layer import DEFAULT_BACKGROUND_LAYER_SCRIPT, apply_background_layer
 from rpg_grayscale import DEFAULT_GRAYSCALE_SCRIPT, convert_pdf_grayscale
@@ -497,9 +498,23 @@ def _write_embedded_metadata(pdf: pikepdf.Pdf, path: Path, row: ReviewRow) -> No
             # rather than letting it silently survive a re-tag.
             # _set_calibre_series() only clears calibre:series when
             # it's actually *called*, which doesn't happen here.
-            rdfdesc = _get_or_create_rdfdesc(meta)
-            for existing in rdfdesc.findall(str(QName(CALIBRE_NS, "series"))):
-                rdfdesc.remove(existing)
+            try:
+                rdfdesc = _get_or_create_rdfdesc(meta)
+                for existing in rdfdesc.findall(str(QName(CALIBRE_NS, "series"))):
+                    rdfdesc.remove(existing)
+            except AttributeError:
+                # Same private-pikepdf-internals risk _set_calibre_series()
+                # above already guards against -- this call site was
+                # missing the guard (an earlier oversight, caught in a
+                # later pass), so a future pikepdf version changing these
+                # internals would crash the whole write here specifically
+                # when a match has *no* series, instead of degrading the
+                # same way every other Calibre-specific write already does.
+                logger.warning(
+                    "Could not clear stale Calibre-style series for %s "
+                    "(pikepdf internals may have changed); leaving it as-is",
+                    path.name,
+                )
             for key in (bookorbit_series_name_key, bookorbit_series_index_key):
                 if key in meta:
                     del meta[key]
@@ -524,25 +539,61 @@ def write_approved(
     log: Callable[[str], None] | None = None,
 ) -> list[WriteResult]:
     root = Path(root)
+    # Built once as a plain name lookup rather than calling
+    # root.rglob(row.filename) per row -- that treated the filename as a
+    # glob *pattern*, not a literal name: a real filename containing
+    # glob-special characters (verified: "Sword Worlds [OCR].pdf" matched
+    # nothing at all, since "[OCR]" is a character class to rglob) was
+    # silently reported as "file not found under root" even though the
+    # file was right there. `*`/`?` in a filename could also silently
+    # match the *wrong* file instead of erroring. Duplicate filenames
+    # under different subfolders are warned about once here (the same
+    # "first match wins" behavior rglob() already had, just now
+    # unambiguous about when it's happening) rather than silently picking
+    # whichever one os.walk() happens to see first.
+    pdfs_by_name: dict[str, Path] = {}
+    duplicate_names: set[str] = set()
+    for p in scan_pdfs(root):
+        if p.name in pdfs_by_name:
+            duplicate_names.add(p.name)
+        else:
+            pdfs_by_name[p.name] = p
+    for name in sorted(duplicate_names):
+        logger.warning("Multiple files named %r found under %s; using %s", name, root, pdfs_by_name[name])
+
     results: list[WriteResult] = []
     for row in rows:
         if not row.is_approved():
             continue
-        matches = list(root.rglob(row.filename))
-        if not matches:
+        match = pdfs_by_name.get(row.filename)
+        if match is None:
             results.append(WriteResult(row.filename, False, "file not found under root"))
             continue
-        results.append(
-            write_metadata(
-                matches[0], row, bookorbit_mode=bookorbit_mode, convert_images=convert_images,
-                convert_grayscale=convert_grayscale, grayscale_script=grayscale_script,
-                background_layer=background_layer, remove_background=remove_background,
-                background_layer_script=background_layer_script,
-                hyperlink_gurps=hyperlink_gurps, gurps_hyperlink_script=gurps_hyperlink_script,
-                hyperlink_mongoose=hyperlink_mongoose, mongoose_hyperlink_script=mongoose_hyperlink_script,
-                log=log,
+        try:
+            results.append(
+                write_metadata(
+                    match, row, bookorbit_mode=bookorbit_mode, convert_images=convert_images,
+                    convert_grayscale=convert_grayscale, grayscale_script=grayscale_script,
+                    background_layer=background_layer, remove_background=remove_background,
+                    background_layer_script=background_layer_script,
+                    hyperlink_gurps=hyperlink_gurps, gurps_hyperlink_script=gurps_hyperlink_script,
+                    hyperlink_mongoose=hyperlink_mongoose, mongoose_hyperlink_script=mongoose_hyperlink_script,
+                    log=log,
+                )
             )
-        )
+        except Exception as exc:
+            # write_metadata() already catches (pikepdf.PdfError, OSError)
+            # around its own pikepdf.open() block, and every optional
+            # pre-write step (image conversion, hyperlinking, grayscale,
+            # background-layer) is documented never to raise at all -- but
+            # anything else escaping from in between (a malformed
+            # ReviewRow field hitting an edge case in a library this
+            # doesn't specifically guard, etc.) used to propagate straight
+            # out of this function, aborting every remaining approved file
+            # in the batch over one bad one. One bad file must not be able
+            # to do that to the rest of a `write-pdfs`/`all` run.
+            logger.exception("Unexpected error writing %s", match.name)
+            results.append(WriteResult(row.filename, False, f"unexpected error: {exc}"))
 
     succeeded = sum(1 for r in results if r.success)
     logger.info("Wrote metadata to %d/%d approved files", succeeded, len(results))

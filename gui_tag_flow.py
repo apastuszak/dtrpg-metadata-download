@@ -381,7 +381,18 @@ class TagWorker(QObject):
         self.log_line.emit(line)
 
     def run(self) -> None:
-        self.controller.run()
+        # A PyQt6 slot running on a QThread has no default exception
+        # handler -- an uncaught exception here (a network error, a bad
+        # write, anything _process_one/_write_and_maybe_rename don't
+        # already catch) crashes the whole application (verified: SIGABRT,
+        # not a Python traceback the GUI could recover from), taking down
+        # a run the user might be halfway through with no chance to save
+        # partial progress. Caught and logged the same way every other
+        # step in this pipeline degrades instead of crashing.
+        try:
+            self.controller.run()
+        except Exception as exc:
+            self._log(f"ERROR: {exc}")
         self.finished.emit()
 
 

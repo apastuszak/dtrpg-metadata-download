@@ -100,7 +100,15 @@ def load_known_urls(root: str | Path) -> dict[str, str]:
 
 def scan_pdfs(root: str | Path) -> list[Path]:
     root = Path(root)
-    return sorted(p for p in root.rglob("*.pdf") if p.is_file())
+    # macOS writes a hidden "._<name>.pdf" AppleDouble sidecar (resource
+    # fork/extended attributes) alongside every real file on a filesystem
+    # that doesn't natively support them -- common on network shares
+    # (SMB/exFAT/etc.) -- and it matches "*.pdf" just as well as the real
+    # file. Verified directly: an untouched macOS folder synced to such a
+    # share picks these up as if they were real, matchable books. Skip
+    # any dotfile, not just this specific prefix, matching how hidden
+    # files are conventionally excluded from a file listing generally.
+    return sorted(p for p in root.rglob("*.pdf") if p.is_file() and not p.name.startswith("."))
 
 
 def derive_query(filename: str) -> tuple[str, list[str]]:
@@ -132,13 +140,35 @@ def load_manual_overrides(path: str | Path) -> dict[str, ProductMetadata]:
     raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     overrides: dict[str, ProductMetadata] = {}
     for filename, meta in raw.items():
+        # A bare "some_file.pdf:" line with nothing indented under it (a
+        # plausible hand-edit mistake, e.g. while deleting a stale entry)
+        # parses to `meta = None`, not an empty dict -- `.get()` on that
+        # crashed with AttributeError, taking down `tag`/`scan` entirely
+        # since this loader runs unconditionally at the start of both,
+        # over one malformed entry in a file explicitly meant to be
+        # hand-edited. Skip just this entry instead, the same "recover
+        # what's valid, don't fail the whole file" convention
+        # renamer.py's own malformed-sidecar handling already follows.
+        if not isinstance(meta, dict):
+            logger.warning(
+                "manual_overrides.yaml entry for %r has no fields under it; skipping it", filename
+            )
+            continue
         # `.get(key, default)` only falls back when the key is *missing* --
         # an entry with a present-but-blank key (e.g. "source:" with
         # nothing after it, a plausible mistake since most other fields in
         # the documented template *are* meant to be left blank) parses to
         # an explicit YAML null, which .get() happily returns as-is. `or`
-        # catches that too; source= additionally used to crash outright
-        # (Source(None)) rather than just storing a wrong-but-inert value.
+        # catches that too.
+        source_value = meta.get("source") or Source.MANUAL.value
+        try:
+            source = Source(source_value)
+        except ValueError:
+            logger.warning(
+                "manual_overrides.yaml entry for %r has an invalid source %r; treating it as manual",
+                filename, source_value,
+            )
+            source = Source.MANUAL
         overrides[filename] = ProductMetadata(
             title=meta.get("title") or "",
             series=meta.get("series") or "",
@@ -148,7 +178,7 @@ def load_manual_overrides(path: str | Path) -> dict[str, ProductMetadata]:
             tags=list(meta.get("tags") or []),
             description=meta.get("description") or "",
             product_url=meta.get("product_url") or "",
-            source=Source(meta.get("source") or Source.MANUAL.value),
+            source=source,
             isbn=meta.get("isbn") or "",
         )
     return overrides

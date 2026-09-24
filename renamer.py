@@ -116,8 +116,15 @@ def apply_rename(plan: RenamePlan, dry_run: bool = False) -> RenameResult:
     new_pdf_path = plan.pdf_path.with_name(plan.new_stem + plan.pdf_path.suffix)
     pairs = _companion_pairs(plan.pdf_path, new_pdf_path)
 
-    for _, new in pairs:
-        if new.exists():
+    for old, new in pairs:
+        # On a case-insensitive filesystem (the default on macOS/Windows),
+        # a case-only rename like "sword worlds.pdf" -> "Sword Worlds.pdf"
+        # has new.exists() true for the very file being renamed -- verified
+        # directly: this used to reject every such rename as "target
+        # already exists" even though nothing would actually collide.
+        # samefile() distinguishes that from a real different file already
+        # sitting at the target name.
+        if new.exists() and not new.samefile(old):
             return RenameResult(plan.pdf_path, new_pdf_path, False, f"target already exists: {new.name}")
 
     if dry_run:

@@ -106,10 +106,11 @@ def convert_pdf_grayscale(
     except Exception as exc:
         return GrayscaleResult(success=False, message=f"could not load grayscale script: {exc}")
 
-    tmp_gray_fd, tmp_gray_str = tempfile.mkstemp(suffix=".pdf", dir=str(path.parent))
+    # Hidden prefix -- see rpg_hyperlink.py's run_hyperlink_script() for why.
+    tmp_gray_fd, tmp_gray_str = tempfile.mkstemp(suffix=".pdf", prefix=".dtrpg-tmp-", dir=str(path.parent))
     os.close(tmp_gray_fd)
     tmp_gray_path = Path(tmp_gray_str)
-    tmp_final_fd, tmp_final_str = tempfile.mkstemp(suffix=".pdf", dir=str(path.parent))
+    tmp_final_fd, tmp_final_str = tempfile.mkstemp(suffix=".pdf", prefix=".dtrpg-tmp-", dir=str(path.parent))
     os.close(tmp_final_fd)
     tmp_final_path: Path | None = Path(tmp_final_str)
 

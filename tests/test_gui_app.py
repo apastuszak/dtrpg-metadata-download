@@ -58,7 +58,7 @@ except ModuleNotFoundError as exc:
     sys.exit(0)
 
 from provenance import ProductMetadata, Source, Status  # noqa: E402
-from review import ReviewRow, load_review, save_review  # noqa: E402
+from review import ReviewRow, load_review, merge_by_filename, save_review  # noqa: E402
 from tag_tui import CandidateResult, ConfirmResult, ManualEntryResult, build_manual_metadata  # noqa: E402
 from gui_tag_flow import (  # noqa: E402
     CandidateDialog,
@@ -329,6 +329,47 @@ def test_review_tab_status_edit_persists() -> None:
     print("PASS: review_tab_status_edit_persists")
 
 
+def test_review_tab_edit_survives_rescan() -> None:
+    """merge_by_filename() used to only protect a row flipped to
+    `approved` -- editing an auto-accepted row's series in the Review tab
+    without also flipping status was silently overwritten by the next
+    scan. Guards the fix: a real inline edit through the actual widget
+    (not just calling ReviewRow.mark_edited() on a plain object) must set
+    `edited`, and merge_by_filename() must then preserve that row over a
+    fresh, differently-matched row for the same filename."""
+    with tempfile.TemporaryDirectory() as tmp:
+        review_csv = Path(tmp) / "review.csv"
+        row = ReviewRow(filename="Book.pdf", matched_title="Title", series="", status=Status.AUTO_ACCEPTED.value)
+        save_review(review_csv, [row])
+
+        tab = ReviewTab({"review_csv": str(review_csv)})
+        try:
+            series_col = tab.GRID_COLUMNS.index("series")
+            tab.table.item(0, series_col).setText("Hand-Typed Series")
+
+            edited_row = tab.rows_by_filename["Book.pdf"]
+            assert edited_row.series == "Hand-Typed Series"
+            assert edited_row.edited, "a real inline edit did not set ReviewRow.edited"
+            assert edited_row.status == Status.AUTO_ACCEPTED.value, "editing series should not touch status"
+
+            # save_review() directly -- tab.save() also pops a blocking
+            # QMessageBox.information() with nothing headless to click it.
+            save_review(review_csv, list(tab.rows_by_filename.values()))
+        finally:
+            tab.deleteLater()
+
+        # Simulate a later re-scan matching this same file to something
+        # else entirely -- merge_by_filename() must keep the hand-typed
+        # series, not the fresh match, even though status was never
+        # flipped to approved.
+        existing = load_review(review_csv)
+        fresh = [ReviewRow(filename="Book.pdf", matched_title="Re-matched Title", series="", status=Status.AUTO_ACCEPTED.value)]
+        merged = merge_by_filename(existing, fresh)
+        merged_row = next(r for r in merged if r.filename == "Book.pdf")
+        assert merged_row.series == "Hand-Typed Series", "a hand edit was clobbered by a re-scan"
+    print("PASS: review_tab_edit_survives_rescan")
+
+
 def test_review_tab_no_save_during_population() -> None:
     # A real Qt-specific gotcha with no Tkinter analog: QTableWidget's
     # itemChanged fires for setItem() during bulk population just as it
@@ -415,6 +456,47 @@ def test_tag_worker_signal_round_trip(app: QApplication) -> None:
     print("PASS: tag_worker_signal_round_trip")
 
 
+def test_tag_worker_run_catches_exception(app: QApplication) -> None:
+    """A PyQt6 slot running on a QThread has no default exception handler
+    -- an uncaught exception escaping TagWorker.run() used to abort the
+    whole process (verified with a standalone repro: SIGABRT, not a
+    catchable Python exception) instead of just failing the one run.
+    Guards the fix: TagWorker.run() must catch, log, and still emit
+    `finished` so the GUI stays usable and the Start button re-enables."""
+    from gui_tag_flow import TagWorker
+    from PyQt6.QtCore import QThread
+
+    with tempfile.TemporaryDirectory() as tmp:
+        pdf = Path(tmp) / "Book.pdf"
+        pikepdf.new().save(pdf)
+        client = _client()
+
+        worker = TagWorker(
+            pdfs=[pdf], client=client, manual_overrides={}, known_urls={}, thresholds={},
+            bookorbit_mode=False, rename=False, root_mode=False, stop_event=threading.Event(),
+        )
+        thread = QThread()
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+
+        log_lines: list[str] = []
+        worker.log_line.connect(log_lines.append)
+        finished = []
+        worker.finished.connect(lambda: finished.append(True))
+
+        with patch.object(worker.controller, "run", side_effect=ConnectionError("simulated network failure")):
+            thread.start()
+            deadline = __import__("time").time() + 5
+            while not finished and __import__("time").time() < deadline:
+                app.processEvents()
+            thread.quit()
+            thread.wait(2000)
+
+        assert finished, "worker never emitted finished after an exception -- the app would hang or abort"
+        assert any("ERROR" in line and "simulated network failure" in line for line in log_lines), log_lines
+    print("PASS: tag_worker_run_catches_exception")
+
+
 NO_APP_TESTS = [
     test_controller_candidate_pick_write,
     test_controller_manual_entry_write,
@@ -429,11 +511,13 @@ NO_ARG_APP_TESTS = [
     test_show_candidate_dialog_use_url_button,
     test_candidate_dialog_escape_skips_not_quits,
     test_review_tab_status_edit_persists,
+    test_review_tab_edit_survives_rescan,
     test_review_tab_no_save_during_population,
 ]
 
 APP_ARG_TESTS = [
     test_tag_worker_signal_round_trip,
+    test_tag_worker_run_catches_exception,
 ]
 
 

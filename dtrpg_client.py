@@ -33,13 +33,17 @@ from __future__ import annotations
 import html
 import json
 import logging
+import os
 import re
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from provenance import ProductMetadata, Source
 
@@ -47,9 +51,33 @@ logger = logging.getLogger("dtrpg_client")
 
 API_BASE = "https://api.drivethrurpg.com/api/vBeta"
 
+# No request here ever had a timeout, so a stalled connection (a dead
+# network, a hung proxy) previously hung the whole run forever -- the
+# TUI/GUI just sat there indistinguishable from a genuine freeze, with no
+# way out short of killing the process. 30s is generous for a single
+# request/response, not a total-run budget.
+DEFAULT_TIMEOUT_SECONDS = 30
+
 # category/filter names that describe format, language, or site policy
 # rather than the book's actual subject matter — not useful as tags.
 TAG_BLOCKLIST = {"PDF", "English", "Digital", "Creation Method", "Human-Created Without AI"}
+
+# How close a catalog-search title has to be (rapidfuzz token_sort_ratio,
+# 0-100) before DtrpgClient._enrich_fallback_by_title() will trust it as
+# the same product as a stale library entry -- see that method's own
+# docstring for why this fallback needs a real bar, not "closest of
+# whatever came back". An exact (case/whitespace-insensitive) title match
+# is handled separately, above this fallback -- that already covers the
+# actual documented real-world case (a re-listing under a new ID with the
+# *same* title). This threshold is only for minor title variants of that
+# same case (e.g. a "(2nd Printing)"-style suffix DriveThruRPG re-listings
+# commonly add) -- verified empirically that matcher.py's own
+# high_confidence_threshold (90.0) is too strict for that real pattern
+# (scored ~79), while a clearly unrelated title scores far lower (~36) --
+# so this uses matcher.py's review_floor_threshold instead, the next tier
+# down: still a real bar (nowhere near unrelated-title scores), but one
+# that doesn't reject the actual case this fallback exists for.
+_FALLBACK_TITLE_MATCH_THRESHOLD = 70.0
 
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 
@@ -102,6 +130,7 @@ class DtrpgClient:
         catalog_rate_limit_seconds: float = 1.0,
         session: requests.Session | None = None,
         max_retries: int = 3,
+        timeout: float = DEFAULT_TIMEOUT_SECONDS,
     ):
         self.api_key = api_key
         self.cache_dir = Path(cache_dir)
@@ -115,7 +144,24 @@ class DtrpgClient:
                 "User-Agent": "dtrpg-metadata-download/1.3.0 (personal library tagging tool)",
             }
         )
-        self.max_retries = max_retries
+        self.timeout = timeout
+        # max_retries was previously stored and never used -- every
+        # request below now actually goes through this. A transient
+        # network blip or a 5xx/429 used to end the whole run immediately
+        # (an uncaught requests exception, or an HTTPError on a retryable
+        # status); now it's retried with backoff before giving up.
+        # allowed_methods includes POST for auth_key specifically because
+        # it's a read-only token fetch here, not something with a side
+        # effect that would make retrying unsafe.
+        retry = Retry(
+            total=max_retries,
+            backoff_factor=1.0,
+            status_forcelist=(429, 500, 502, 503, 504),
+            allowed_methods=("GET", "POST"),
+        )
+        adapter = HTTPAdapter(max_retries=retry)
+        self.session.mount("https://", adapter)
+        self.session.mount("http://", adapter)
         self._catalog_rate_limiter = _RateLimiter(catalog_rate_limit_seconds)
         self._token: str | None = None
 
@@ -139,6 +185,7 @@ class DtrpgClient:
         resp = self.session.post(
             f"{API_BASE}/auth_key",
             params={"applicationKey": self.api_key},
+            timeout=self.timeout,
         )
         if resp.status_code == 401:
             raise DtrpgApiError(
@@ -193,6 +240,7 @@ class DtrpgClient:
                     "library": 1,
                     "archived": 0,
                 },
+                timeout=self.timeout,
             )
             resp.raise_for_status()
             page_items = self._parse_json(resp, context=f"order_products page {page}")
@@ -281,16 +329,41 @@ class DtrpgClient:
         return meta
 
     def _enrich_fallback_by_title(self, meta: ProductMetadata) -> ProductMetadata | None:
+        """Only accept a fuzzy title match above _FALLBACK_TITLE_MATCH_THRESHOLD
+        -- this fallback runs fully automatically, deep inside enrich(),
+        with no human ever reviewing its result (unlike matcher.py's own
+        candidate scoring, which either auto-accepts above a high bar or
+        surfaces lower-confidence matches for review). Blindly taking
+        candidates[0] used to risk merging a *different* product's
+        description/ISBN into a purchased library entry, and overwriting
+        its product_id with the wrong listing's -- corrupting dc:identifier
+        for a book that was never actually mismatched in the first place,
+        just unlucky enough to need this fallback at all.
+        """
         logger.info("product_id=%s for %r failed; retrying via catalog search by title", meta.product_id, meta.title)
         try:
             candidates = self.search_catalog(meta.title)
         except Exception:
             logger.exception("Catalog fallback search failed for %r", meta.title)
             return None
+        if not candidates:
+            return None
         for candidate in candidates:
             if candidate.title.strip().lower() == meta.title.strip().lower():
                 return candidate
-        return candidates[0] if candidates else None
+
+        from rapidfuzz import fuzz
+
+        best = max(candidates, key=lambda c: fuzz.token_sort_ratio(meta.title, c.title))
+        score = fuzz.token_sort_ratio(meta.title, best.title)
+        if score < _FALLBACK_TITLE_MATCH_THRESHOLD:
+            logger.warning(
+                "Catalog fallback for %r found no confidently-matching title (closest was %r, score %.1f); "
+                "leaving it unenriched rather than risk attaching the wrong product's data",
+                meta.title, best.title, score,
+            )
+            return None
+        return best
 
     def get_product(self, product_id: int | str) -> ProductMetadata | None:
         """Fetch a single product directly by ID, bypassing search entirely.
@@ -387,6 +460,7 @@ class DtrpgClient:
                 "status": 1,
                 "partial": "false",
             },
+            timeout=self.timeout,
         )
         resp.raise_for_status()
         data = self._parse_json(resp, context=f"products search '{query}'")
@@ -408,7 +482,7 @@ class DtrpgClient:
 
     def _fetch_product_detail(self, product_id: int | str) -> ProductMetadata | None:
         self._catalog_rate_limiter.wait()
-        resp = self.session.get(f"{API_BASE}/products/{product_id}")
+        resp = self.session.get(f"{API_BASE}/products/{product_id}", timeout=self.timeout)
         if not resp.ok:
             logger.warning("Product detail lookup failed for id=%s (HTTP %d)", product_id, resp.status_code)
             self._dump_debug(f"product_detail_{product_id}", resp)
@@ -498,4 +572,21 @@ class DtrpgClient:
     @staticmethod
     def _save_json(path: Path, data: Any) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        # Same atomic temp-file-then-os.replace() reasoning as
+        # review.save_review() -- a crash/kill partway through a direct
+        # write here would leave a truncated, unparseable cache file.
+        # _load_json() above already tolerates that (falls back to
+        # "no cache", not a crash), but that means silently re-paying for
+        # a full library re-pull or burning rate-limited catalog calls
+        # again, for no reason beyond bad timing on a previous run.
+        tmp_fd, tmp_path_str = tempfile.mkstemp(suffix=".json", prefix=f".{path.name}.tmp-", dir=str(path.parent))
+        try:
+            with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+            os.replace(tmp_path_str, path)
+        except BaseException:
+            try:
+                os.unlink(tmp_path_str)
+            except OSError:
+                pass
+            raise

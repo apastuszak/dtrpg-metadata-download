@@ -1030,7 +1030,14 @@ class ReviewTab(QWidget):
         if filename is None:
             return
         col = self.GRID_COLUMNS[item.column()]
-        setattr(self.rows_by_filename[filename], col, item.text())
+        row = self.rows_by_filename[filename]
+        setattr(row, col, item.text())
+        # Marks this row as user-touched so a later re-scan preserves it
+        # even if this edit didn't also flip status to approved (see
+        # ReviewRow.mark_edited()/merge_by_filename() in review.py) --
+        # this only runs for a real edit, never during _populate_table()'s
+        # bulk insert, which blocks signals for exactly this reason.
+        row.mark_edited()
         if col == "status":
             self._refresh_counts()
 
@@ -1039,13 +1046,16 @@ class ReviewTab(QWidget):
             return
         row = self.rows_by_filename[self._selected_filename]
         setattr(row, field, self.detail_edits[field].text())
+        row.mark_edited()
         if field in self.GRID_COLUMNS:
             self._set_table_cell(self._selected_filename, field, getattr(row, field))
 
     def _commit_description(self) -> None:
         if self._selected_filename is None:
             return
-        self.rows_by_filename[self._selected_filename].description = self.description_edit.toPlainText()
+        row = self.rows_by_filename[self._selected_filename]
+        row.description = self.description_edit.toPlainText()
+        row.mark_edited()
 
     def _set_table_cell(self, filename: str, col_name: str, value: str) -> None:
         row_index = self._row_of_filename.get(filename)
@@ -1180,7 +1190,24 @@ class GuiApp(QWidget):
         super().closeEvent(event)
 
 
+def _log_uncaught_exception(exc_type, exc_value, tb) -> None:
+    # PyQt6 has no default handler for an exception escaping a slot on a
+    # QThread -- verified directly: without this, one uncaught exception
+    # (a network error, a bad write, anything a specific try/except in
+    # this codebase doesn't already catch) aborts the whole process
+    # (SIGABRT), not just the one background job that failed. Installing
+    # this hook was independently confirmed to prevent that abort and
+    # keep the rest of the GUI usable. Each tab's own worker
+    # (UiTaskRunner._FnWorker, TagWorker) already catches and logs
+    # per-job exceptions; this is only a backstop for whatever still
+    # gets through.
+    import traceback
+
+    traceback.print_exception(exc_type, exc_value, tb)
+
+
 def run_gui(config: dict) -> None:
+    sys.excepthook = _log_uncaught_exception
     app = QApplication.instance() or QApplication(sys.argv)
     window = GuiApp(config)
     window.show()
