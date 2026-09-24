@@ -40,7 +40,15 @@ def _sanitize_component(text: str) -> str:
     not this project's primary target today, but cheap protection against
     a real failure mode if that ever changes. See CLAUDE.md's note on this
     function's path-traversal defense if this character set changes again;
-    it depends on '/' always being one of the replaced characters."""
+    it depends on '/' always being one of the replaced characters.
+
+    "Title: Subtitle" is a very common RPG title shape, so ": " is
+    special-cased to " - " first, before the general substitution below
+    turns any *other* colon into a bare hyphen -- a plain colon-to-hyphen
+    swap butts the hyphen right up against the preceding word ("Title-
+    Subtitle"), which reads badly for the single most common case this
+    character-set change actually affects in practice."""
+    text = text.replace(": ", " - ")
     return _UNSAFE_CHARS_RE.sub("-", text).strip()
 
 

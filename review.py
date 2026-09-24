@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import csv
 import os
+import stat
 import tempfile
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
@@ -137,6 +138,22 @@ def save_review(path: str | Path, rows: list[ReviewRow]) -> None:
         suffix=".csv", prefix=f".{path.name}.tmp-", dir=str(path.parent)
     )
     try:
+        # mkstemp() always creates its file 0600 (owner-only), and
+        # os.replace() preserves the temp file's own mode on POSIX -- a
+        # real regression this fixed: every save used to silently
+        # tighten review.csv's permissions from its normal 644 down to
+        # 600, which would break anything else (a NAS share, another
+        # user/process) that expected to read it. Preserve the existing
+        # file's mode if there is one; otherwise fall back to whatever a
+        # plain `open(path, "w")` would have produced under the current
+        # umask, matching this function's pre-atomic-write behavior.
+        if path.exists():
+            mode = stat.S_IMODE(path.stat().st_mode)
+        else:
+            umask = os.umask(0)
+            os.umask(umask)
+            mode = 0o666 & ~umask
+        os.chmod(tmp_path_str, mode)
         with os.fdopen(tmp_fd, "w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=FIELDNAMES)
             writer.writeheader()

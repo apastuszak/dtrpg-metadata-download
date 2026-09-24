@@ -35,6 +35,7 @@ import json
 import logging
 import os
 import re
+import stat
 import tempfile
 import time
 from dataclasses import dataclass
@@ -158,6 +159,18 @@ class DtrpgClient:
             backoff_factor=1.0,
             status_forcelist=(429, 500, 502, 503, 504),
             allowed_methods=("GET", "POST"),
+            # raise_on_status=False -- once retries are exhausted, hand
+            # back the last (failed) response instead of raising
+            # urllib3's own RetryError. A real regression this fixed:
+            # every existing caller here was written against "get a
+            # Response back, then decide what to do" (resp.status_code
+            # == 401, resp.ok, resp.raise_for_status()) -- verified
+            # against a real server that always 503s that get_product()
+            # used to raise RetryError uncaught instead of returning None,
+            # which crashed a whole scan/tag run over one bad lookup
+            # instead of degrading the way every one of those call sites
+            # already expected.
+            raise_on_status=False,
         )
         adapter = HTTPAdapter(max_retries=retry)
         self.session.mount("https://", adapter)
@@ -482,7 +495,18 @@ class DtrpgClient:
 
     def _fetch_product_detail(self, product_id: int | str) -> ProductMetadata | None:
         self._catalog_rate_limiter.wait()
-        resp = self.session.get(f"{API_BASE}/products/{product_id}", timeout=self.timeout)
+        try:
+            resp = self.session.get(f"{API_BASE}/products/{product_id}", timeout=self.timeout)
+        except requests.exceptions.RequestException as exc:
+            # get_product()/enrich() call this directly with no try/except
+            # of their own -- both are written against this function's
+            # "return None on failure, never raise" contract (the same
+            # contract resp.ok's own check below already honors), so a
+            # connection error/timeout that survives retrying must degrade
+            # the same way a bad HTTP status already does, not propagate
+            # up and abort whatever scan/tag run was in progress.
+            logger.warning("Product detail request failed for id=%s: %s", product_id, exc)
+            return None
         if not resp.ok:
             logger.warning("Product detail lookup failed for id=%s (HTTP %d)", product_id, resp.status_code)
             self._dump_debug(f"product_detail_{product_id}", resp)
@@ -581,6 +605,18 @@ class DtrpgClient:
         # again, for no reason beyond bad timing on a previous run.
         tmp_fd, tmp_path_str = tempfile.mkstemp(suffix=".json", prefix=f".{path.name}.tmp-", dir=str(path.parent))
         try:
+            # mkstemp() always creates its file 0600, and os.replace()
+            # preserves that mode on POSIX -- without this, every save
+            # silently tightened the cache file's permissions from its
+            # normal 644 down to 600. See review.save_review()'s matching
+            # fix for the same regression.
+            if path.exists():
+                mode = stat.S_IMODE(path.stat().st_mode)
+            else:
+                umask = os.umask(0)
+                os.umask(umask)
+                mode = 0o666 & ~umask
+            os.chmod(tmp_path_str, mode)
             with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)
             os.replace(tmp_path_str, path)

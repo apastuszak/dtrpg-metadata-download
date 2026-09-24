@@ -1045,7 +1045,17 @@ class ReviewTab(QWidget):
         if self._selected_filename is None:
             return
         row = self.rows_by_filename[self._selected_filename]
-        setattr(row, field, self.detail_edits[field].text())
+        new_value = self.detail_edits[field].text()
+        # editingFinished fires whenever focus leaves the field, whether
+        # or not its text actually changed (e.g. just clicking in to read
+        # it, then tabbing away) -- unlike _on_item_changed above, which
+        # only fires on a real Qt-detected change. Verified this was a
+        # real gap: without this check, simply focusing then leaving a
+        # field marked the row edited, permanently exempting it from
+        # ever being refreshed by a later re-scan for no actual reason.
+        if new_value == getattr(row, field):
+            return
+        setattr(row, field, new_value)
         row.mark_edited()
         if field in self.GRID_COLUMNS:
             self._set_table_cell(self._selected_filename, field, getattr(row, field))
@@ -1054,7 +1064,12 @@ class ReviewTab(QWidget):
         if self._selected_filename is None:
             return
         row = self.rows_by_filename[self._selected_filename]
-        row.description = self.description_edit.toPlainText()
+        new_value = self.description_edit.toPlainText()
+        # Same no-op-focus-change guard as _commit_detail_field() above --
+        # focus_lost fires on every focus-out, changed or not.
+        if new_value == row.description:
+            return
+        row.description = new_value
         row.mark_edited()
 
     def _set_table_cell(self, filename: str, col_name: str, value: str) -> None:
