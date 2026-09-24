@@ -80,6 +80,16 @@ TAG_BLOCKLIST = {"PDF", "English", "Digital", "Creation Method", "Human-Created 
 # that doesn't reject the actual case this fallback exists for.
 _FALLBACK_TITLE_MATCH_THRESHOLD = 70.0
 
+# Read once, here at import time, rather than via the read-with-a-
+# sentinel trick (os.umask(0) then os.umask(saved)) inside _save_json()
+# itself -- see review.py's matching _DEFAULT_UMASK for why that trick
+# isn't safe to do at save-time: _save_json() runs on background
+# QThreads (pull_library()/search_catalog(), called from the GUI's
+# worker threads), and briefly zeroing the process-wide umask there
+# could let another thread's file come out world-writable.
+_DEFAULT_UMASK = os.umask(0)
+os.umask(_DEFAULT_UMASK)
+
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 
 
@@ -613,9 +623,7 @@ class DtrpgClient:
             if path.exists():
                 mode = stat.S_IMODE(path.stat().st_mode)
             else:
-                umask = os.umask(0)
-                os.umask(umask)
-                mode = 0o666 & ~umask
+                mode = 0o666 & ~_DEFAULT_UMASK
             os.chmod(tmp_path_str, mode)
             with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)

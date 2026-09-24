@@ -370,6 +370,42 @@ def test_review_tab_edit_survives_rescan() -> None:
     print("PASS: review_tab_edit_survives_rescan")
 
 
+def test_review_tab_no_change_does_not_mark_edited() -> None:
+    """`_commit_detail_field()`/`_commit_description()` are wired to
+    `editingFinished`/`focus_lost`, which fire whenever focus leaves the
+    widget -- whether or not its value actually changed (e.g. clicking
+    into a field just to read it, then tabbing away). An earlier version
+    called `row.mark_edited()` unconditionally on every such commit,
+    which permanently exempted that row from ever being refreshed by a
+    later re-scan for no real reason. Guards the fix: only a genuine
+    value change should set `ReviewRow.edited`."""
+    with tempfile.TemporaryDirectory() as tmp:
+        review_csv = Path(tmp) / "review.csv"
+        row = ReviewRow(filename="Book.pdf", matched_title="Title", publisher="Pub", status=Status.AUTO_ACCEPTED.value)
+        save_review(review_csv, [row])
+
+        tab = ReviewTab({"review_csv": str(review_csv)})
+        try:
+            tab.table.setCurrentCell(0, 0)  # selects the row, populates the detail form
+            assert tab.rows_by_filename["Book.pdf"].edited == ""
+
+            # Focus-out with no actual change to the text.
+            tab.detail_edits["publisher"].editingFinished.emit()
+            tab._commit_description()
+            assert tab.rows_by_filename["Book.pdf"].edited == "", (
+                "a no-op focus change incorrectly marked the row edited"
+            )
+
+            # A real change must still mark it.
+            tab.detail_edits["publisher"].setText("New Publisher")
+            tab.detail_edits["publisher"].editingFinished.emit()
+            assert tab.rows_by_filename["Book.pdf"].edited == "1", "a real edit did not mark the row edited"
+            assert tab.rows_by_filename["Book.pdf"].publisher == "New Publisher"
+        finally:
+            tab.deleteLater()
+    print("PASS: review_tab_no_change_does_not_mark_edited")
+
+
 def test_review_tab_no_save_during_population() -> None:
     # A real Qt-specific gotcha with no Tkinter analog: QTableWidget's
     # itemChanged fires for setItem() during bulk population just as it
@@ -512,6 +548,7 @@ NO_ARG_APP_TESTS = [
     test_candidate_dialog_escape_skips_not_quits,
     test_review_tab_status_edit_persists,
     test_review_tab_edit_survives_rescan,
+    test_review_tab_no_change_does_not_mark_edited,
     test_review_tab_no_save_during_population,
 ]
 

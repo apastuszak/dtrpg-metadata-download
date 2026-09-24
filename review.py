@@ -17,6 +17,17 @@ from pathlib import Path
 
 from provenance import Source, Status
 
+# Read once, here at import time, rather than via the read-with-a-
+# sentinel trick (os.umask(0) then os.umask(saved)) inside save_review()
+# itself. That trick briefly sets the *process-wide* umask to 0, and
+# save_review() can run on a background QThread (e.g. the GUI's Review
+# tab) -- a file created by any other thread in that instant would come
+# out with no permission restriction at all. Reading it once here, during
+# single-threaded module import (before any background thread exists),
+# has no such window.
+_DEFAULT_UMASK = os.umask(0)
+os.umask(_DEFAULT_UMASK)
+
 # Leading characters a spreadsheet app (Excel/LibreOffice/Numbers) reads as
 # the start of a formula. matched_title/description/publisher/tags are
 # sourced from DriveThruRPG's *public* catalog -- anyone can list a
@@ -150,9 +161,7 @@ def save_review(path: str | Path, rows: list[ReviewRow]) -> None:
         if path.exists():
             mode = stat.S_IMODE(path.stat().st_mode)
         else:
-            umask = os.umask(0)
-            os.umask(umask)
-            mode = 0o666 & ~umask
+            mode = 0o666 & ~_DEFAULT_UMASK
         os.chmod(tmp_path_str, mode)
         with os.fdopen(tmp_fd, "w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=FIELDNAMES)
