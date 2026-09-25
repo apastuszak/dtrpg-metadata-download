@@ -1,23 +1,22 @@
-"""Wraps a *separate, sibling* project's PDF background-layer tool
-(`castles_and_crusades_background_layer.py`, from the
-`gurps_4e_revised_hyperlink` repo that happens to live alongside this one
-on this machine) as an optional write-time step here -- same machine-
-specific-integration reasoning as `rpg_hyperlink.py`/`rpg_grayscale.py`'s
-own module docstrings (read those first; this repeats only what's
-different). Tags each page's full-page decorative background as a
-toggleable Optional Content Group layer, or deletes it outright.
+"""Wraps a sibling PDF background-layer tool
+(`castles_and_crusades_background_layer.py`), vendored as a plain file in
+this project's own directory -- same vendoring reasoning as
+`rpg_hyperlink.py`/`rpg_grayscale.py`'s own module docstrings (read those
+first; this repeats only what's different). Tags each page's full-page
+decorative background as a toggleable Optional Content Group layer, or
+deletes it outright.
 
-Unlike either of those two, this sibling script has no separable non-
-interactive library function to import -- its whole logic lives inside a
-single `argparse`-driven `main()`, with no equivalent to `hyperlink_pdf()`
-or `run_ghostscript()`/`restore_metadata_and_labels()`. Rather than
-duplicate that orchestration logic here (the exact fork/drift risk this
-whole family of integrations exists to avoid), this invokes the script as
-a real subprocess via `sys.executable` (the same interpreter already
-running this project, which already has `pikepdf` -- this sibling
-script's only dependency), exactly the way its own author runs it from a
-terminal: `python3 castles_and_crusades_background_layer.py src dst
-[--remove]`.
+Unlike either of those two, this script has no separable non-interactive
+library function to import -- its whole logic lives inside a single
+`argparse`-driven `main()`, with no equivalent to `hyperlink_pdf()` or
+`run_ghostscript()`/`restore_metadata_and_labels()`. Rather than
+duplicate that orchestration logic here (the exact fork/drift risk
+vendoring these scripts as plain files, rather than reimplementing their
+logic, exists to avoid), this invokes the script as a real subprocess via
+`sys.executable` (the same interpreter already running this project,
+which already has `pikepdf` -- this script's only dependency), exactly
+the way its own author runs it from a terminal:
+`python3 castles_and_crusades_background_layer.py src dst [--remove]`.
 """
 
 from __future__ import annotations
@@ -30,7 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-DEFAULT_BACKGROUND_LAYER_SCRIPT = Path("/path/to/castles_and_crusades_background_layer.py")
+BACKGROUND_LAYER_SCRIPT = Path(__file__).parent / "castles_and_crusades_background_layer.py"
 
 # Unlike every other step in this family (importlib-loaded functions
 # running in this same process), this one is a real subprocess -- with no
@@ -56,11 +55,10 @@ def _unlink_quietly(path: Path) -> None:
 
 def apply_background_layer(
     path: Path,
-    script_path: str | Path,
     remove: bool = False,
     log: Callable[[str], None] | None = None,
 ) -> BackgroundLayerResult:
-    """Runs the sibling script's background-tag/`--remove` logic against
+    """Runs the vendored script's background-tag/`--remove` logic against
     `path`, re-saving over the same path. Never raises -- returns
     success=False with a message on any failure, matching this whole
     family's report-don't-crash convention.
@@ -68,20 +66,18 @@ def apply_background_layer(
     Saves to a temp file and atomically replaces `path` only once the
     subprocess actually succeeds (`os.replace()`, same filesystem via
     `dir=path.parent`), same reasoning as the rest of this family: the
-    sibling script itself takes separate src/dst arguments (its own
+    script itself takes separate src/dst arguments (its own
     `pikepdf.open()` call has no `allow_overwriting_input=True`, so it
     can't write back over what it just read even if we wanted it to),
     and a failure partway through must leave the original untouched.
     """
-    script_path = Path(script_path)
     if not path.exists():
         return BackgroundLayerResult(success=False, message="file not found")
-    if not script_path.exists():
-        return BackgroundLayerResult(
-            success=False,
-            message=f"background-layer script not found at {script_path} -- set it via 'preferences'/the "
-            "GUI's Preferences tab, or in config.yaml",
-        )
+    if not BACKGROUND_LAYER_SCRIPT.exists():
+        # Should be unreachable -- vendored, committed file -- but a
+        # broken/partial working tree is a real enough possibility to
+        # degrade instead of crashing.
+        return BackgroundLayerResult(success=False, message=f"expected vendored script missing: {BACKGROUND_LAYER_SCRIPT}")
 
     # Hidden prefix -- see rpg_hyperlink.py's run_hyperlink_script() for
     # why (a force-killed run must not leave a "book" scan_pdfs() would
@@ -91,7 +87,7 @@ def apply_background_layer(
     tmp_out_path: Path | None = Path(tmp_out_str)
 
     try:
-        cmd = [sys.executable, str(script_path), str(path), str(tmp_out_path)]
+        cmd = [sys.executable, str(BACKGROUND_LAYER_SCRIPT), str(path), str(tmp_out_path)]
         if remove:
             cmd.append("--remove")
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT_SECONDS)

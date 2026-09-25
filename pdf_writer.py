@@ -99,9 +99,9 @@ from lxml.etree import QName
 from image_converter import convert_images_to_rgb
 from matcher import scan_pdfs
 from review import ReviewRow
-from rpg_background_layer import DEFAULT_BACKGROUND_LAYER_SCRIPT, apply_background_layer
-from rpg_grayscale import DEFAULT_GRAYSCALE_SCRIPT, convert_pdf_grayscale
-from rpg_hyperlink import DEFAULT_GURPS_HYPERLINK_SCRIPT, DEFAULT_MONGOOSE_HYPERLINK_SCRIPT, run_hyperlink_script
+from rpg_background_layer import apply_background_layer
+from rpg_grayscale import convert_pdf_grayscale
+from rpg_hyperlink import GURPS_HYPERLINK_SCRIPT, MONGOOSE_HYPERLINK_SCRIPT, run_hyperlink_script
 from sidecar_writer import _split_isbn, write_bookorbit_opf, write_grimmory_sidecar
 
 logger = logging.getLogger("pdf_writer")
@@ -214,7 +214,15 @@ def _set_calibre_series(meta: pikepdf.models.metadata.PdfMetadata, series: str, 
             si.text = f"{idx:.2f}"
 
 
-def _backup(path: Path) -> Path:
+def backup(path: Path) -> Path:
+    """One-time backup -- only creates a `.bak` if one doesn't already
+    exist, so it always represents the pre-tagging original even across
+    repeated re-tagging runs (must not be refreshed on every call). Public
+    (not `_backup`) since `tag_tui.py`/`gui_tag_flow.py` also need to call
+    this directly, before removing a detected watermark -- that step runs
+    before write_metadata() ever gets to make its own backup, and without
+    this the `.bak` would end up capturing the *watermark-removed* file
+    instead of the true original."""
     backup_path = path.with_suffix(path.suffix + ".bak")
     if not backup_path.exists():
         shutil.copy2(path, backup_path)
@@ -255,14 +263,10 @@ def write_metadata(
     bookorbit_mode: bool = False,
     convert_images: bool = False,
     convert_grayscale: bool = False,
-    grayscale_script: str | Path = DEFAULT_GRAYSCALE_SCRIPT,
     background_layer: bool = False,
     remove_background: bool = False,
-    background_layer_script: str | Path = DEFAULT_BACKGROUND_LAYER_SCRIPT,
     hyperlink_gurps: bool = False,
-    gurps_hyperlink_script: str | Path = DEFAULT_GURPS_HYPERLINK_SCRIPT,
     hyperlink_mongoose: bool = False,
-    mongoose_hyperlink_script: str | Path = DEFAULT_MONGOOSE_HYPERLINK_SCRIPT,
     log: Callable[[str], None] | None = None,
 ) -> WriteResult:
     """`log`, if given, is called with human-readable progress lines for
@@ -288,7 +292,7 @@ def write_metadata(
         return WriteResult(path.name, False, "file not found")
 
     try:
-        _backup(path)
+        backup(path)
     except OSError as exc:
         return WriteResult(path.name, False, f"backup failed: {exc}")
 
@@ -307,7 +311,7 @@ def write_metadata(
         logger.info("%s %s...", action, path.name)
         if log is not None:
             log(f"{action} {path.name}...")
-        bg_result = apply_background_layer(path, background_layer_script, remove=remove_background, log=log)
+        bg_result = apply_background_layer(path, remove=remove_background, log=log)
         if not bg_result.success:
             logger.warning("Background-layer step failed for %s: %s", path.name, bg_result.message)
             if log is not None:
@@ -349,7 +353,7 @@ def write_metadata(
         # the mutual-exclusivity note above), so there's no meaningful
         # ordering question between the two of them.
         logger.info("Converting %s to grayscale...", path.name)
-        gray_result = convert_pdf_grayscale(path, grayscale_script, log=log)
+        gray_result = convert_pdf_grayscale(path, log=log)
         if not gray_result.success:
             logger.warning("Grayscale conversion failed for %s: %s", path.name, gray_result.message)
             if log is not None:
@@ -369,9 +373,9 @@ def write_metadata(
     # only ever one publisher's, so at most one will actually find
     # anything to link.
     if hyperlink_gurps:
-        _run_hyperlink_step(path, "GURPS", gurps_hyperlink_script, log)
+        _run_hyperlink_step(path, "GURPS", GURPS_HYPERLINK_SCRIPT, log)
     if hyperlink_mongoose:
-        _run_hyperlink_step(path, "Mongoose", mongoose_hyperlink_script, log)
+        _run_hyperlink_step(path, "Mongoose", MONGOOSE_HYPERLINK_SCRIPT, log)
 
     try:
         with pikepdf.open(path, allow_overwriting_input=True) as pdf:
@@ -528,14 +532,10 @@ def write_approved(
     bookorbit_mode: bool = False,
     convert_images: bool = False,
     convert_grayscale: bool = False,
-    grayscale_script: str | Path = DEFAULT_GRAYSCALE_SCRIPT,
     background_layer: bool = False,
     remove_background: bool = False,
-    background_layer_script: str | Path = DEFAULT_BACKGROUND_LAYER_SCRIPT,
     hyperlink_gurps: bool = False,
-    gurps_hyperlink_script: str | Path = DEFAULT_GURPS_HYPERLINK_SCRIPT,
     hyperlink_mongoose: bool = False,
-    mongoose_hyperlink_script: str | Path = DEFAULT_MONGOOSE_HYPERLINK_SCRIPT,
     log: Callable[[str], None] | None = None,
 ) -> list[WriteResult]:
     root = Path(root)
@@ -573,11 +573,9 @@ def write_approved(
             results.append(
                 write_metadata(
                     match, row, bookorbit_mode=bookorbit_mode, convert_images=convert_images,
-                    convert_grayscale=convert_grayscale, grayscale_script=grayscale_script,
+                    convert_grayscale=convert_grayscale,
                     background_layer=background_layer, remove_background=remove_background,
-                    background_layer_script=background_layer_script,
-                    hyperlink_gurps=hyperlink_gurps, gurps_hyperlink_script=gurps_hyperlink_script,
-                    hyperlink_mongoose=hyperlink_mongoose, mongoose_hyperlink_script=mongoose_hyperlink_script,
+                    hyperlink_gurps=hyperlink_gurps, hyperlink_mongoose=hyperlink_mongoose,
                     log=log,
                 )
             )

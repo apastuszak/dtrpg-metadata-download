@@ -73,7 +73,7 @@ from PyQt6.QtWidgets import (
 )
 
 from matcher import extract_product_id, find_candidates, load_known_urls, load_manual_overrides, row_from_match, scan_pdfs
-from pdf_writer import write_metadata
+from pdf_writer import backup, write_metadata
 from provenance import ProductMetadata, Source, Status
 from review import ReviewRow
 from tag_tui import (
@@ -104,11 +104,8 @@ from gui_app import (
     _make_mutually_exclusive,
     _StyledTextEdit,
     build_client_safe,
-    resolve_script_paths,
 )
-from rpg_background_layer import DEFAULT_BACKGROUND_LAYER_SCRIPT
-from rpg_grayscale import DEFAULT_GRAYSCALE_SCRIPT
-from rpg_hyperlink import DEFAULT_GURPS_HYPERLINK_SCRIPT, DEFAULT_MONGOOSE_HYPERLINK_SCRIPT
+from watermark_removal import detect_watermark, remove_watermark
 
 # ---------------------------------------------------------------------------
 # Orchestration -- runs on a background thread. Framework-agnostic (no Qt
@@ -139,14 +136,10 @@ class TagFlowController:
         stop_event: threading.Event,
         convert_images: bool = False,
         convert_grayscale: bool = False,
-        grayscale_script: str | Path = DEFAULT_GRAYSCALE_SCRIPT,
         background_layer: bool = False,
         remove_background: bool = False,
-        background_layer_script: str | Path = DEFAULT_BACKGROUND_LAYER_SCRIPT,
         hyperlink_gurps: bool = False,
-        gurps_hyperlink_script: str | Path = DEFAULT_GURPS_HYPERLINK_SCRIPT,
         hyperlink_mongoose: bool = False,
-        mongoose_hyperlink_script: str | Path = DEFAULT_MONGOOSE_HYPERLINK_SCRIPT,
     ):
         self.pdfs = pdfs
         self.client = client
@@ -156,14 +149,10 @@ class TagFlowController:
         self.bookorbit_mode = bookorbit_mode
         self.convert_images = convert_images
         self.convert_grayscale = convert_grayscale
-        self.grayscale_script = grayscale_script
         self.background_layer = background_layer
         self.remove_background = remove_background
-        self.background_layer_script = background_layer_script
         self.hyperlink_gurps = hyperlink_gurps
-        self.gurps_hyperlink_script = gurps_hyperlink_script
         self.hyperlink_mongoose = hyperlink_mongoose
-        self.mongoose_hyperlink_script = mongoose_hyperlink_script
         self.rename = rename
         self.root_mode = root_mode
         self._notify = notify
@@ -190,6 +179,7 @@ class TagFlowController:
         return {
             "batch_series": None,
             "series": "",
+            "watermark": False,
             "candidate": CandidateResult(action="quit"),
             "manual_entry": ManualEntryResult(action="cancel"),
             "confirm": ConfirmResult(action="quit"),
@@ -208,7 +198,36 @@ class TagFlowController:
 
         self._log("Run complete." if not self.stop_event.is_set() else "Stopped.")
 
+    def _maybe_remove_watermark(self, path: Path) -> None:
+        """Runs before anything else about `path` -- see tag_tui.py's
+        own TagApp._maybe_remove_watermark() for the full reasoning
+        (same ordering requirement, same "no separate on/off flag"
+        design, ported near-verbatim like the rest of this class)."""
+        detection = detect_watermark(path)
+        if detection is None:
+            return
+        remove = self._ask("watermark", {"book_title": path.name, "detection": detection})
+        if not remove:
+            return
+        # backup() must run here, before remove_watermark() touches the
+        # file -- see tag_tui.py's matching comment for why (write_metadata()'s
+        # own backup runs too late to capture the true pre-tagging original
+        # otherwise). If the backup itself fails, the watermark is left in
+        # place rather than removing it with no backup to fall back to.
+        try:
+            backup(path)
+        except OSError as exc:
+            self._log(f"Watermark removal skipped for {path.name}: backup failed: {exc}")
+            return
+        result = remove_watermark(path, detection.text)
+        if result.success:
+            self._log(f"Removed watermark from {path.name} ({result.removed} line(s))")
+        else:
+            self._log(f"Watermark removal failed for {path.name}: {result.message}")
+
     def _process_one(self, path: Path, progress: str, default_series: str | None) -> bool:
+        self._maybe_remove_watermark(path)
+
         if path.name in self.manual_overrides:
             return self._confirm_and_write(
                 path, progress, self.manual_overrides[path.name],
@@ -324,11 +343,9 @@ class TagFlowController:
         # marshaling back to the GUI thread.
         result = write_metadata(
             path, row, bookorbit_mode=self.bookorbit_mode, convert_images=self.convert_images,
-            convert_grayscale=self.convert_grayscale, grayscale_script=self.grayscale_script,
+            convert_grayscale=self.convert_grayscale,
             background_layer=self.background_layer, remove_background=self.remove_background,
-            background_layer_script=self.background_layer_script,
-            hyperlink_gurps=self.hyperlink_gurps, gurps_hyperlink_script=self.gurps_hyperlink_script,
-            hyperlink_mongoose=self.hyperlink_mongoose, mongoose_hyperlink_script=self.mongoose_hyperlink_script,
+            hyperlink_gurps=self.hyperlink_gurps, hyperlink_mongoose=self.hyperlink_mongoose,
             log=self._log,
         )
         self._log(f"Wrote metadata to {path.name}" if result.success else f"FAILED: {result.message}")
@@ -356,22 +373,18 @@ class TagWorker(QObject):
     def __init__(
         self, pdfs, client, manual_overrides, known_urls, thresholds,
         bookorbit_mode, rename, root_mode, stop_event, convert_images=False,
-        convert_grayscale=False, grayscale_script=DEFAULT_GRAYSCALE_SCRIPT,
+        convert_grayscale=False,
         background_layer=False, remove_background=False,
-        background_layer_script=DEFAULT_BACKGROUND_LAYER_SCRIPT,
-        hyperlink_gurps=False, gurps_hyperlink_script=DEFAULT_GURPS_HYPERLINK_SCRIPT,
-        hyperlink_mongoose=False, mongoose_hyperlink_script=DEFAULT_MONGOOSE_HYPERLINK_SCRIPT,
+        hyperlink_gurps=False, hyperlink_mongoose=False,
     ):
         super().__init__()
         self.controller = TagFlowController(
             pdfs=pdfs, client=client, manual_overrides=manual_overrides, known_urls=known_urls,
             thresholds=thresholds, bookorbit_mode=bookorbit_mode, rename=rename, root_mode=root_mode,
             notify=self._notify, log=self._log, stop_event=stop_event, convert_images=convert_images,
-            convert_grayscale=convert_grayscale, grayscale_script=grayscale_script,
+            convert_grayscale=convert_grayscale,
             background_layer=background_layer, remove_background=remove_background,
-            background_layer_script=background_layer_script,
-            hyperlink_gurps=hyperlink_gurps, gurps_hyperlink_script=gurps_hyperlink_script,
-            hyperlink_mongoose=hyperlink_mongoose, mongoose_hyperlink_script=mongoose_hyperlink_script,
+            hyperlink_gurps=hyperlink_gurps, hyperlink_mongoose=hyperlink_mongoose,
         )
 
     def _notify(self, kind: str, payload: dict, response_q: "queue.Queue") -> None:
@@ -476,6 +489,40 @@ class SeriesDialog(QDialog):
     def reject(self) -> None:
         self.value = self.edit.text().strip()
         super().reject()
+
+
+class WatermarkDialog(QDialog):
+    """Yes/No only, no text entry -- detect_watermark() already found
+    the one candidate this asks about (see tag_tui.py's WatermarkModal,
+    this dialog's TUI counterpart, for the full reasoning). Closing the
+    window (reject()) leaves `value` at its default of False -- same
+    "leave it" safe default as SeriesDialog's own reject() falls back to
+    whatever's already in the text field, just here there's no field to
+    fall back to."""
+
+    def __init__(self, parent, payload: dict):
+        super().__init__(parent)
+        book_title = payload["book_title"]
+        detection = payload["detection"]
+        self.setWindowTitle("Watermark detected")
+        self.value: bool = False
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(_plain_label(f"Watermark detected in {book_title}:"))
+        layout.addWidget(_plain_label(f'"{detection.text}" on {detection.page_count} of {detection.total_pages} page(s)'))
+        buttons = QHBoxLayout()
+        self.remove_button = QPushButton("Remove it")
+        self.remove_button.setDefault(True)
+        self.remove_button.clicked.connect(self._remove)
+        buttons.addWidget(self.remove_button)
+        self.leave_button = QPushButton("Leave it")
+        self.leave_button.clicked.connect(self.reject)
+        buttons.addWidget(self.leave_button)
+        layout.addLayout(buttons)
+
+    def _remove(self) -> None:
+        self.value = True
+        self.accept()
 
 
 class CandidateDialog(QDialog):
@@ -787,6 +834,7 @@ _DIALOG_CLASSES = {
     "manual_entry": ManualEntryDialog,
     "confirm": ConfirmDialog,
     "series": SeriesDialog,
+    "watermark": WatermarkDialog,
 }
 
 
@@ -924,9 +972,6 @@ class TagTab(QWidget):
         manual_overrides_path = Path(self.config_.get("manual_overrides", "data/manual_overrides.yaml"))
         manual_overrides = load_manual_overrides(manual_overrides_path)
         thresholds = self.config_.get("matching", {})
-        gurps_hyperlink_script, mongoose_hyperlink_script, grayscale_script, background_layer_script = (
-            resolve_script_paths(self.config_)
-        )
 
         self.stop_event = threading.Event()
         self._thread = QThread()
@@ -935,13 +980,11 @@ class TagTab(QWidget):
             thresholds=thresholds, bookorbit_mode=self.bookorbit_check.isChecked(),
             rename=self.rename_check.isChecked(), root_mode=root_mode, stop_event=self.stop_event,
             convert_images=self.convert_images_check.isChecked(),
-            convert_grayscale=self.convert_grayscale_check.isChecked(), grayscale_script=grayscale_script,
+            convert_grayscale=self.convert_grayscale_check.isChecked(),
             background_layer=self.background_layer_check.isChecked(),
             remove_background=self.remove_background_check.isChecked(),
-            background_layer_script=background_layer_script,
-            hyperlink_gurps=self.hyperlink_gurps_check.isChecked(), gurps_hyperlink_script=gurps_hyperlink_script,
+            hyperlink_gurps=self.hyperlink_gurps_check.isChecked(),
             hyperlink_mongoose=self.hyperlink_mongoose_check.isChecked(),
-            mongoose_hyperlink_script=mongoose_hyperlink_script,
         )
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)

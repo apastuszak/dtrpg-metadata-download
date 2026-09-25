@@ -1,9 +1,7 @@
-"""Wraps a *separate, sibling* project's PDF-grayscale-conversion tool
-(`convert_pdf_to_grayscale.py`, from the `gurps_4e_revised_hyperlink` repo
-that happens to live alongside this one on this machine) as an optional
-write-time step here -- same machine-specific-integration reasoning as
-`rpg_hyperlink.py`'s own module docstring (read that first; this repeats
-only what's different).
+"""Wraps a sibling PDF-grayscale-conversion tool (`convert_pdf_to_grayscale.py`),
+vendored as a plain file in this project's own directory -- same
+vendoring reasoning as `rpg_hyperlink.py`'s own module docstring (read
+that first; this repeats only what's different).
 
 Unlike the hyperlink scripts (whose only real dependency is `pymupdf`,
 already a dependency of this project too), this one shells out to the
@@ -44,7 +42,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-DEFAULT_GRAYSCALE_SCRIPT = Path("/path/to/convert_pdf_to_grayscale.py")
+GRAYSCALE_SCRIPT = Path(__file__).parent / "convert_pdf_to_grayscale.py"
 
 
 @dataclass
@@ -75,10 +73,9 @@ def _load_functions(script_path: Path):
 
 def convert_pdf_grayscale(
     path: Path,
-    script_path: str | Path,
     log: Callable[[str], None] | None = None,
 ) -> GrayscaleResult:
-    """Runs the sibling script's grayscale conversion against `path`,
+    """Runs the vendored script's grayscale conversion against `path`,
     re-saving over the same path. Never raises -- returns success=False
     with a message on any failure, matching this whole family's
     report-don't-crash convention.
@@ -92,18 +89,16 @@ def convert_pdf_grayscale(
     filesystem via `dir=path.parent`) once everything has actually
     succeeded; both temp files are always cleaned up.
     """
-    script_path = Path(script_path)
     if not path.exists():
         return GrayscaleResult(success=False, message="file not found")
-    if not script_path.exists():
-        return GrayscaleResult(
-            success=False,
-            message=f"grayscale script not found at {script_path} -- set it via 'preferences'/the GUI's "
-            "Preferences tab, or in config.yaml",
-        )
+    if not GRAYSCALE_SCRIPT.exists():
+        # Should be unreachable -- vendored, committed file -- but a
+        # broken/partial working tree is a real enough possibility to
+        # degrade instead of crashing.
+        return GrayscaleResult(success=False, message=f"expected vendored script missing: {GRAYSCALE_SCRIPT}")
 
     try:
-        run_ghostscript, restore_metadata_and_labels = _load_functions(script_path)
+        run_ghostscript, restore_metadata_and_labels = _load_functions(GRAYSCALE_SCRIPT)
     except Exception as exc:
         return GrayscaleResult(success=False, message=f"could not load grayscale script: {exc}")
 

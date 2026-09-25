@@ -71,15 +71,11 @@ from preferences import (
     Preferences,
     load_preferences,
     resolve_api_key,
-    resolve_path,
     save_preferences,
 )
 from provenance import Status
 from renamer import apply_rename, plan_rename
 from review import ReviewRow, load_review, save_review
-from rpg_background_layer import DEFAULT_BACKGROUND_LAYER_SCRIPT
-from rpg_grayscale import DEFAULT_GRAYSCALE_SCRIPT
-from rpg_hyperlink import DEFAULT_GURPS_HYPERLINK_SCRIPT, DEFAULT_MONGOOSE_HYPERLINK_SCRIPT
 
 # Shared checkbox explanatory text -- defined once so WritePdfsTab/AllTab
 # (here) and TagTab (gui_tag_flow.py) can't drift apart on wording for the
@@ -95,26 +91,22 @@ CONVERT_IMAGES_HINT = (
     "in the PDF. This WILL increase the file size."
 )
 CONVERT_GRAYSCALE_HINT = (
-    "Converts the whole PDF to grayscale using a separate script on this machine (requires "
-    "Ghostscript -- 'gs' -- on PATH, and grayscale_script set in the Preferences tab, or in "
-    "config.yaml). Mutually exclusive with converting to RGB above -- checking one unchecks the other."
+    "Converts the whole PDF to grayscale using a vendored script (requires Ghostscript -- 'gs' -- "
+    "on PATH). Mutually exclusive with converting to RGB above -- checking one unchecks the other."
 )
 RENAME_HINT = "Renames the file after the metadata update, using the format: Series Name - Book Name.pdf"
 HYPERLINK_GURPS_HINT = (
-    "Auto-hyperlinks in-text page and chapter references (e.g. \"see p. 208\") using a separate "
-    "GURPS-specific script on this machine. Only useful for GURPS PDFs; requires "
-    "gurps_hyperlink_script to be set in the Preferences tab, or in config.yaml."
+    "Auto-hyperlinks in-text page and chapter references (e.g. \"see p. 208\") using a vendored "
+    "GURPS-specific script. Only useful for GURPS PDFs."
 )
 HYPERLINK_MONGOOSE_HINT = (
-    "Auto-hyperlinks in-text page and chapter references using a separate script specific to "
-    "Mongoose Publishing's Traveller line. Only useful for Mongoose Traveller PDFs; requires "
-    "mongoose_hyperlink_script to be set in the Preferences tab, or in config.yaml."
+    "Auto-hyperlinks in-text page and chapter references using a vendored script specific to "
+    "Mongoose Publishing's Traveller line. Only useful for Mongoose Traveller PDFs."
 )
 BACKGROUND_LAYER_HINT = (
-    "Tags each page's full-page decorative background as a toggleable layer, using a separate "
-    "script on this machine. For Castles and Crusades rulebooks only; requires "
-    "background_layer_script to be set in the Preferences tab, or in config.yaml. Mutually exclusive "
-    "with removing the background below -- checking one unchecks the other."
+    "Tags each page's full-page decorative background as a toggleable layer, using a vendored "
+    "script. For Castles and Crusades rulebooks only. Mutually exclusive with removing the "
+    "background below -- checking one unchecks the other."
 )
 REMOVE_BACKGROUND_HINT = (
     "Deletes each page's full-page decorative background outright, using the same script as "
@@ -294,26 +286,6 @@ def build_client_safe(config: dict) -> DtrpgClient:
     )
 
 
-def resolve_script_paths(config: dict) -> tuple[str, str, str, str]:
-    """(gurps_hyperlink_script, mongoose_hyperlink_script, grayscale_script,
-    background_layer_script), each resolved via preferences.resolve_path()
-    -- a saved Preferences value wins, then config.yaml's own key, then
-    the hardcoded placeholder default. Shared by every tab that needs one
-    of these paths (WritePdfsTab/AllTab here, TagTab in gui_tag_flow.py)
-    so they can't drift into resolving this differently from each other."""
-    prefs = load_preferences(config.get("preferences", DEFAULT_PREFERENCES_PATH))
-    return (
-        resolve_path(prefs.gurps_hyperlink_script, config.get("gurps_hyperlink_script"), DEFAULT_GURPS_HYPERLINK_SCRIPT),
-        resolve_path(
-            prefs.mongoose_hyperlink_script, config.get("mongoose_hyperlink_script"), DEFAULT_MONGOOSE_HYPERLINK_SCRIPT
-        ),
-        resolve_path(prefs.grayscale_script, config.get("grayscale_script"), DEFAULT_GRAYSCALE_SCRIPT),
-        resolve_path(
-            prefs.background_layer_script, config.get("background_layer_script"), DEFAULT_BACKGROUND_LAYER_SCRIPT
-        ),
-    )
-
-
 class _FnWorker(QObject):
     """Runs one plain function on whatever thread it's moved to, then
     emits `finished`. `log` is a bound UiTaskRunner.log -- already safe to
@@ -464,22 +436,18 @@ def _do_scan(
 
 def _do_write_pdfs(
     log, rows: list[ReviewRow], root: str, bookorbit_mode: bool, convert_images: bool = False,
-    convert_grayscale: bool = False, grayscale_script: str = str(DEFAULT_GRAYSCALE_SCRIPT),
+    convert_grayscale: bool = False,
     background_layer: bool = False, remove_background: bool = False,
-    background_layer_script: str = str(DEFAULT_BACKGROUND_LAYER_SCRIPT),
-    hyperlink_gurps: bool = False, gurps_hyperlink_script: str = str(DEFAULT_GURPS_HYPERLINK_SCRIPT),
-    hyperlink_mongoose: bool = False, mongoose_hyperlink_script: str = str(DEFAULT_MONGOOSE_HYPERLINK_SCRIPT),
+    hyperlink_gurps: bool = False, hyperlink_mongoose: bool = False,
 ) -> None:
     if not any(r.is_approved() for r in rows):
         log("No approved/auto-accepted rows to write.")
         return
     results = write_approved(
         rows, root, bookorbit_mode=bookorbit_mode, convert_images=convert_images,
-        convert_grayscale=convert_grayscale, grayscale_script=grayscale_script,
+        convert_grayscale=convert_grayscale,
         background_layer=background_layer, remove_background=remove_background,
-        background_layer_script=background_layer_script,
-        hyperlink_gurps=hyperlink_gurps, gurps_hyperlink_script=gurps_hyperlink_script,
-        hyperlink_mongoose=hyperlink_mongoose, mongoose_hyperlink_script=mongoose_hyperlink_script, log=log,
+        hyperlink_gurps=hyperlink_gurps, hyperlink_mongoose=hyperlink_mongoose, log=log,
     )
     succeeded = sum(1 for r in results if r.success)
     log(f"Wrote metadata to {succeeded}/{len(results)} approved files")
@@ -644,31 +612,25 @@ class WritePdfsTab(QWidget):
             return
         self.run_button.setEnabled(False)
         review_csv = Path(self.config_.get("review_csv", "data/review.csv"))
-        gurps_hyperlink_script, mongoose_hyperlink_script, grayscale_script, background_layer_script = (
-            resolve_script_paths(self.config_)
-        )
         self.runner.start(
             self._worker, review_csv, root, self.bookorbit_check.isChecked(), self.convert_images_check.isChecked(),
-            self.convert_grayscale_check.isChecked(), grayscale_script,
+            self.convert_grayscale_check.isChecked(),
             self.background_layer_check.isChecked(), self.remove_background_check.isChecked(),
-            background_layer_script,
-            self.hyperlink_gurps_check.isChecked(), gurps_hyperlink_script,
-            self.hyperlink_mongoose_check.isChecked(), mongoose_hyperlink_script,
+            self.hyperlink_gurps_check.isChecked(), self.hyperlink_mongoose_check.isChecked(),
         )
 
     def _worker(
         self, review_csv: Path, root: str, bookorbit_mode: bool, convert_images: bool,
-        convert_grayscale: bool, grayscale_script: str,
-        background_layer: bool, remove_background: bool, background_layer_script: str,
-        hyperlink_gurps: bool, gurps_hyperlink_script: str,
-        hyperlink_mongoose: bool, mongoose_hyperlink_script: str,
+        convert_grayscale: bool,
+        background_layer: bool, remove_background: bool,
+        hyperlink_gurps: bool, hyperlink_mongoose: bool,
     ) -> None:
         rows = load_review(review_csv)
         _do_write_pdfs(
             self.runner.log, rows, root, bookorbit_mode, convert_images,
-            convert_grayscale, grayscale_script,
-            background_layer, remove_background, background_layer_script,
-            hyperlink_gurps, gurps_hyperlink_script, hyperlink_mongoose, mongoose_hyperlink_script,
+            convert_grayscale,
+            background_layer, remove_background,
+            hyperlink_gurps, hyperlink_mongoose,
         )
 
     def _on_done(self) -> None:
@@ -831,21 +793,20 @@ class AllTab(QWidget):
         review_csv = Path(self.config_.get("review_csv", "data/review.csv"))
         manual_overrides_path = Path(self.config_.get("manual_overrides", "data/manual_overrides.yaml"))
         thresholds = self.config_.get("matching", {})
-        _gurps, _mongoose, grayscale_script, _background_layer = resolve_script_paths(self.config_)
         self.runner.start(
             self._worker, root, review_csv, manual_overrides_path, thresholds,
             self.refresh_check.isChecked(), self.apply_review_check.isChecked(), self.bookorbit_check.isChecked(),
-            self.convert_images_check.isChecked(), self.convert_grayscale_check.isChecked(), grayscale_script,
+            self.convert_images_check.isChecked(), self.convert_grayscale_check.isChecked(),
         )
 
     def _worker(
         self, root: str, review_csv: Path, manual_overrides_path: Path, thresholds: dict,
         refresh_library: bool, apply_review: bool, bookorbit_mode: bool, convert_images: bool,
-        convert_grayscale: bool, grayscale_script: str,
+        convert_grayscale: bool,
     ) -> None:
         log = self.runner.log
         merged = _do_scan(self.config_, log, root, review_csv, manual_overrides_path, thresholds, refresh_library, apply_review)
-        _do_write_pdfs(log, merged, root, bookorbit_mode, convert_images, convert_grayscale, grayscale_script)
+        _do_write_pdfs(log, merged, root, bookorbit_mode, convert_images, convert_grayscale)
 
     def _on_done(self) -> None:
         self.run_button.setEnabled(True)
@@ -1082,13 +1043,15 @@ class ReviewTab(QWidget):
 
 
 class PreferencesTab(QWidget):
-    """Saved API key + DriveThruRPG name + sibling-script paths -- see
-    preferences.py's module docstring for why these live in their own
-    gitignored, owner-only-permissioned file rather than config.yaml. The
-    API key field is masked by default (a real secret), with a checkbox
-    to reveal it, matching preferences_tui.py's equivalent in the TUI.
-    The four script-path fields aren't secrets, so they're always shown
-    in plain text -- only the API key gets the mask/reveal treatment."""
+    """Saved API key + DriveThruRPG name -- see preferences.py's module
+    docstring for why these live in their own gitignored, owner-only-
+    permissioned file rather than config.yaml. The API key field is
+    masked by default (a real secret), with a checkbox to reveal it,
+    matching preferences_tui.py's equivalent in the TUI. The sibling
+    scripts (GURPS/Mongoose hyperlinking, grayscale, background-layer,
+    watermark removal) used to have their paths configured here too,
+    before they were vendored as plain files in this project's own
+    directory -- there's nothing left to configure for those."""
 
     def __init__(self, config: dict):
         super().__init__()
@@ -1097,10 +1060,9 @@ class PreferencesTab(QWidget):
 
         layout = QVBoxLayout(self)
         layout.addWidget(_make_description_label(
-            f"Your DriveThruRPG API key, account name, and optional sibling-script paths, saved "
-            f"to {self.preferences_path} -- not config.yaml, which is meant to be safe to "
-            "share/commit. An existing DTRPG_API_KEY environment variable always takes priority "
-            "over what's saved here."
+            f"Your DriveThruRPG API key and account name, saved to {self.preferences_path} -- "
+            "not config.yaml, which is meant to be safe to share/commit. An existing "
+            "DTRPG_API_KEY environment variable always takes priority over what's saved here."
         ))
 
         form = QFormLayout()
@@ -1115,24 +1077,7 @@ class PreferencesTab(QWidget):
         self.name_edit = QLineEdit(prefs.dtrpg_name)
         form.addRow("DriveThruRPG Name:", self.name_edit)
 
-        self.gurps_hyperlink_script_edit = QLineEdit(prefs.gurps_hyperlink_script)
-        form.addRow("GURPS hyperlink script:", self._path_row(self.gurps_hyperlink_script_edit))
-
-        self.mongoose_hyperlink_script_edit = QLineEdit(prefs.mongoose_hyperlink_script)
-        form.addRow("Mongoose hyperlink script:", self._path_row(self.mongoose_hyperlink_script_edit))
-
-        self.grayscale_script_edit = QLineEdit(prefs.grayscale_script)
-        form.addRow("Grayscale script:", self._path_row(self.grayscale_script_edit))
-
-        self.background_layer_script_edit = QLineEdit(prefs.background_layer_script)
-        form.addRow("Background layer script:", self._path_row(self.background_layer_script_edit))
-
         layout.addLayout(form)
-        layout.addWidget(_make_hint_label(
-            "The four script paths above are only used by the matching checkboxes on the Tag/"
-            "Write PDFs/All tabs (--hyperlink-gurps/--hyperlink-mongoose/--convert-grayscale/"
-            "--background-layer/--remove-background) -- leave them blank if you don't use those."
-        ))
 
         save_row = QHBoxLayout()
         self.save_button = QPushButton("Save Preferences")
@@ -1144,21 +1089,6 @@ class PreferencesTab(QWidget):
         layout.addLayout(save_row)
         layout.addStretch(1)
 
-    def _path_row(self, edit: QLineEdit) -> QWidget:
-        row = QWidget()
-        row_layout = QHBoxLayout(row)
-        row_layout.setContentsMargins(0, 0, 0, 0)
-        row_layout.addWidget(edit, 1)
-        browse_button = QPushButton("Browse...")
-        browse_button.clicked.connect(lambda: self._browse_script(edit))
-        row_layout.addWidget(browse_button)
-        return row
-
-    def _browse_script(self, edit: QLineEdit) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "Select script", edit.text() or "", "Python scripts (*.py)")
-        if path:
-            edit.setText(path)
-
     def _toggle_show(self, checked: bool) -> None:
         self.api_key_edit.setEchoMode(QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password)
 
@@ -1166,10 +1096,6 @@ class PreferencesTab(QWidget):
         prefs = Preferences(
             api_key=self.api_key_edit.text().strip(),
             dtrpg_name=self.name_edit.text().strip(),
-            gurps_hyperlink_script=self.gurps_hyperlink_script_edit.text().strip(),
-            mongoose_hyperlink_script=self.mongoose_hyperlink_script_edit.text().strip(),
-            grayscale_script=self.grayscale_script_edit.text().strip(),
-            background_layer_script=self.background_layer_script_edit.text().strip(),
         )
         save_preferences(prefs, self.preferences_path)
         self.status_label.setText(f"Saved to {self.preferences_path}")

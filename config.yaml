@@ -10,27 +10,6 @@ review_csv: data/review.csv
 manual_overrides: data/manual_overrides.yaml
 preferences: data/preferences.yaml   # your API key + DriveThruRPG name -- gitignored, never commit this file
 
-# Optional, and specific to your own machine: paths to a separate sibling
-# project's PDF-hyperlinking scripts (auto-hyperlinks in-text page/
-# chapter references -- see rpg_hyperlink.py). Only used when
-# --hyperlink-gurps/--hyperlink-mongoose (or the GUI's matching
-# checkboxes) are turned on; safe to leave as these placeholders otherwise.
-gurps_hyperlink_script: /path/to/hyperlink_pdf_universal.py
-mongoose_hyperlink_script: /path/to/hyperlink_pdf_mongoose.py
-
-# Optional, same as above: path to a separate sibling project's
-# PDF-to-grayscale script (see rpg_grayscale.py). Only used when
-# --convert-grayscale/the GUI's matching checkbox is turned on. Also
-# requires the real Ghostscript binary ('gs') on PATH -- a system
-# package, not something this project's own dependencies can provide.
-grayscale_script: /path/to/convert_pdf_to_grayscale.py
-
-# Optional, same as above: path to a separate sibling project's PDF
-# background-layer script (see rpg_background_layer.py). Only used when
-# --background-layer/--remove-background (or the GUI's matching
-# checkboxes) are turned on.
-background_layer_script: /path/to/castles_and_crusades_background_layer.py
-
 matching:
   high_confidence_threshold: 90.0
   review_floor_threshold: 70.0

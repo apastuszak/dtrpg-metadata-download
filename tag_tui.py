@@ -61,13 +61,11 @@ from textual.widgets.option_list import Option
 
 from dtrpg_client import DtrpgClient
 from matcher import extract_product_id, find_candidates, row_from_match
-from pdf_writer import write_metadata
+from pdf_writer import backup, write_metadata
 from provenance import ProductMetadata, Source, Status
 from renamer import apply_rename, plan_rename
 from review import ReviewRow
-from rpg_background_layer import DEFAULT_BACKGROUND_LAYER_SCRIPT
-from rpg_grayscale import DEFAULT_GRAYSCALE_SCRIPT
-from rpg_hyperlink import DEFAULT_GURPS_HYPERLINK_SCRIPT, DEFAULT_MONGOOSE_HYPERLINK_SCRIPT
+from watermark_removal import WatermarkDetection, detect_watermark, remove_watermark
 
 # ---------------------------------------------------------------------------
 # Pure helpers -- no Textual dependency, so they're testable without
@@ -288,6 +286,38 @@ class SeriesModal(ModalScreen[str]):
 
     def _submit(self) -> None:
         self.dismiss(self.query_one("#series", Input).value.strip())
+
+
+class WatermarkModal(ModalScreen[bool]):
+    """Shown once per file, before anything else about that file happens
+    (even matching) -- see TagApp._process_one()'s own comment for why
+    this has to run first, not just early. Yes/No only, no text entry:
+    detect_watermark() already found the one candidate this asks about,
+    so there's nothing left to type."""
+
+    DEFAULT_CSS = """
+    WatermarkModal { align: center middle; }
+    WatermarkModal > Vertical {
+        width: 70; height: auto; border: thick $warning; padding: 1 2;
+    }
+    """
+
+    def __init__(self, book_title: str, detection: WatermarkDetection):
+        super().__init__()
+        self.book_title = book_title
+        self.detection = detection
+
+    def compose(self) -> ComposeResult:
+        d = self.detection
+        with Vertical():
+            yield Label(f"Watermark detected in {self.book_title}:")
+            yield Label(f'"{d.text}" on {d.page_count} of {d.total_pages} page(s)')
+            with Horizontal():
+                yield Button("Remove it", id="yes", variant="primary")
+                yield Button("Leave it", id="no")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(event.button.id == "yes")
 
 
 class CandidateScreen(Screen[CandidateResult]):
@@ -586,14 +616,10 @@ class TagApp(App[None]):
         root_mode: bool,
         convert_images: bool = False,
         convert_grayscale: bool = False,
-        grayscale_script: str | Path = DEFAULT_GRAYSCALE_SCRIPT,
         background_layer: bool = False,
         remove_background: bool = False,
-        background_layer_script: str | Path = DEFAULT_BACKGROUND_LAYER_SCRIPT,
         hyperlink_gurps: bool = False,
-        gurps_hyperlink_script: str | Path = DEFAULT_GURPS_HYPERLINK_SCRIPT,
         hyperlink_mongoose: bool = False,
-        mongoose_hyperlink_script: str | Path = DEFAULT_MONGOOSE_HYPERLINK_SCRIPT,
     ):
         super().__init__()
         self.pdfs = pdfs
@@ -604,14 +630,10 @@ class TagApp(App[None]):
         self.bookorbit_mode = bookorbit_mode
         self.convert_images = convert_images
         self.convert_grayscale = convert_grayscale
-        self.grayscale_script = grayscale_script
         self.background_layer = background_layer
         self.remove_background = remove_background
-        self.background_layer_script = background_layer_script
         self.hyperlink_gurps = hyperlink_gurps
-        self.gurps_hyperlink_script = gurps_hyperlink_script
         self.hyperlink_mongoose = hyperlink_mongoose
-        self.mongoose_hyperlink_script = mongoose_hyperlink_script
         self.rename = rename
         self.root_mode = root_mode
         self.history: list[str] = []
@@ -641,9 +663,51 @@ class TagApp(App[None]):
         summary = "\n".join(["Run summary:", *self.history]) if self.history else "Run summary: nothing to report."
         self.exit(message=summary)
 
+    async def _maybe_remove_watermark(self, path: Path) -> None:
+        """Runs before anything else about `path` -- even matching --
+        since detect_watermark()/remove_watermark() both re-save the PDF
+        via PyMuPDF, and this project's whole ordering convention is that
+        every non-pikepdf step touching a PDF's bytes runs before
+        write_metadata()'s own pikepdf.open() (see CLAUDE.md's "Runs
+        before pikepdf ever opens the file..."); doing it before matching
+        too, rather than just before the write, means there's no window
+        where a later step (image conversion, hyperlinking) could run
+        against the still-watermarked file. No on/off flag -- the
+        vendored script always ships with this project, so there's
+        nothing to configure; the per-file Yes/No modal below is the
+        only gate, matching "ask the user" being the whole point of this
+        feature rather than one more flag to also remember to set.
+        """
+        detection = await self._call(detect_watermark, path)
+        if detection is None:
+            return
+        remove = await self.push_screen_wait(WatermarkModal(path.name, detection))
+        if not remove:
+            return
+        # backup() must run here, before remove_watermark() touches the
+        # file -- write_metadata() also makes a backup, but only much
+        # later, after this step (and image conversion, hyperlinking,
+        # etc.) have already run. Without this, the one-time .bak ends up
+        # capturing the *watermark-removed* file instead of the true
+        # pre-tagging original -- a real bug caught in review. If the
+        # backup itself fails (e.g. disk full), the watermark is left in
+        # place rather than removing it with no backup to fall back to.
+        try:
+            await self._call(backup, path)
+        except OSError as exc:
+            self._log(f"Watermark removal skipped for {path.name}: backup failed: {exc}")
+            return
+        result = await self._call(remove_watermark, path, detection.text)
+        if result.success:
+            self._log(f"Removed watermark from {path.name} ({result.removed} line(s))")
+        else:
+            self._log(f"Watermark removal failed for {path.name}: {result.message}")
+
     async def _process_one(self, path: Path, progress: str, default_series: str | None) -> bool:
         """Returns True if the user asked to stop the whole batch --
         the direct async equivalent of the old _tag_one()'s bool return."""
+        await self._maybe_remove_watermark(path)
+
         if path.name in self.manual_overrides:
             return await self._confirm_and_write(
                 path,
@@ -771,11 +835,9 @@ class TagApp(App[None]):
 
         result = await self._call(
             write_metadata, path, row, bookorbit_mode=self.bookorbit_mode, convert_images=self.convert_images,
-            convert_grayscale=self.convert_grayscale, grayscale_script=self.grayscale_script,
+            convert_grayscale=self.convert_grayscale,
             background_layer=self.background_layer, remove_background=self.remove_background,
-            background_layer_script=self.background_layer_script,
-            hyperlink_gurps=self.hyperlink_gurps, gurps_hyperlink_script=self.gurps_hyperlink_script,
-            hyperlink_mongoose=self.hyperlink_mongoose, mongoose_hyperlink_script=self.mongoose_hyperlink_script,
+            hyperlink_gurps=self.hyperlink_gurps, hyperlink_mongoose=self.hyperlink_mongoose,
             log=log_line,
         )
         self._log(f"Wrote metadata to {path.name}" if result.success else f"FAILED: {result.message}")

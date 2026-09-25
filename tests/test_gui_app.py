@@ -65,8 +65,10 @@ from gui_tag_flow import (  # noqa: E402
     ConfirmDialog,
     ManualEntryDialog,
     TagFlowController,
+    WatermarkDialog,
 )
 from gui_app import ReviewTab  # noqa: E402
+from watermark_removal import WatermarkDetection, WatermarkRemovalResult  # noqa: E402
 
 
 def _client(**overrides) -> MagicMock:
@@ -139,6 +141,82 @@ def test_controller_candidate_pick_write():
                 assert m.get("dc:title") == "Picked Title", m.get("dc:title")
         assert any("Wrote metadata" in line for line in controller.history), controller.history
     print("PASS: controller_candidate_pick_write")
+
+
+def test_controller_watermark_detected_removed():
+    # detect_watermark()/remove_watermark() are verified against the real
+    # sibling script with ad hoc scripts (see watermark_removal.py's own
+    # module docstring); this only guards TagFlowController's wiring --
+    # the watermark check must run before matching even starts, and
+    # confirming it must call remove_watermark() with the detected text.
+    with tempfile.TemporaryDirectory() as tmp:
+        pdf = Path(tmp) / "Watermarked.pdf"
+        pikepdf.new().save(pdf)
+        client = _client()
+        meta = ProductMetadata(title="Picked", description="d", source=Source.DTRPG_LIBRARY, product_id="1")
+        detection = WatermarkDetection(text="www.drivethrurpg.com", page_count=3, total_pages=3)
+        with (
+            patch("gui_tag_flow.find_candidates", return_value=[(meta, 95.0)]),
+            patch("gui_tag_flow.detect_watermark", return_value=detection) as mock_detect,
+            patch("gui_tag_flow.remove_watermark") as mock_remove,
+        ):
+            responses = {
+                "watermark": lambda payload: True,
+                "candidate": lambda payload: CandidateResult(action="pick", index=0),
+                "confirm": lambda payload: ConfirmResult(action="confirm", meta=payload["meta"]),
+                "series": lambda payload: "",
+            }
+            controller = _drive_controller([pdf], client, responses)
+
+        mock_detect.assert_called_once()
+        mock_remove.assert_called_once_with(pdf, "www.drivethrurpg.com")
+        assert any("Removed watermark" in line for line in controller.history), controller.history
+    print("PASS: controller_watermark_detected_removed")
+
+
+def test_controller_watermark_removal_backs_up_original_first():
+    # A real bug, caught in review: write_metadata() makes the one-time
+    # .bak backup, but that runs well *after* watermark removal (which
+    # happens before matching even starts) -- so without an explicit
+    # backup() call in the watermark-removal path itself, the .bak ended
+    # up capturing the *watermark-removed* file instead of the true
+    # pre-tagging original. Guards the fix directly: remove_watermark()'s
+    # mock records whether the backup already existed, with the
+    # pre-removal content, at the moment it was called -- recorded into a
+    # plain list rather than asserted inline, since _drive_controller()
+    # runs the controller on a background thread and an AssertionError
+    # raised there would just kill that thread silently (a real gap this
+    # test's first draft actually had, caught by deliberately reverting
+    # the fix and finding the "regression" test still passed).
+    with tempfile.TemporaryDirectory() as tmp:
+        pdf = Path(tmp) / "Watermarked.pdf"
+        pikepdf.new().save(pdf)
+        original_bytes = pdf.read_bytes()
+        client = _client()
+        detection = WatermarkDetection(text="www.drivethrurpg.com", page_count=1, total_pages=1)
+
+        observed: list[tuple[bool, bool]] = []
+
+        def fake_remove_watermark(path, text, log=None):
+            bak = path.with_suffix(".pdf.bak")
+            observed.append((bak.exists(), bak.exists() and bak.read_bytes() == original_bytes))
+            return WatermarkRemovalResult(success=True, removed=1)
+
+        with (
+            patch("gui_tag_flow.detect_watermark", return_value=detection),
+            patch("gui_tag_flow.remove_watermark", side_effect=fake_remove_watermark) as mock_remove,
+        ):
+            responses = {
+                "watermark": lambda payload: True,
+                "candidate": lambda payload: CandidateResult(action="skip"),
+            }
+            _drive_controller([pdf], client, responses)
+
+        mock_remove.assert_called_once()
+        assert observed == [(True, True)], (
+            f"backup() must run (with the pre-removal content) before remove_watermark() is called; observed={observed}"
+        )
+    print("PASS: controller_watermark_removal_backs_up_original_first")
 
 
 def test_controller_manual_entry_write():
@@ -231,6 +309,25 @@ def test_show_confirm_dialog_edit_before_confirm() -> None:
     assert dialog.value.meta.series == "Series"
     assert dialog.value.meta.product_id == "1"
     print("PASS: show_confirm_dialog_edit_before_confirm")
+
+
+def test_watermark_dialog_remove() -> None:
+    detection = WatermarkDetection(text="www.drivethrurpg.com", page_count=42, total_pages=45)
+    payload = {"book_title": "Book.pdf", "detection": detection}
+    dialog = WatermarkDialog(None, payload)
+    assert dialog.value is False  # default before any button is clicked
+    dialog.remove_button.click()
+    assert dialog.value is True
+    print("PASS: watermark_dialog_remove")
+
+
+def test_watermark_dialog_leave() -> None:
+    detection = WatermarkDetection(text="www.drivethrurpg.com", page_count=1, total_pages=1)
+    payload = {"book_title": "Book.pdf", "detection": detection}
+    dialog = WatermarkDialog(None, payload)
+    dialog.leave_button.click()
+    assert dialog.value is False
+    print("PASS: watermark_dialog_leave")
 
 
 def test_show_manual_entry_dialog_multiline_description() -> None:
@@ -535,6 +632,8 @@ def test_tag_worker_run_catches_exception(app: QApplication) -> None:
 
 NO_APP_TESTS = [
     test_controller_candidate_pick_write,
+    test_controller_watermark_detected_removed,
+    test_controller_watermark_removal_backs_up_original_first,
     test_controller_manual_entry_write,
     test_controller_skip,
     test_controller_quit_mid_batch,
@@ -542,6 +641,8 @@ NO_APP_TESTS = [
 
 NO_ARG_APP_TESTS = [
     test_show_confirm_dialog_edit_before_confirm,
+    test_watermark_dialog_remove,
+    test_watermark_dialog_leave,
     test_show_manual_entry_dialog_multiline_description,
     test_show_candidate_dialog_pick,
     test_show_candidate_dialog_use_url_button,

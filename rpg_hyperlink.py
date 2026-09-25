@@ -1,45 +1,39 @@
-"""Wraps *separate, sibling* projects' PDF-hyperlinking tools --
-`hyperlink_pdf_universal.py` (GURPS) and `hyperlink_pdf_mongoose.py`
-(Mongoose Publishing's Traveller line), both from the
-`gurps_4e_revised_hyperlink` repo that happens to live alongside this one
-on this machine -- as optional write-time steps here. Originally just the
-GURPS script (this file used to be named `gurps_hyperlink.py`); the
-Mongoose script shares an identical interface (confirmed: same
-`hyperlink_pdf(in_path, out_path)` function signature, same `{"added",
-"chapter_added", "toc_added"}` return shape, same `shutil.copyfile`-then-
-`saveIncr()` write pattern -- the sibling repo's own CLAUDE.md describes
-it as "a fork of hyperlink_pdf_universal.py's logic, not a from-scratch
-rewrite"), so one generic function (`run_hyperlink_script()`) runs either
-one; only the script path passed in differs.
+"""Wraps two sibling PDF-hyperlinking scripts -- `hyperlink_pdf_universal.py`
+(GURPS) and `hyperlink_pdf_mongoose.py` (Mongoose Publishing's Traveller
+line) -- now vendored as plain files in this project's own directory,
+committed alongside it. Originally just the GURPS script (this file used
+to be named `gurps_hyperlink.py`); the Mongoose script shares an
+identical interface (confirmed: same `hyperlink_pdf(in_path, out_path)`
+function signature, same `{"added", "chapter_added", "toc_added"}` return
+shape, same `shutil.copyfile`-then-`saveIncr()` write pattern -- the
+sibling repo's own CLAUDE.md describes it as "a fork of
+hyperlink_pdf_universal.py's logic, not a from-scratch rewrite"), so one
+generic function (`run_hyperlink_script()`) runs either one; only which
+of `GURPS_HYPERLINK_SCRIPT`/`MONGOOSE_HYPERLINK_SCRIPT` is passed in
+differs.
 
-This is a deliberately machine-specific integration, not a general
-feature this project owns: each sibling script's reference-detection
-logic is tuned for one publisher's own page/chapter-reference conventions
-(see that repo's own CLAUDE.md), and its location on disk is nothing this
-project can assume about anyone else's machine -- `config.yaml`'s
-`gurps_hyperlink_script`/`mongoose_hyperlink_script` keys are placeholder
-paths for exactly that reason (same convention as `root`, another
-machine-specific value that ships as a placeholder), and the feature is a
-no-op (a clear, non-fatal message) if a given path isn't actually
-configured or doesn't exist.
+**This project previously loaded these from a configurable, machine-
+specific absolute path (Preferences/config.yaml) instead of vendoring
+them, specifically to avoid committing someone's real home directory/
+username into a repo meant to go public.** Vendoring instead removes that
+whole configuration surface -- and the failure mode it had: a path left
+unset (the default, unconfigured state) made this feature silently do
+nothing, which is exactly what happened with the watermark-removal
+integration the first time it was tried for real (see
+`docs/HISTORY.md`). `GURPS_HYPERLINK_SCRIPT`/`MONGOOSE_HYPERLINK_SCRIPT`
+below are real, resolved-at-import-time paths next to this file --
+there's nothing left to configure, and nothing that can silently be
+unset.
 
-`DEFAULT_GURPS_HYPERLINK_SCRIPT`/`DEFAULT_MONGOOSE_HYPERLINK_SCRIPT` below
-are deliberately the same kind of generic placeholder, not a real path --
-an earlier version of this hardcoded the actual absolute path from the
-machine this was built on, which would have leaked that person's home
-directory/username into this repo once it goes public, and (since
-`config.yaml`'s own placeholder key already takes precedence whenever
-it's present at all) didn't even work as a usable default in practice.
-The real path belongs in whatever *un*committed, machine-specific config
-file each person already keeps their other machine-specific values (like
-`root`) in -- never in a file this project tracks.
-
-Loaded via `importlib` from an absolute path rather than `pip install`ed
-or vendored, since these are standalone scripts in an unrelated repo with
-their own independent history/versioning -- not packages meant to be
-depended on. `pymupdf` (their only real dependency, per each script's own
-REQUIREMENTS docstring) is already a dependency of this project too, so
-nothing extra needs installing.
+Still loaded via `importlib` from an explicit file path rather than a
+normal `import` -- these remain independently-authored, independently-
+versioned scripts with their own top-level `main()`/argparse CLI, not
+modules written to be imported as a library, so importing them the
+normal way would run whatever import-time code they have and pollute
+this project's own namespace with their globals. `pymupdf` (their only
+real dependency, per each script's own REQUIREMENTS docstring) was
+already a dependency of this project before they were vendored, so
+nothing new needs installing.
 """
 
 from __future__ import annotations
@@ -53,8 +47,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-DEFAULT_GURPS_HYPERLINK_SCRIPT = Path("/path/to/hyperlink_pdf_universal.py")
-DEFAULT_MONGOOSE_HYPERLINK_SCRIPT = Path("/path/to/hyperlink_pdf_mongoose.py")
+GURPS_HYPERLINK_SCRIPT = Path(__file__).parent / "hyperlink_pdf_universal.py"
+MONGOOSE_HYPERLINK_SCRIPT = Path(__file__).parent / "hyperlink_pdf_mongoose.py"
 
 
 @dataclass
@@ -74,7 +68,7 @@ def _unlink_quietly(path: Path) -> None:
 
 
 def _load_hyperlink_pdf(script_path: Path):
-    """Imports a sibling script by absolute file path (not sys.path, not
+    """Imports a vendored script by absolute file path (not sys.path, not
     a package import) and returns its `hyperlink_pdf(in_path, out_path)`
     function -- the same function that script's own `main()` calls for
     single-file mode. A fresh module object every call, since each script
@@ -94,15 +88,15 @@ def _load_hyperlink_pdf(script_path: Path):
 
 def run_hyperlink_script(
     path: Path,
-    script_path: str | Path,
+    script_path: Path,
     log: Callable[[str], None] | None = None,
 ) -> HyperlinkResult:
-    """Runs a sibling script's `hyperlink_pdf()` against `path`,
+    """Runs one of the two vendored scripts' `hyperlink_pdf()` against
+    `path` (pass `GURPS_HYPERLINK_SCRIPT` or `MONGOOSE_HYPERLINK_SCRIPT`),
     re-saving over the same path. Never raises -- returns success=False
     with a message on any failure, matching `image_converter.py`'s own
     report-don't-crash convention (a caller processing a batch must not
-    have one malformed/unsupported PDF, or a misconfigured script path,
-    take down the whole run).
+    have one malformed/unsupported PDF take down the whole run).
 
     Saves to a temp file and atomically replaces `path` only once that
     succeeds (`os.replace()`, same filesystem via `dir=path.parent`),
@@ -117,15 +111,13 @@ def run_hyperlink_script(
     linked or skipped, and why) is kept, renamed to match `path`'s own
     stem, alongside the final file.
     """
-    script_path = Path(script_path)
     if not path.exists():
         return HyperlinkResult(success=False, message="file not found")
     if not script_path.exists():
-        return HyperlinkResult(
-            success=False,
-            message=f"hyperlink script not found at {script_path} -- set it via 'preferences'/the GUI's "
-            "Preferences tab, or in config.yaml",
-        )
+        # Should be unreachable -- these are vendored, committed files --
+        # but a from-scratch checkout with a broken/partial working tree
+        # is a real enough possibility to degrade instead of crashing.
+        return HyperlinkResult(success=False, message=f"expected vendored script missing: {script_path}")
 
     try:
         hyperlink_pdf = _load_hyperlink_pdf(script_path)

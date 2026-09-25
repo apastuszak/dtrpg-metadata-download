@@ -1,10 +1,8 @@
-"""Textual TUI for viewing/editing preferences.yaml (API key, DriveThruRPG
-account name, and the optional sibling-script paths for
---hyperlink-gurps/--hyperlink-mongoose/--convert-grayscale/
---background-layer/--remove-background) -- a small,
-standalone app, launched via the `preferences` subcommand, separate from
-tag_tui.py's TagApp since it's a wholly different concern (account
-settings, not tagging) with no reason to share a screen stack with it.
+"""Textual TUI for viewing/editing preferences.yaml (API key and
+DriveThruRPG account name) -- a small, standalone app, launched via the
+`preferences` subcommand, separate from tag_tui.py's TagApp since it's a
+wholly different concern (account settings, not tagging) with no reason
+to share a screen stack with it.
 
 Mirrors TagApp's own "auto-quit and print a plain summary to the real
 terminal" pattern (see tag_tui.py's module docstring) for the same
@@ -47,14 +45,6 @@ class PreferencesApp(App[None]):
             yield Checkbox("Show API key", value=False, id="show_key")
             yield Label("DriveThruRPG Name:")
             yield Input(value=self.prefs.dtrpg_name, id="dtrpg_name")
-            yield Label("GURPS hyperlink script path (optional):")
-            yield Input(value=self.prefs.gurps_hyperlink_script, id="gurps_hyperlink_script")
-            yield Label("Mongoose hyperlink script path (optional):")
-            yield Input(value=self.prefs.mongoose_hyperlink_script, id="mongoose_hyperlink_script")
-            yield Label("Grayscale script path (optional):")
-            yield Input(value=self.prefs.grayscale_script, id="grayscale_script")
-            yield Label("Background layer script path (optional):")
-            yield Input(value=self.prefs.background_layer_script, id="background_layer_script")
             with Horizontal():
                 yield Button("Save (ctrl+s)", id="save", variant="primary")
                 yield Button("Cancel (Esc)", id="cancel")
@@ -76,20 +66,7 @@ class PreferencesApp(App[None]):
     def action_save(self) -> None:
         api_key = self.query_one("#api_key", Input).value.strip()
         dtrpg_name = self.query_one("#dtrpg_name", Input).value.strip()
-        gurps_hyperlink_script = self.query_one("#gurps_hyperlink_script", Input).value.strip()
-        mongoose_hyperlink_script = self.query_one("#mongoose_hyperlink_script", Input).value.strip()
-        grayscale_script = self.query_one("#grayscale_script", Input).value.strip()
-        background_layer_script = self.query_one("#background_layer_script", Input).value.strip()
-        save_preferences(
-            Preferences(
-                api_key=api_key, dtrpg_name=dtrpg_name,
-                gurps_hyperlink_script=gurps_hyperlink_script,
-                mongoose_hyperlink_script=mongoose_hyperlink_script,
-                grayscale_script=grayscale_script,
-                background_layer_script=background_layer_script,
-            ),
-            self.preferences_path,
-        )
+        save_preferences(Preferences(api_key=api_key, dtrpg_name=dtrpg_name), self.preferences_path)
         self.exit(message=f"Saved preferences to {self.preferences_path}")
 
     def action_cancel(self) -> None:

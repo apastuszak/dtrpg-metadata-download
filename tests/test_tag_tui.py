@@ -42,7 +42,7 @@ import sys
 import tempfile
 import traceback
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pikepdf
 from textual.widgets import Input, TextArea
@@ -51,6 +51,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from provenance import ProductMetadata, Source  # noqa: E402
 from tag_tui import TagApp  # noqa: E402
+from watermark_removal import WatermarkDetection, WatermarkRemovalResult  # noqa: E402
 
 
 def _client(**overrides) -> MagicMock:
@@ -413,6 +414,136 @@ async def test_batch_default_series_prefilled():
     print("PASS: batch_default_series_prefilled")
 
 
+async def test_watermark_detected_and_removed():
+    # detect_watermark()/remove_watermark() themselves are verified with
+    # ad hoc scripts against the real sibling script (see
+    # watermark_removal.py's own module docstring and CLAUDE.md's "No
+    # test suite" section on why pikepdf/PDF-writing logic isn't tested
+    # here) -- this only guards the modal's own wiring: it must appear
+    # before matching starts, and confirming it must call
+    # remove_watermark() with exactly the detected text before the rest
+    # of the flow runs. Mocked the same way DtrpgClient is everywhere
+    # else in this file, so this test doesn't depend on the sibling
+    # project (or its real absolute path, which has no business in a
+    # committed file) being present on whatever machine runs it.
+    with tempfile.TemporaryDirectory() as tmp:
+        pdf = Path(tmp) / "Watermarked.pdf"
+        pikepdf.new().save(pdf)
+        detection = WatermarkDetection(text="www.drivethrurpg.com", page_count=10, total_pages=10)
+        client = _client(search_library=[ProductMetadata(title="X", description="d", source=Source.DTRPG_LIBRARY, product_id="1")])
+        app = TagApp(pdfs=[pdf], client=client, manual_overrides={}, known_urls={},
+                     thresholds={}, bookorbit_mode=False, rename=False, root_mode=False)
+        with (
+            patch("tag_tui.detect_watermark", return_value=detection) as mock_detect,
+            patch("tag_tui.remove_watermark", return_value=WatermarkRemovalResult(success=True, removed=10)) as mock_remove,
+        ):
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                # Watermark modal must appear before the candidate screen.
+                assert "WatermarkModal" in type(pilot.app.screen).__name__
+                labels = [str(w.render()) for w in pilot.app.screen.query("Label")]
+                assert any("www.drivethrurpg.com" in label for label in labels), labels
+                assert any("10 of 10" in label for label in labels), labels
+                await pilot.click("#yes")
+                await pilot.pause()
+                # Normal candidate-pick flow continues after the modal closes.
+                await pilot.press("enter")
+                await pilot.pause()
+                await pilot.press("enter")
+                await pilot.pause(delay=0.2)
+
+        mock_detect.assert_called_once_with(pdf)
+        mock_remove.assert_called_once_with(pdf, "www.drivethrurpg.com")
+        assert any("Removed watermark" in line for line in app.history), app.history
+    print("PASS: watermark_detected_and_removed")
+
+
+async def test_watermark_removal_backs_up_original_first():
+    # A real bug, caught in review: write_metadata() makes the one-time
+    # .bak backup, but that runs well *after* watermark removal (which
+    # happens before matching even starts) -- so without an explicit
+    # backup() call in the watermark-removal path itself, the .bak ended
+    # up capturing the *watermark-removed* file instead of the true
+    # pre-tagging original. Guards the fix directly: remove_watermark()'s
+    # mock asserts the backup already exists, with the pre-removal
+    # content, at the moment it's called -- not just that a .bak exists
+    # by the end of the run, which wouldn't distinguish "backed up before
+    # removal" from "backed up after" (write_metadata() would have made
+    # one either way once matching/writing actually happened).
+    with tempfile.TemporaryDirectory() as tmp:
+        pdf = Path(tmp) / "Watermarked.pdf"
+        pikepdf.new().save(pdf)
+        original_bytes = pdf.read_bytes()
+        detection = WatermarkDetection(text="www.drivethrurpg.com", page_count=1, total_pages=1)
+        client = _client()
+
+        def fake_remove_watermark(path, text, log=None):
+            bak = path.with_suffix(".pdf.bak")
+            assert bak.exists(), "backup() must run before remove_watermark() is called"
+            assert bak.read_bytes() == original_bytes, "backup must capture the pre-removal original, not a copy made later"
+            return WatermarkRemovalResult(success=True, removed=1)
+
+        app = TagApp(pdfs=[pdf], client=client, manual_overrides={}, known_urls={},
+                     thresholds={}, bookorbit_mode=False, rename=False, root_mode=False)
+        with (
+            patch("tag_tui.detect_watermark", return_value=detection),
+            patch("tag_tui.remove_watermark", side_effect=fake_remove_watermark) as mock_remove,
+        ):
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                await pilot.click("#yes")
+                await pilot.pause()
+                await pilot.press("escape")  # skip at the candidate screen -- backup already happened by now
+                await pilot.pause(delay=0.2)
+
+        mock_remove.assert_called_once()
+    print("PASS: watermark_removal_backs_up_original_first")
+
+
+async def test_watermark_declined_no_removal():
+    with tempfile.TemporaryDirectory() as tmp:
+        pdf = Path(tmp) / "Watermarked.pdf"
+        pikepdf.new().save(pdf)
+        detection = WatermarkDetection(text="www.drivethrurpg.com", page_count=5, total_pages=5)
+        client = _client(search_library=[ProductMetadata(title="X", description="d", source=Source.DTRPG_LIBRARY, product_id="1")])
+        app = TagApp(pdfs=[pdf], client=client, manual_overrides={}, known_urls={},
+                     thresholds={}, bookorbit_mode=False, rename=False, root_mode=False)
+        with (
+            patch("tag_tui.detect_watermark", return_value=detection),
+            patch("tag_tui.remove_watermark") as mock_remove,
+        ):
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                await pilot.click("#no")
+                await pilot.pause()
+                await pilot.press("escape")  # skip at the candidate screen
+                await pilot.pause(delay=0.2)
+
+        mock_remove.assert_not_called()
+        assert not any("Removed watermark" in line for line in app.history), app.history
+    print("PASS: watermark_declined_no_removal")
+
+
+async def test_no_watermark_modal_when_none_detected():
+    # detect_watermark() returning None (a real PDF with nothing detected)
+    # must be fully invisible -- straight to the candidate screen, no
+    # modal, matching every existing test above (none of which mock
+    # detect_watermark at all, and all of them already passed before this
+    # feature existed).
+    with tempfile.TemporaryDirectory() as tmp:
+        pdf = Path(tmp) / "Clean.pdf"
+        pikepdf.new().save(pdf)
+        client = _client(search_library=[ProductMetadata(title="X", description="d", source=Source.DTRPG_LIBRARY, product_id="1")])
+        app = TagApp(pdfs=[pdf], client=client, manual_overrides={}, known_urls={},
+                     thresholds={}, bookorbit_mode=False, rename=False, root_mode=False)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            assert "WatermarkModal" not in type(pilot.app.screen).__name__
+            await pilot.press("escape")
+            await pilot.pause(delay=0.2)
+    print("PASS: no_watermark_modal_when_none_detected")
+
+
 TESTS = [
     test_candidate_pick_write,
     test_manual_override_confirm,
@@ -427,6 +558,10 @@ TESTS = [
     test_rename_flag,
     test_bookorbit_mode,
     test_batch_default_series_prefilled,
+    test_watermark_detected_and_removed,
+    test_watermark_removal_backs_up_original_first,
+    test_watermark_declined_no_removal,
+    test_no_watermark_modal_when_none_detected,
 ]
 
 

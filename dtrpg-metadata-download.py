@@ -78,21 +78,19 @@
         pikepdf writes.
 
     --convert-grayscale (on write-pdfs/all/tag): converts the whole PDF
-        to grayscale before metadata is written, via a separate sibling
-        project's script (see rpg_grayscale.py) whose path comes from
-        config.yaml's grayscale_script key. Requires the real Ghostscript
-        binary ('gs') on PATH -- a system package, not something PEP
-        723/uv/pip can install. Off by default, and mutually exclusive
-        with --convert-images (the opposite operation on the same
-        images) -- the GUI enforces this by unchecking one when the
-        other is checked.
+        to grayscale before metadata is written, via a vendored script
+        (see rpg_grayscale.py/convert_pdf_to_grayscale.py). Requires the
+        real Ghostscript binary ('gs') on PATH -- a system package, not
+        something PEP 723/uv/pip can install. Off by default, and
+        mutually exclusive with --convert-images (the opposite operation
+        on the same images) -- the GUI enforces this by unchecking one
+        when the other is checked.
 
     --hyperlink-gurps / --hyperlink-mongoose (on write-pdfs/tag):
         auto-hyperlinks in-text page/chapter references (see
-        rpg_hyperlink.py), via a separate sibling project's script whose
-        path comes from config.yaml's gurps_hyperlink_script/
-        mongoose_hyperlink_script keys respectively. Off by default, and
-        a machine-specific integration -- tuned for one publisher's own
+        rpg_hyperlink.py), via vendored scripts (hyperlink_pdf_universal.py/
+        hyperlink_pdf_mongoose.py). Off by default, and a
+        publisher-specific integration -- tuned for one publisher's own
         reference conventions each (GURPS / Mongoose Publishing's
         Traveller line), not a general feature. Both run before the
         embedded-metadata write, same reasoning as --convert-images.
@@ -100,14 +98,24 @@
     --background-layer / --remove-background (on write-pdfs/all/tag):
         tags each page's full-page decorative background as a toggleable
         Optional Content Group layer, or deletes it outright, via a
-        separate sibling project's script (see rpg_background_layer.py)
-        whose path comes from config.yaml's background_layer_script key.
-        Off by default, mutually exclusive with each other, and a
-        machine-specific integration tuned for one specific PDF line
-        (Castles and Crusades) -- not a general feature. Runs first among
-        the optional pre-metadata-write steps, before --convert-images/
-        --convert-grayscale/hyperlinking, all of which still run before
-        the final embedded-metadata write either way.
+        vendored script (see rpg_background_layer.py/
+        castles_and_crusades_background_layer.py). Off by default,
+        mutually exclusive with each other, and tuned for one specific
+        PDF line (Castles and Crusades) -- not a general feature. Runs
+        first among the optional pre-metadata-write steps, before
+        --convert-images/--convert-grayscale/hyperlinking, all of which
+        still run before the final embedded-metadata write either way.
+
+    Watermark detection (tag only, no flag): every file `tag` processes
+        is checked for a DriveThruRPG-style corner watermark before
+        anything else happens to it, via a vendored script (see
+        watermark_removal.py/remove_dtrpg_watermarks.py) -- if one is
+        found, you're asked (with the detected text and page count)
+        whether to remove it before matching/writing even starts.
+        Removal, if accepted, runs before every other pre-write step for
+        the same reason --background-layer does. No CLI flag or GUI
+        checkbox -- always checked; not available on write-pdfs/all,
+        which have no way to ask anything.
 
     rename PDF_PATH | rename --root PATH [--dry-run]
         Rename a single already-tagged PDF, or every one under --root
@@ -156,12 +164,9 @@ from textual.logging import TextualHandler
 from dtrpg_client import DtrpgClient
 from matcher import load_known_urls, load_manual_overrides, run_scan_batch, scan_pdfs
 from pdf_writer import write_approved
-from preferences import DEFAULT_PREFERENCES_PATH, load_preferences, resolve_api_key, resolve_path
+from preferences import DEFAULT_PREFERENCES_PATH, load_preferences, resolve_api_key
 from renamer import apply_rename, plan_rename
 from review import load_review, save_review
-from rpg_background_layer import DEFAULT_BACKGROUND_LAYER_SCRIPT
-from rpg_grayscale import DEFAULT_GRAYSCALE_SCRIPT
-from rpg_hyperlink import DEFAULT_GURPS_HYPERLINK_SCRIPT, DEFAULT_MONGOOSE_HYPERLINK_SCRIPT
 from tag_tui import TagApp
 
 logger = logging.getLogger("dtrpg-metadata-download")
@@ -178,10 +183,6 @@ _CONFIG_RELATIVE_PATH_KEYS = (
     "review_csv",
     "manual_overrides",
     "preferences",
-    "gurps_hyperlink_script",
-    "mongoose_hyperlink_script",
-    "grayscale_script",
-    "background_layer_script",
 )
 
 
@@ -217,26 +218,6 @@ def build_client(config: dict) -> DtrpgClient:
         api_key=api_key,
         cache_dir=config.get("data_dir", "data"),
         catalog_rate_limit_seconds=config.get("dtrpg", {}).get("catalog_rate_limit_seconds", 1.0),
-    )
-
-
-def _resolve_script_paths(config: dict) -> tuple[str, str, str, str]:
-    """(gurps_hyperlink_script, mongoose_hyperlink_script, grayscale_script,
-    background_layer_script), each resolved via preferences.resolve_path()
-    -- a saved Preferences value wins, then config.yaml's own key, then
-    the hardcoded placeholder default. Shared by cmd_write_pdfs/cmd_all
-    (via write_approved()) and cmd_tag (via TagApp) so both read these
-    the same way."""
-    prefs = load_preferences(config.get("preferences", DEFAULT_PREFERENCES_PATH))
-    return (
-        resolve_path(prefs.gurps_hyperlink_script, config.get("gurps_hyperlink_script"), DEFAULT_GURPS_HYPERLINK_SCRIPT),
-        resolve_path(
-            prefs.mongoose_hyperlink_script, config.get("mongoose_hyperlink_script"), DEFAULT_MONGOOSE_HYPERLINK_SCRIPT
-        ),
-        resolve_path(prefs.grayscale_script, config.get("grayscale_script"), DEFAULT_GRAYSCALE_SCRIPT),
-        resolve_path(
-            prefs.background_layer_script, config.get("background_layer_script"), DEFAULT_BACKGROUND_LAYER_SCRIPT
-        ),
     )
 
 
@@ -297,16 +278,11 @@ def cmd_write_pdfs(args: argparse.Namespace, config: dict) -> None:
         print("No approved/auto-accepted rows to write.")
         return
 
-    gurps_hyperlink_script, mongoose_hyperlink_script, grayscale_script, background_layer_script = (
-        _resolve_script_paths(config)
-    )
     results = write_approved(
         rows, root, bookorbit_mode=args.bookorbit_mode, convert_images=args.convert_images,
-        convert_grayscale=args.convert_grayscale, grayscale_script=grayscale_script,
+        convert_grayscale=args.convert_grayscale,
         background_layer=args.background_layer, remove_background=args.remove_background,
-        background_layer_script=background_layer_script,
-        hyperlink_gurps=args.hyperlink_gurps, gurps_hyperlink_script=gurps_hyperlink_script,
-        hyperlink_mongoose=args.hyperlink_mongoose, mongoose_hyperlink_script=mongoose_hyperlink_script,
+        hyperlink_gurps=args.hyperlink_gurps, hyperlink_mongoose=args.hyperlink_mongoose,
     )
     succeeded = sum(1 for r in results if r.success)
     print(f"Wrote metadata to {succeeded}/{len(results)} approved files")
@@ -396,9 +372,6 @@ def cmd_tag(args: argparse.Namespace, config: dict) -> None:
         client = build_client(config)
         known_urls = load_known_urls(path.parent)
 
-    gurps_hyperlink_script, mongoose_hyperlink_script, grayscale_script, background_layer_script = (
-        _resolve_script_paths(config)
-    )
     TagApp(
         pdfs=pdfs,
         client=client,
@@ -408,14 +381,10 @@ def cmd_tag(args: argparse.Namespace, config: dict) -> None:
         bookorbit_mode=args.bookorbit_mode,
         convert_images=args.convert_images,
         convert_grayscale=args.convert_grayscale,
-        grayscale_script=grayscale_script,
         background_layer=args.background_layer,
         remove_background=args.remove_background,
-        background_layer_script=background_layer_script,
         hyperlink_gurps=args.hyperlink_gurps,
-        gurps_hyperlink_script=gurps_hyperlink_script,
         hyperlink_mongoose=args.hyperlink_mongoose,
-        mongoose_hyperlink_script=mongoose_hyperlink_script,
         rename=args.rename,
         root_mode=bool(args.root),
     ).run()
@@ -483,28 +452,25 @@ def main() -> None:
         "Convert CMYK/grayscale/JPEG2000 images in the PDF to RGB JPEG before writing metadata"
     )
     convert_grayscale_help = (
-        "Convert the whole PDF to grayscale before writing metadata, via a separate sibling script "
-        "(see rpg_grayscale.py; path set via 'preferences'/the GUI's Preferences tab, or grayscale_script "
-        "in config.yaml; requires Ghostscript ('gs') on PATH). Mutually exclusive with --convert-images."
+        "Convert the whole PDF to grayscale before writing metadata, via a vendored script "
+        "(see rpg_grayscale.py; requires Ghostscript ('gs') on PATH). Mutually exclusive with "
+        "--convert-images."
     )
     hyperlink_gurps_help = (
-        "Auto-hyperlink in-text page/chapter references via a separate sibling GURPS-specific script "
-        "(see rpg_hyperlink.py; path set via 'preferences'/the GUI's Preferences tab, or "
-        "gurps_hyperlink_script in config.yaml)"
+        "Auto-hyperlink in-text page/chapter references via a vendored GURPS-specific script "
+        "(see rpg_hyperlink.py)"
     )
     hyperlink_mongoose_help = (
-        "Auto-hyperlink in-text page/chapter references via a separate sibling Mongoose-Traveller-"
-        "specific script (see rpg_hyperlink.py; path set via 'preferences'/the GUI's Preferences tab, or "
-        "mongoose_hyperlink_script in config.yaml)"
+        "Auto-hyperlink in-text page/chapter references via a vendored Mongoose-Traveller-"
+        "specific script (see rpg_hyperlink.py)"
     )
     background_layer_help = (
         "Tag each page's full-page decorative background as a toggleable Optional Content Group layer, "
-        "via a separate sibling script (see rpg_background_layer.py; path set via 'preferences'/the "
-        "GUI's Preferences tab, or background_layer_script in config.yaml). For Castles and Crusades "
+        "via a vendored script (see rpg_background_layer.py). For Castles and Crusades "
         "rulebooks only. Mutually exclusive with --remove-background."
     )
     remove_background_help = (
-        "Delete each page's full-page decorative background outright, via the same sibling script as "
+        "Delete each page's full-page decorative background outright, via the same vendored script as "
         "--background-layer. For Castles and Crusades rulebooks only. Mutually exclusive with "
         "--background-layer."
     )
