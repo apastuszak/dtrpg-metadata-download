@@ -22,6 +22,7 @@ the way its own author runs it from a terminal:
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -102,6 +103,16 @@ def apply_background_layer(
             message = stderr_lines[-1] if stderr_lines else f"exited with code {result.returncode}"
             return BackgroundLayerResult(success=False, message=message)
 
+        # mkstemp() creates its file 0600, and the script's pikepdf save
+        # writes into that existing file, keeping 0600 -- without this the
+        # book would end up owner-only after the swap (unreadable to a
+        # reader app running as another user, e.g. in Docker). Best-effort:
+        # some network filesystems refuse chmod, and that must not throw
+        # away an otherwise-successful step.
+        try:
+            shutil.copymode(path, tmp_out_path)
+        except OSError:
+            pass
         os.replace(tmp_out_path, path)
         tmp_out_path = None
         return BackgroundLayerResult(success=True)

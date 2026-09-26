@@ -42,6 +42,7 @@ import contextlib
 import importlib.util
 import io
 import os
+import shutil
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -141,6 +142,11 @@ def run_hyperlink_script(
                 if line.strip():
                     log(line)
 
+        # Keep the book's original permissions (best-effort) -- see rpg_background_layer.py.
+        try:
+            shutil.copymode(path, tmp_out_path)
+        except OSError:
+            pass
         os.replace(tmp_out_path, path)
         tmp_out_path = None  # already moved -- don't clean it up in finally
 

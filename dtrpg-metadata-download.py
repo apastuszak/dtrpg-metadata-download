@@ -7,7 +7,7 @@
 #     "PyYAML>=6.0",
 #     "requests>=2.31",
 #     "lxml>=4.9",
-#     "textual>=0.60",
+#     "textual>=4.0",
 #     "pymupdf>=1.24",
 #     "pillow>=10.0",
 #     "PyQt6>=6.6",
@@ -86,7 +86,7 @@
         on the same images) -- the GUI enforces this by unchecking one
         when the other is checked.
 
-    --hyperlink-gurps / --hyperlink-mongoose (on write-pdfs/tag):
+    --hyperlink-gurps / --hyperlink-mongoose (on write-pdfs/all/tag):
         auto-hyperlinks in-text page/chapter references (see
         rpg_hyperlink.py), via vendored scripts (hyperlink_pdf_universal.py/
         hyperlink_pdf_mongoose.py). Off by default, and a
@@ -119,7 +119,7 @@
 
     rename PDF_PATH | rename --root PATH [--dry-run]
         Rename a single already-tagged PDF, or every one under --root
-        (plus its .bak/.opf/.metadata.json sidecars), to
+        (plus its .bak/.opf/.metadata.json/_link_report.csv companions), to
         "<series> - <title>.pdf" (or just "<title>.pdf" with no series),
         read from each file's .metadata.json sidecar. Untagged files (no
         sidecar/no title) and files already named correctly are skipped;
@@ -297,7 +297,7 @@ def cmd_all(args: argparse.Namespace, config: dict) -> None:
 
 
 def _rename_one(pdf_path: Path, dry_run: bool) -> str:
-    """Rename a single PDF (plus its .bak/.opf/.metadata.json companions),
+    """Rename a single PDF (plus its .bak/.opf/.metadata.json/_link_report.csv companions),
     print the outcome, and return 'renamed'/'skipped'/'failed' for the
     caller's tally."""
     plan = plan_rename(pdf_path)

@@ -50,7 +50,7 @@ With `--root`, before the per-file loop starts you're asked once for a series na
 
 Once the run finishes (or you quit a batch early with `q`), the TUI closes itself automatically and prints a plain summary line for every file — no "press q to exit" screen to dismiss.
 
-Add `--rename` to tag and rename in one pass — right after each successful write, the file (and its `.opf`/`.metadata.json`/`.bak` siblings) is immediately renamed to `<series> - <title>.pdf`, the same result you'd get running `rename` on it afterward. Applies to every match path (candidate-pick, manual override, known URL, or manual entry); skipped for anything not actually written (a declined confirm, a cancelled manual entry, a failed write).
+Add `--rename` to tag and rename in one pass — right after each successful write, the file (and its `.opf`/`.metadata.json`/`.bak`/`_link_report.csv` siblings) is immediately renamed to `<series> - <title>.pdf`, the same result you'd get running `rename` on it afterward. Applies to every match path (candidate-pick, manual override, known URL, or manual entry); skipped for anything not actually written (a declined confirm, a cancelled manual entry, a failed write).
 
 ### Batch mode with a review step
 
@@ -74,7 +74,7 @@ If you'd rather review matches in bulk before anything gets written, use the CSV
 ./dtrpg-metadata-download.py rename --root "/path/to/rpg/pdfs"
 ```
 
-Renames each already-tagged PDF to `<series> - <title>.pdf` (or just `<title>.pdf` when there's no series), reading title/series back from that file's `.metadata.json` sidecar — the only one of the three outputs that's plain, flat JSON, since Calibre's/BookOrbit's embedded XMP series fields are qualified/structured properties that can't be read back reliably through pikepdf's public API (see `renamer.py`). The `.pdf.bak`, `.opf`, and `.metadata.json` siblings are renamed right along with the PDF, since they're all named from its stem. Files with no sidecar (never tagged) or already named correctly are skipped; if the computed name collides with an existing file, that one's left alone and reported as failed rather than overwritten. If renaming one file's companion group fails partway through (permissions, a file locked by another app), whatever in that group already succeeded is rolled back rather than left split across old and new names, and the batch continues with the next file instead of aborting.
+Renames each already-tagged PDF to `<series> - <title>.pdf` (or just `<title>.pdf` when there's no series), reading title/series back from that file's `.metadata.json` sidecar — the only one of the three outputs that's plain, flat JSON, since Calibre's/BookOrbit's embedded XMP series fields are qualified/structured properties that can't be read back reliably through pikepdf's public API (see `renamer.py`). The `.pdf.bak`, `.opf`, `.metadata.json`, and (if hyperlinking was used) `_link_report.csv` siblings are renamed right along with the PDF, since they're all named from its stem. Files with no sidecar (never tagged) or already named correctly are skipped; if the computed name collides with an existing file, that one's left alone and reported as failed rather than overwritten. If renaming one file's companion group fails partway through (permissions, a file locked by another app), whatever in that group already succeeded is rolled back rather than left split across old and new names, and the batch continues with the next file instead of aborting.
 
 ### Manual overrides
 
@@ -155,7 +155,7 @@ Available on `tag`, `write-pdfs`, and `all` (and as checkboxes in the GUI's Tag/
 
 #### Watermark detection and removal
 
-Available on `tag` only (both the terminal UI and the GUI's Tag tab) — no CLI flag or checkbox, and nothing to configure. Every file `tag` processes is checked for a DriveThruRPG-style corner watermark *before anything else happens to it*, even before matching starts, using a vendored script (see `watermark_removal.py`/`remove_dtrpg_watermarks.py`). If one's found, you're asked — with the detected text and how many pages it's on — whether to remove it; declining leaves the file untouched. Not available on `write-pdfs`/`all`, since those run unattended with no way to ask a question.
+Available on `tag` only (both the terminal UI and the GUI's Tag tab) — no CLI flag or checkbox, and nothing to configure. Every file `tag` processes is checked for a DriveThruRPG-style corner watermark *before anything else happens to it*, even before matching starts, using a vendored script (see `watermark_removal.py`/`remove_dtrpg_watermarks.py`). The check takes a few seconds per book. If a line repeats in the lower-left corner of most pages, you're asked — with that text and how many pages it's on — whether to remove it; declining leaves the file untouched. Look at the text before saying yes: a publisher's own copyright footer can pass the same test, especially in a very short PDF. If you remove something by mistake, the original is in the `.pdf.bak` backup, made before removal. Not available on `write-pdfs`/`all`, since those run unattended with no way to ask a question.
 
 ### 3. `<name>.metadata.json` — Grimmory sidecar
 

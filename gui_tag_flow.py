@@ -105,7 +105,7 @@ from gui_app import (
     _StyledTextEdit,
     build_client_safe,
 )
-from watermark_removal import detect_watermark, remove_watermark
+from watermark_removal import describe_detection, detect_watermark, remove_watermark
 
 # ---------------------------------------------------------------------------
 # Orchestration -- runs on a background thread. Framework-agnostic (no Qt
@@ -190,19 +190,21 @@ class TagFlowController:
         if self.root_mode and len(self.pdfs) > 1:
             default_series = self._ask("batch_series", {})
 
+        stopped = False
         for i, path in enumerate(self.pdfs, 1):
-            stop = self._process_one(path, self._progress(i), default_series)
-            if stop:
-                self._log("Stopped.")
+            if self._process_one(path, self._progress(i), default_series):
+                stopped = True
                 break
 
-        self._log("Run complete." if not self.stop_event.is_set() else "Stopped.")
+        self._log("Stopped." if stopped or self.stop_event.is_set() else "Run complete.")
 
     def _maybe_remove_watermark(self, path: Path) -> None:
         """Runs before anything else about `path` -- see tag_tui.py's
         own TagApp._maybe_remove_watermark() for the full reasoning
         (same ordering requirement, same "no separate on/off flag"
         design, ported near-verbatim like the rest of this class)."""
+        # Log widget only, not self.history -- progress, not an outcome.
+        self._log_cb(f"Checking {path.name} for a watermark...")
         detection = detect_watermark(path)
         if detection is None:
             return
@@ -504,12 +506,12 @@ class WatermarkDialog(QDialog):
         super().__init__(parent)
         book_title = payload["book_title"]
         detection = payload["detection"]
-        self.setWindowTitle("Watermark detected")
+        self.setWindowTitle("Possible watermark")
         self.value: bool = False
 
         layout = QVBoxLayout(self)
-        layout.addWidget(_plain_label(f"Watermark detected in {book_title}:"))
-        layout.addWidget(_plain_label(f'"{detection.text}" on {detection.page_count} of {detection.total_pages} page(s)'))
+        for line in describe_detection(book_title, detection):
+            layout.addWidget(_plain_label(line))
         buttons = QHBoxLayout()
         self.remove_button = QPushButton("Remove it")
         self.remove_button.setDefault(True)
@@ -538,7 +540,7 @@ class CandidateDialog(QDialog):
         layout = QVBoxLayout(self)
         self.list_widget: QListWidget | None = None
         if self.candidates:
-            layout.addWidget(QLabel(f"{progress} Choose a Book from the List Provided ({path.name}):".strip()))
+            layout.addWidget(_plain_label(f"{progress} Choose a Book from the List Provided ({path.name}):".strip()))
             self.list_widget = QListWidget()
             for meta, score in self.candidates:
                 self.list_widget.addItem(format_candidate_lines(meta, score).splitlines()[0])
@@ -546,7 +548,7 @@ class CandidateDialog(QDialog):
             self.list_widget.itemDoubleClicked.connect(lambda _item: self._pick())
             layout.addWidget(self.list_widget, 1)
         else:
-            layout.addWidget(QLabel(f"{progress} No candidates found for {path.name}.".strip()))
+            layout.addWidget(_plain_label(f"{progress} No candidates found for {path.name}.".strip()))
 
         buttons = QHBoxLayout()
         self.pick_button: QPushButton | None = None
@@ -649,7 +651,7 @@ class ManualEntryDialog(QDialog):
         self.value: ManualEntryResult = ManualEntryResult(action="cancel")
 
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel(f"{progress} Enter metadata for {path.name}".strip()))
+        layout.addWidget(_plain_label(f"{progress} Enter metadata for {path.name}".strip()))
 
         form = QFormLayout()
         # QFormLayout's default field growth policy sizes each field to its

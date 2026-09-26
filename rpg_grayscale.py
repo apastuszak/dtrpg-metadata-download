@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import shutil
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -125,6 +126,11 @@ def convert_pdf_grayscale(
             log(f"Restoring metadata/page labels in {path.name}...")
         restore_metadata_and_labels(path, tmp_gray_path, tmp_final_path, keep_producer=False, keep_color_pages=set())
 
+        # Keep the book's original permissions (best-effort) -- see rpg_background_layer.py.
+        try:
+            shutil.copymode(path, tmp_final_path)
+        except OSError:
+            pass
         os.replace(tmp_final_path, path)
         tmp_final_path = None
 

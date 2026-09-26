@@ -51,6 +51,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal
 
+from rich.text import Text
 from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -65,7 +66,7 @@ from pdf_writer import backup, write_metadata
 from provenance import ProductMetadata, Source, Status
 from renamer import apply_rename, plan_rename
 from review import ReviewRow
-from watermark_removal import WatermarkDetection, detect_watermark, remove_watermark
+from watermark_removal import WatermarkDetection, describe_detection, detect_watermark, remove_watermark
 
 # ---------------------------------------------------------------------------
 # Pure helpers -- no Textual dependency, so they're testable without
@@ -270,7 +271,7 @@ class SeriesModal(ModalScreen[str]):
 
     def compose(self) -> ComposeResult:
         with Vertical():
-            yield Label(f"Series for {self.book_title}:")
+            yield Label(f"Series for {self.book_title}:", markup=False)
             yield Label("Leave blank for no series.")
             yield Input(id="series")
             yield Button("Continue", id="continue", variant="primary")
@@ -308,10 +309,9 @@ class WatermarkModal(ModalScreen[bool]):
         self.detection = detection
 
     def compose(self) -> ComposeResult:
-        d = self.detection
         with Vertical():
-            yield Label(f"Watermark detected in {self.book_title}:")
-            yield Label(f'"{d.text}" on {d.page_count} of {d.total_pages} page(s)')
+            for line in describe_detection(self.book_title, self.detection):
+                yield Label(line, markup=False)
             with Horizontal():
                 yield Button("Remove it", id="yes", variant="primary")
                 yield Button("Leave it", id="no")
@@ -344,16 +344,18 @@ class CandidateScreen(Screen[CandidateResult]):
         yield Header()
         with VerticalScroll():
             if self.candidates:
-                yield Label(f"{self.progress} -- Choose a Book from the List Provided ({self.path.name}):")
+                yield Label(f"{self.progress} -- Choose a Book from the List Provided ({self.path.name}):", markup=False)
                 yield OptionList(
                     *[
-                        Option(format_candidate_lines(meta, score), id=str(i))
+                        # Text(), not a bare str: OptionList parses a str
+                        # prompt as markup, and these are catalog titles.
+                        Option(Text(format_candidate_lines(meta, score)), id=str(i))
                         for i, (meta, score) in enumerate(self.candidates)
                     ],
                     id="candidates",
                 )
             else:
-                yield Label(f"{self.progress} -- No candidates found for {self.path.name}.")
+                yield Label(f"{self.progress} -- No candidates found for {self.path.name}.", markup=False)
             yield Label("Paste a DriveThruRPG URL, or type id:PRODUCT_ID (Enter or Use URL to submit):")
             yield Input(id="url", placeholder="https://www.drivethrurpg.com/... or id:12345")
             with Horizontal():
@@ -434,13 +436,13 @@ class ManualEntryScreen(Screen[ManualEntryResult]):
     def compose(self) -> ComposeResult:
         yield Header()
         with VerticalScroll():
-            yield Static(f"{self.progress} -- Enter metadata for {self.path.name}")
+            yield Static(f"{self.progress} -- Enter metadata for {self.path.name}", markup=False)
             yield Label("Title (required):")
             yield Input(id="title")
             yield Label("Publisher:")
             yield Input(id="publisher")
             if self.default_series is not None:
-                yield Label(f"Series (locked to this batch's answer): {self.default_series or '(blank)'}")
+                yield Label(f"Series (locked to this batch's answer): {self.default_series or '(blank)'}", markup=False)
             else:
                 yield Label("Series:")
                 yield Input(id="series")
@@ -522,11 +524,11 @@ class ConfirmScreen(Screen[ConfirmResult]):
     def compose(self) -> ComposeResult:
         yield Header()
         with VerticalScroll():
-            yield Static(self.progress)
-            yield Static(self.header)
+            yield Static(self.progress, markup=False)
+            yield Static(self.header, markup=False)
             if self.meta.authors:
-                yield Static(f"authors: {self.meta.authors_str()}")
-            yield Static(f"source: {self.meta.source.value if hasattr(self.meta.source, 'value') else self.meta.source}")
+                yield Static(f"authors: {self.meta.authors_str()}", markup=False)
+            yield Static(f"source: {self.meta.source.value if hasattr(self.meta.source, 'value') else self.meta.source}", markup=False)
             yield Label("Title (required):")
             yield Input(id="title", value=self.meta.title)
             yield Label("Publisher:")
@@ -643,7 +645,7 @@ class TagApp(App[None]):
 
     def _log(self, line: str) -> None:
         self.history.append(line)
-        self.notify(line, timeout=4)
+        self.notify(line, timeout=4, markup=False)
 
     def _progress(self, i: int) -> str:
         return f"[{i}/{len(self.pdfs)}]" if self.root_mode else ""
@@ -678,6 +680,10 @@ class TagApp(App[None]):
         only gate, matching "ask the user" being the whole point of this
         feature rather than one more flag to also remember to set.
         """
+        # A toast only, not self._log() -- this is progress, not an
+        # outcome worth a line in the run summary. Without it, the ~5s
+        # text scan shows a blank screen that looks like a hang.
+        self.notify(f"Checking {path.name} for a watermark...", timeout=6, markup=False)
         detection = await self._call(detect_watermark, path)
         if detection is None:
             return

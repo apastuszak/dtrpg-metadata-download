@@ -7,7 +7,7 @@
 #     "PyYAML>=6.0",
 #     "requests>=2.31",
 #     "lxml>=4.9",
-#     "textual>=0.60",
+#     "textual>=4.0",
 #     "pymupdf>=1.24",
 #     "pillow>=10.0",
 #     "PyQt6>=6.6",

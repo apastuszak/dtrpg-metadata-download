@@ -13,9 +13,10 @@ fully regenerated on every write (no staleness risk), and already
 carries exactly `title` and `series.name`.
 
 Renaming a PDF means renaming everything else that shares its stem too
-(sidecar_writer.py and pdf_writer.py's own backup logic both derive
-their filenames from the PDF's stem) — `.pdf.bak`, `.opf`, and
-`.metadata.json` all move together with the PDF, or none of them do.
+(sidecar_writer.py, pdf_writer.py's own backup logic, and rpg_hyperlink.py
+all derive their filenames from the PDF's stem) — `.pdf.bak`, `.opf`,
+`.metadata.json`, and `_link_report.csv` all move together with the PDF,
+or none of them do.
 """
 
 from __future__ import annotations
@@ -120,6 +121,8 @@ def _companion_pairs(pdf_path: Path, new_pdf_path: Path) -> list[tuple[Path, Pat
         (pdf_path.with_suffix(pdf_path.suffix + ".bak"), new_pdf_path.with_suffix(new_pdf_path.suffix + ".bak")),
         (pdf_path.with_suffix(".opf"), new_pdf_path.with_suffix(".opf")),
         (pdf_path.parent / f"{pdf_path.stem}.metadata.json", new_pdf_path.parent / f"{new_pdf_path.stem}.metadata.json"),
+        # Written by --hyperlink-gurps/--hyperlink-mongoose (rpg_hyperlink.py).
+        (pdf_path.parent / f"{pdf_path.stem}_link_report.csv", new_pdf_path.parent / f"{new_pdf_path.stem}_link_report.csv"),
     ]
     return [(old, new) for old, new in pairs if old.exists()]
 

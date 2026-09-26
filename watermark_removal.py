@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import shutil
 import tempfile
 from collections import Counter
 from dataclasses import dataclass
@@ -55,12 +56,32 @@ import pymupdf as fitz
 
 WATERMARK_SCRIPT = Path(__file__).parent / "remove_dtrpg_watermarks.py"
 
+# Mirrors the vendored script's own main(), which warns below this many
+# pages that "repetition is weak evidence" -- on a 1-4 page PDF almost any
+# lower-left line clears the 90%-of-pages bar.
+WEAK_EVIDENCE_PAGE_COUNT = 5
+
 
 @dataclass
 class WatermarkDetection:
     text: str
     page_count: int
     total_pages: int
+
+
+def describe_detection(book_title: str, detection: WatermarkDetection) -> list[str]:
+    """The prompt lines both UIs show before asking to remove -- shared so
+    the TUI modal and GUI dialog can't drift apart. Worded as a *possible*
+    watermark: detection only means a lower-left line repeats on most
+    pages, which a publisher's own copyright footer can do too."""
+    lines = [
+        f"Possible watermark in {book_title}:",
+        f'"{detection.text}" repeats in the lower-left corner on {detection.page_count} of {detection.total_pages} page(s).',
+        "This could also be a normal footer (e.g. a copyright line) -- check before removing.",
+    ]
+    if detection.total_pages < WEAK_EVIDENCE_PAGE_COUNT:
+        lines.append(f"Only {detection.total_pages} page(s), so the repetition is weak evidence.")
+    return lines
 
 
 @dataclass
@@ -190,6 +211,14 @@ def remove_watermark(
         finally:
             doc.close()
 
+        # Keep the book's original permissions (best-effort) -- see
+        # rpg_background_layer.py. (PyMuPDF's full save happens to recreate
+        # the file today, so this isn't currently needed here, but it
+        # shouldn't depend on that.)
+        try:
+            shutil.copymode(path, tmp_out_path)
+        except OSError:
+            pass
         os.replace(tmp_out_path, path)
         tmp_out_path = None
 

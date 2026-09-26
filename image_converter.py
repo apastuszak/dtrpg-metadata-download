@@ -32,6 +32,7 @@ from __future__ import annotations
 import io
 import logging
 import os
+import shutil
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -362,6 +363,11 @@ def convert_images_to_rgb(path: Path, jpeg_quality: int = DEFAULT_QUALITY) -> Im
         # undoing the encoding work above.
         doc.save(tmp_out_path, garbage=0, deflate_fonts=True)
         doc.close()
+        # Keep the book's original permissions (best-effort) -- see rpg_background_layer.py.
+        try:
+            shutil.copymode(input_path, tmp_out_path)
+        except OSError:
+            pass
         os.replace(tmp_out_path, input_path)
         tmp_out_path = None
 

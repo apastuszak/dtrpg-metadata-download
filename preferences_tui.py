@@ -39,7 +39,7 @@ class PreferencesApp(App[None]):
         yield Header()
         with Vertical():
             yield Static("DriveThruRPG Preferences")
-            yield Static(f"Saved to {self.preferences_path}", classes="dim")
+            yield Static(f"Saved to {self.preferences_path}", classes="dim", markup=False)
             yield Label("API Key:")
             yield Input(value=self.prefs.api_key, password=True, id="api_key")
             yield Checkbox("Show API key", value=False, id="show_key")
