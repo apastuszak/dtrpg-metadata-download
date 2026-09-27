@@ -116,6 +116,10 @@ HYPERLINK_MONGOOSE_HINT = (
     "Auto-hyperlinks in-text page and chapter references using a vendored script specific to "
     "Mongoose Publishing's Traveller line. Only useful for Mongoose Traveller PDFs."
 )
+HYPERLINK_DELTAGREEN_HINT = (
+    "Auto-hyperlinks in-text page references (e.g. \"see COMBAT on page 48\"), plus the Table of "
+    "Contents and Index when they aren't linked already. Only useful for Delta Green PDFs."
+)
 BACKGROUND_LAYER_HINT = (
     "Tags each page's full-page decorative background as a toggleable layer, using a vendored "
     "script. For Troll Lord Games PDFs (Castles and Crusades) only. Mutually exclusive with removing the "
@@ -464,7 +468,7 @@ def _do_write_pdfs(
     log, rows: list[ReviewRow], root: str, bookorbit_mode: bool, convert_images: bool = False,
     convert_grayscale: bool = False,
     background_layer: bool = False, remove_background: bool = False,
-    hyperlink_gurps: bool = False, hyperlink_mongoose: bool = False,
+    hyperlink_gurps: bool = False, hyperlink_mongoose: bool = False, hyperlink_deltagreen: bool = False,
     page_labels: bool = False, back_cover_to_page_2: bool = False, back_cover_to_end: bool = False,
 ) -> None:
     if not any(r.is_approved() for r in rows):
@@ -475,6 +479,7 @@ def _do_write_pdfs(
         convert_grayscale=convert_grayscale,
         background_layer=background_layer, remove_background=remove_background,
         hyperlink_gurps=hyperlink_gurps, hyperlink_mongoose=hyperlink_mongoose,
+        hyperlink_deltagreen=hyperlink_deltagreen,
         page_labels=page_labels, back_cover_to_page_2=back_cover_to_page_2,
         back_cover_to_end=back_cover_to_end, log=log,
     )
@@ -627,6 +632,10 @@ class WritePdfsTab(QWidget):
         layout.addWidget(self.hyperlink_mongoose_check)
         layout.addWidget(_make_hint_label(HYPERLINK_MONGOOSE_HINT))
 
+        self.hyperlink_deltagreen_check = QCheckBox("Hyperlink Delta Green page references (--hyperlink-deltagreen)")
+        layout.addWidget(self.hyperlink_deltagreen_check)
+        layout.addWidget(_make_hint_label(HYPERLINK_DELTAGREEN_HINT))
+
         self.background_layer_check = QCheckBox(
             "Tag background as its own layer -- Troll Lord Games PDFs only (--background-layer)"
         )
@@ -669,6 +678,7 @@ class WritePdfsTab(QWidget):
             self.convert_grayscale_check.isChecked(),
             self.background_layer_check.isChecked(), self.remove_background_check.isChecked(),
             self.hyperlink_gurps_check.isChecked(), self.hyperlink_mongoose_check.isChecked(),
+            self.hyperlink_deltagreen_check.isChecked(),
             self.page_labels_check.isChecked(),
             self.back_cover_to_page_2_check.isChecked(), self.back_cover_to_end_check.isChecked(),
         )
@@ -677,7 +687,7 @@ class WritePdfsTab(QWidget):
         self, review_csv: Path, root: str, bookorbit_mode: bool, convert_images: bool,
         convert_grayscale: bool,
         background_layer: bool, remove_background: bool,
-        hyperlink_gurps: bool, hyperlink_mongoose: bool,
+        hyperlink_gurps: bool, hyperlink_mongoose: bool, hyperlink_deltagreen: bool,
         page_labels: bool, back_cover_to_page_2: bool, back_cover_to_end: bool,
     ) -> None:
         rows = load_review(review_csv)
@@ -685,7 +695,7 @@ class WritePdfsTab(QWidget):
             self.runner.log, rows, root, bookorbit_mode, convert_images,
             convert_grayscale,
             background_layer, remove_background,
-            hyperlink_gurps, hyperlink_mongoose,
+            hyperlink_gurps, hyperlink_mongoose, hyperlink_deltagreen,
             page_labels, back_cover_to_page_2, back_cover_to_end,
         )
 

@@ -50,6 +50,8 @@ from typing import Callable
 
 GURPS_HYPERLINK_SCRIPT = Path(__file__).parent / "hyperlink_pdf_universal.py"
 MONGOOSE_HYPERLINK_SCRIPT = Path(__file__).parent / "hyperlink_pdf_mongoose.py"
+# Written for this project rather than vendored, but with the same interface.
+DELTAGREEN_HYPERLINK_SCRIPT = Path(__file__).parent / "hyperlink_pdf_deltagreen.py"
 
 
 @dataclass

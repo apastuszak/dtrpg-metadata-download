@@ -96,6 +96,7 @@ from gui_app import (
     CONVERT_GRAYSCALE_HINT,
     CONVERT_IMAGES_HINT,
     HYPERLINK_GURPS_HINT,
+    HYPERLINK_DELTAGREEN_HINT,
     HYPERLINK_MONGOOSE_HINT,
     PAGE_LABELS_HINT,
     REMOVE_BACKGROUND_HINT,
@@ -144,6 +145,7 @@ class TagFlowController:
         remove_background: bool = False,
         hyperlink_gurps: bool = False,
         hyperlink_mongoose: bool = False,
+        hyperlink_deltagreen: bool = False,
         page_labels: bool = False,
         back_cover_to_page_2: bool = False,
         back_cover_to_end: bool = False,
@@ -160,6 +162,7 @@ class TagFlowController:
         self.remove_background = remove_background
         self.hyperlink_gurps = hyperlink_gurps
         self.hyperlink_mongoose = hyperlink_mongoose
+        self.hyperlink_deltagreen = hyperlink_deltagreen
         self.page_labels = page_labels
         self.back_cover_to_page_2 = back_cover_to_page_2
         self.back_cover_to_end = back_cover_to_end
@@ -388,6 +391,7 @@ class TagFlowController:
             convert_grayscale=self.convert_grayscale,
             background_layer=self.background_layer, remove_background=self.remove_background,
             hyperlink_gurps=self.hyperlink_gurps, hyperlink_mongoose=self.hyperlink_mongoose,
+            hyperlink_deltagreen=self.hyperlink_deltagreen,
             page_labels=self.page_labels, log=self._log,
         )
         self._log(f"Wrote metadata to {path.name}" if result.success else f"FAILED: {result.message}")
@@ -417,7 +421,7 @@ class TagWorker(QObject):
         bookorbit_mode, rename, root_mode, stop_event, convert_images=False,
         convert_grayscale=False,
         background_layer=False, remove_background=False,
-        hyperlink_gurps=False, hyperlink_mongoose=False, page_labels=False,
+        hyperlink_gurps=False, hyperlink_mongoose=False, hyperlink_deltagreen=False, page_labels=False,
         back_cover_to_page_2=False, back_cover_to_end=False,
     ):
         super().__init__()
@@ -428,6 +432,7 @@ class TagWorker(QObject):
             convert_grayscale=convert_grayscale,
             background_layer=background_layer, remove_background=remove_background,
             hyperlink_gurps=hyperlink_gurps, hyperlink_mongoose=hyperlink_mongoose,
+            hyperlink_deltagreen=hyperlink_deltagreen,
             page_labels=page_labels,
             back_cover_to_page_2=back_cover_to_page_2, back_cover_to_end=back_cover_to_end,
         )
@@ -991,6 +996,10 @@ class TagTab(QWidget):
         layout.addWidget(self.hyperlink_mongoose_check)
         layout.addWidget(_make_hint_label(HYPERLINK_MONGOOSE_HINT))
 
+        self.hyperlink_deltagreen_check = QCheckBox("Hyperlink Delta Green page references (--hyperlink-deltagreen)")
+        layout.addWidget(self.hyperlink_deltagreen_check)
+        layout.addWidget(_make_hint_label(HYPERLINK_DELTAGREEN_HINT))
+
         self.background_layer_check = QCheckBox(
             "Tag background as its own layer -- Troll Lord Games PDFs only (--background-layer)"
         )
@@ -1083,6 +1092,7 @@ class TagTab(QWidget):
             remove_background=self.remove_background_check.isChecked(),
             hyperlink_gurps=self.hyperlink_gurps_check.isChecked(),
             hyperlink_mongoose=self.hyperlink_mongoose_check.isChecked(),
+            hyperlink_deltagreen=self.hyperlink_deltagreen_check.isChecked(),
             page_labels=self.page_labels_check.isChecked(),
             back_cover_to_page_2=self.back_cover_to_page_2_check.isChecked(),
             back_cover_to_end=self.back_cover_to_end_check.isChecked(),

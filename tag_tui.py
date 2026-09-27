@@ -675,6 +675,7 @@ class TagApp(App[None]):
         remove_background: bool = False,
         hyperlink_gurps: bool = False,
         hyperlink_mongoose: bool = False,
+        hyperlink_deltagreen: bool = False,
         page_labels: bool = False,
         back_cover_to_page_2: bool = False,
         back_cover_to_end: bool = False,
@@ -692,6 +693,7 @@ class TagApp(App[None]):
         self.remove_background = remove_background
         self.hyperlink_gurps = hyperlink_gurps
         self.hyperlink_mongoose = hyperlink_mongoose
+        self.hyperlink_deltagreen = hyperlink_deltagreen
         self.page_labels = page_labels
         self.back_cover_to_page_2 = back_cover_to_page_2
         self.back_cover_to_end = back_cover_to_end
@@ -909,6 +911,7 @@ class TagApp(App[None]):
             convert_grayscale=self.convert_grayscale,
             background_layer=self.background_layer, remove_background=self.remove_background,
             hyperlink_gurps=self.hyperlink_gurps, hyperlink_mongoose=self.hyperlink_mongoose,
+            hyperlink_deltagreen=self.hyperlink_deltagreen,
             page_labels=self.page_labels, log=log_line,
         )
         self._log(f"Wrote metadata to {path.name}" if result.success else f"FAILED: {result.message}")

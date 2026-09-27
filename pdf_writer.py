@@ -103,7 +103,12 @@ from page_labels import PageLabelPlan, detect_page_labels, set_page_labels
 from review import ReviewRow
 from rpg_background_layer import apply_background_layer
 from rpg_grayscale import convert_pdf_grayscale
-from rpg_hyperlink import GURPS_HYPERLINK_SCRIPT, MONGOOSE_HYPERLINK_SCRIPT, run_hyperlink_script
+from rpg_hyperlink import (
+    DELTAGREEN_HYPERLINK_SCRIPT,
+    GURPS_HYPERLINK_SCRIPT,
+    MONGOOSE_HYPERLINK_SCRIPT,
+    run_hyperlink_script,
+)
 from sidecar_writer import _split_isbn, write_bookorbit_opf, write_grimmory_sidecar
 
 logger = logging.getLogger("pdf_writer")
@@ -306,6 +311,7 @@ def write_metadata(
     remove_background: bool = False,
     hyperlink_gurps: bool = False,
     hyperlink_mongoose: bool = False,
+    hyperlink_deltagreen: bool = False,
     page_labels: bool = False,
     back_cover_to_page_2: bool = False,
     back_cover_to_end: bool = False,
@@ -430,6 +436,8 @@ def write_metadata(
         _run_hyperlink_step(path, "GURPS", GURPS_HYPERLINK_SCRIPT, log)
     if hyperlink_mongoose:
         _run_hyperlink_step(path, "Mongoose", MONGOOSE_HYPERLINK_SCRIPT, log)
+    if hyperlink_deltagreen:
+        _run_hyperlink_step(path, "Delta Green", DELTAGREEN_HYPERLINK_SCRIPT, log)
 
     # Read after every step above (they rewrite the file) and written in
     # the same pikepdf save as the metadata below -- labels live in the
@@ -607,6 +615,7 @@ def write_approved(
     remove_background: bool = False,
     hyperlink_gurps: bool = False,
     hyperlink_mongoose: bool = False,
+    hyperlink_deltagreen: bool = False,
     page_labels: bool = False,
     back_cover_to_page_2: bool = False,
     back_cover_to_end: bool = False,
@@ -650,7 +659,7 @@ def write_approved(
                     convert_grayscale=convert_grayscale,
                     background_layer=background_layer, remove_background=remove_background,
                     hyperlink_gurps=hyperlink_gurps, hyperlink_mongoose=hyperlink_mongoose,
-                    page_labels=page_labels, back_cover_to_page_2=back_cover_to_page_2,
+                    hyperlink_deltagreen=hyperlink_deltagreen, page_labels=page_labels, back_cover_to_page_2=back_cover_to_page_2,
                     back_cover_to_end=back_cover_to_end, log=log,
                 )
             )

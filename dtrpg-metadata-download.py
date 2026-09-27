@@ -86,14 +86,16 @@
         on the same images) -- the GUI enforces this by unchecking one
         when the other is checked.
 
-    --hyperlink-gurps / --hyperlink-mongoose (on write-pdfs/all/tag):
+    --hyperlink-gurps / --hyperlink-mongoose / --hyperlink-deltagreen (on write-pdfs/all/tag):
         auto-hyperlinks in-text page/chapter references (see
-        rpg_hyperlink.py), via vendored scripts (hyperlink_pdf_universal.py/
-        hyperlink_pdf_mongoose.py). Off by default, and a
-        publisher-specific integration -- tuned for one publisher's own
-        reference conventions each (GURPS / Mongoose Publishing's
-        Traveller line), not a general feature. Both run before the
-        embedded-metadata write, same reasoning as --convert-images.
+        rpg_hyperlink.py), via hyperlink_pdf_universal.py/
+        hyperlink_pdf_mongoose.py (vendored) and
+        hyperlink_pdf_deltagreen.py (written for this project). Off by
+        default, and publisher-specific -- each is tuned for one
+        publisher's own reference conventions (GURPS / Mongoose
+        Publishing's Traveller line / Arc Dream's Delta Green), not a
+        general feature. All run before the embedded-metadata write, same
+        reasoning as --convert-images.
 
     --background-layer / --remove-background (on write-pdfs/all/tag):
         tags each page's full-page decorative background as a toggleable
@@ -294,6 +296,7 @@ def cmd_write_pdfs(args: argparse.Namespace, config: dict) -> None:
         convert_grayscale=args.convert_grayscale,
         background_layer=args.background_layer, remove_background=args.remove_background,
         hyperlink_gurps=args.hyperlink_gurps, hyperlink_mongoose=args.hyperlink_mongoose,
+        hyperlink_deltagreen=args.hyperlink_deltagreen,
         page_labels=args.page_labels,
         back_cover_to_page_2=args.back_cover_to_page_2, back_cover_to_end=args.back_cover_to_end,
     )
@@ -444,6 +447,7 @@ def cmd_tag(args: argparse.Namespace, config: dict) -> None:
         remove_background=args.remove_background,
         hyperlink_gurps=args.hyperlink_gurps,
         hyperlink_mongoose=args.hyperlink_mongoose,
+        hyperlink_deltagreen=args.hyperlink_deltagreen,
         page_labels=args.page_labels,
         back_cover_to_page_2=args.back_cover_to_page_2,
         back_cover_to_end=args.back_cover_to_end,
@@ -526,6 +530,10 @@ def main() -> None:
         "Auto-hyperlink in-text page/chapter references via a vendored Mongoose-Traveller-"
         "specific script (see rpg_hyperlink.py)"
     )
+    hyperlink_deltagreen_help = (
+        "Auto-hyperlink in-text page references, the Table of Contents and the Index in a Delta Green "
+        "(Arc Dream) PDF (see hyperlink_pdf_deltagreen.py)"
+    )
     background_layer_help = (
         "Tag each page's full-page decorative background as a toggleable Optional Content Group layer, "
         "via a vendored script (see rpg_background_layer.py). For Troll Lord Games PDFs "
@@ -566,6 +574,7 @@ def main() -> None:
     write_color_group.add_argument("--convert-grayscale", action="store_true", help=convert_grayscale_help)
     write_parser.add_argument("--hyperlink-gurps", action="store_true", help=hyperlink_gurps_help)
     write_parser.add_argument("--hyperlink-mongoose", action="store_true", help=hyperlink_mongoose_help)
+    write_parser.add_argument("--hyperlink-deltagreen", action="store_true", help=hyperlink_deltagreen_help)
     write_bg_group = write_parser.add_mutually_exclusive_group()
     write_bg_group.add_argument("--background-layer", action="store_true", help=background_layer_help)
     write_bg_group.add_argument("--remove-background", action="store_true", help=remove_background_help)
@@ -581,6 +590,7 @@ def main() -> None:
     all_parser.add_argument("--bookorbit-mode", action="store_true", help=bookorbit_mode_help)
     all_parser.add_argument("--hyperlink-gurps", action="store_true", help=hyperlink_gurps_help)
     all_parser.add_argument("--hyperlink-mongoose", action="store_true", help=hyperlink_mongoose_help)
+    all_parser.add_argument("--hyperlink-deltagreen", action="store_true", help=hyperlink_deltagreen_help)
     all_color_group = all_parser.add_mutually_exclusive_group()
     all_color_group.add_argument("--convert-images", action="store_true", help=convert_images_help)
     all_color_group.add_argument("--convert-grayscale", action="store_true", help=convert_grayscale_help)
@@ -601,6 +611,7 @@ def main() -> None:
     tag_color_group.add_argument("--convert-grayscale", action="store_true", help=convert_grayscale_help)
     tag_parser.add_argument("--hyperlink-gurps", action="store_true", help=hyperlink_gurps_help)
     tag_parser.add_argument("--hyperlink-mongoose", action="store_true", help=hyperlink_mongoose_help)
+    tag_parser.add_argument("--hyperlink-deltagreen", action="store_true", help=hyperlink_deltagreen_help)
     tag_bg_group = tag_parser.add_mutually_exclusive_group()
     tag_bg_group.add_argument("--background-layer", action="store_true", help=background_layer_help)
     tag_bg_group.add_argument("--remove-background", action="store_true", help=remove_background_help)
