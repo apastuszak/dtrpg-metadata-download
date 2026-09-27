@@ -101,22 +101,10 @@
         vendored script (see rpg_background_layer.py/
         castles_and_crusades_background_layer.py). Off by default,
         mutually exclusive with each other, and tuned for one specific
-        publisher's PDFs (Troll Lord Games, e.g. Castles & Crusades) -- not a
-        general feature. Runs
-        first among the optional pre-metadata-write steps, before
+        publisher's PDFs (Troll Lord Games, e.g. Castles & Crusades) -- not
+        a general feature. Runs first among the optional pre-write steps, before
         --convert-images/--convert-grayscale/hyperlinking, all of which
         still run before the final embedded-metadata write either way.
-
-    Watermark detection (tag only, no flag): every file `tag` processes
-        is checked for a DriveThruRPG-style corner watermark before
-        anything else happens to it, via a vendored script (see
-        watermark_removal.py/remove_dtrpg_watermarks.py) -- if one is
-        found, you're asked (with the detected text and page count)
-        whether to remove it before matching/writing even starts.
-        Removal, if accepted, runs before every other pre-write step for
-        the same reason --background-layer does. No CLI flag or GUI
-        checkbox -- always checked; not available on write-pdfs/all,
-        which have no way to ask anything.
 
     --page-labels (on write-pdfs/all/tag): sets the page labels a PDF
         viewer shows (see page_labels.py) -- "Cover" for the front and back

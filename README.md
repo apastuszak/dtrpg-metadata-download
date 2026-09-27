@@ -202,10 +202,6 @@ PDF-only releases usually have no barcode. For those, `tag` asks: it shows you t
 
 Available on `tag`, `write-pdfs`, and `all` (and as a checkbox in the GUI's Tag, Write PDFs, and All tabs). Sets page labels as described under "Page labels" above, in the same final save as the metadata. Off by default. A book whose numbering can't be read confidently is still tagged normally; only its page labels are left as they were, with the reason logged.
 
-#### Watermark detection and removal
-
-Available on `tag` only (both the terminal UI and the GUI's Tag tab) — no CLI flag or checkbox, and nothing to configure. Every file `tag` processes is checked for a DriveThruRPG-style corner watermark *before anything else happens to it*, even before matching starts, using a vendored script (see `watermark_removal.py`/`remove_dtrpg_watermarks.py`). The check takes a few seconds per book. If a line repeats in the lower-left corner of most pages, you're asked — with that text and how many pages it's on — whether to remove it; declining leaves the file untouched. Look at the text before saying yes: a publisher's own copyright footer can pass the same test, especially in a very short PDF. If you remove something by mistake, the original is in the `.pdf.bak` backup, made before removal. Not available on `write-pdfs`/`all`, since those run unattended with no way to ask a question.
-
 ### 3. `<name>.metadata.json` — Grimmory sidecar
 
 Grimmory's own flat JSON sidecar format (confirmed against its real Java DTO schema and writer source, `github.com/grimmory-tools/grimmory`) — `title`, `authors`, `publisher`, `description`, `isbn10`/`isbn13` (bucketed by digit count, since Grimmory's JSON has no auto-detection the way the OPF does), `categories`/`tags`, and `series: {name, number}`.
