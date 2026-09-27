@@ -163,7 +163,28 @@ Available on `tag`, `write-pdfs`, and `all` (and as a checkbox in the GUI's Tag/
 
 #### `--hyperlink-gurps` / `--hyperlink-mongoose`
 
-Available on `tag` and `write-pdfs` (and as checkboxes in the GUI's Tag/Write PDFs tabs). Auto-hyperlinks in-text page and chapter references (e.g. "see p. 208") before metadata is written, using vendored scripts (see `rpg_hyperlink.py`) — one tuned for GURPS (`hyperlink_pdf_universal.py`), one for Mongoose Publishing's Traveller line (`hyperlink_pdf_mongoose.py`). Both off by default, and independent of each other. Each only makes sense for that publisher's own PDFs; these are publisher-specific integrations, not a general feature of this project.
+These turn a book's own cross-references into clickable links, so tapping "see p. 208" in your PDF reader jumps straight to page 208. Use `--hyperlink-gurps` for GURPS books (Steve Jackson Games), and `--hyperlink-mongoose` for Mongoose Publishing's Traveller line (1st and 2nd edition, and 2300AD). Each one is tuned to its publisher's own way of writing references, so only use it on that publisher's books.
+
+Available on `tag`, `write-pdfs`, and `all`, and as checkboxes in the GUI's Tag and Write PDFs tabs. Both are off by default.
+
+**What gets linked:**
+
+- **Page references in the text**, like "p. 208" or "pp. 12–14". A range links to its first page.
+- **The index.** Every page number in the index entries becomes a link, including ranges that wrap onto the next line.
+- **Chapter references**, like "Chapter 3" or "Chapters 2, 4, and 6", plus chapter names in italics that exactly match a chapter title in the table of contents.
+- **The table of contents**, if it doesn't have links already.
+
+**What's deliberately left alone:**
+
+- **References to other books.** For example "GURPS Magic, p. 23", GURPS's "p. B123" shorthand (page 123 of the *Basic Set*), or an italicized title of a different book just before the page number. Linking those would jump to the wrong page of *this* book.
+- **Page numbers outside the book's range.**
+- **Anything that's already a link.** Running it again on a book adds nothing new.
+
+**How it finds the right page:** it reads the page numbers printed in the footers, so "p. 208" goes to the page that actually says 208, even when covers and front matter throw off the count. If a book has no page numbers it can read (for example a scan), hyperlinking is skipped with a note in the log, and the rest of the tagging still happens.
+
+**The link report:** next to the PDF you'll find `<book name>_link_report.csv`, with one row for every reference found. Each row gives the PDF page, the text it matched, the page it points to, and whether it was linked or skipped (and why). It's the quickest way to check for a missed or wrong link. `--rename` renames it along with the book.
+
+Only clickable link areas are added; the text and layout of the pages don't change. This runs before the metadata is written, using the scripts bundled in this repo (see `rpg_hyperlink.py`: `hyperlink_pdf_universal.py` for GURPS and `hyperlink_pdf_mongoose.py` for Mongoose).
 
 #### `--background-layer` / `--remove-background`
 
