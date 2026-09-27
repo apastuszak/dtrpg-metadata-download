@@ -188,7 +188,7 @@ Only clickable link areas are added; the text and layout of the pages don't chan
 
 #### `--background-layer` / `--remove-background`
 
-Available on `tag`, `write-pdfs`, and `all` (and as checkboxes in the GUI's Tag/Write PDFs tabs). Tags each page's full-page decorative background as a toggleable layer, or deletes it outright, before metadata is written, using a vendored script (see `rpg_background_layer.py`/`castles_and_crusades_background_layer.py`). For Castles and Crusades rulebooks only. Off by default, and mutually exclusive with each other (opposite operations on the same background) — checking one unchecks the other in the GUI, and the CLI refuses both flags together. A publisher-specific integration, not a general feature of this project.
+Available on `tag`, `write-pdfs`, and `all` (and as checkboxes in the GUI's Tag/Write PDFs tabs). Tags each page's full-page decorative background as a toggleable layer, or deletes it outright, before metadata is written, using a vendored script (see `rpg_background_layer.py`/`castles_and_crusades_background_layer.py`). For Troll Lord Games PDFs only (Castles & Crusades). Off by default, and mutually exclusive with each other (opposite operations on the same background) — checking one unchecks the other in the GUI, and the CLI refuses both flags together. A publisher-specific integration, not a general feature of this project.
 
 #### `--back-cover-to-page-2` / `--back-cover-to-end`
 

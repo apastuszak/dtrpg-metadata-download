@@ -992,12 +992,12 @@ class TagTab(QWidget):
         layout.addWidget(_make_hint_label(HYPERLINK_MONGOOSE_HINT))
 
         self.background_layer_check = QCheckBox(
-            "Tag background as its own layer -- Castles and Crusades only (--background-layer)"
+            "Tag background as its own layer -- Troll Lord Games PDFs only (--background-layer)"
         )
         layout.addWidget(self.background_layer_check)
         layout.addWidget(_make_hint_label(BACKGROUND_LAYER_HINT))
 
-        self.remove_background_check = QCheckBox("Remove background -- Castles and Crusades only (--remove-background)")
+        self.remove_background_check = QCheckBox("Remove background -- Troll Lord Games PDFs only (--remove-background)")
         layout.addWidget(self.remove_background_check)
         layout.addWidget(_make_hint_label(REMOVE_BACKGROUND_HINT))
         _make_mutually_exclusive(self.background_layer_check, self.remove_background_check)

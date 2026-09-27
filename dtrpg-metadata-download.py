@@ -101,7 +101,8 @@
         vendored script (see rpg_background_layer.py/
         castles_and_crusades_background_layer.py). Off by default,
         mutually exclusive with each other, and tuned for one specific
-        PDF line (Castles and Crusades) -- not a general feature. Runs
+        publisher's PDFs (Troll Lord Games, e.g. Castles & Crusades) -- not a
+        general feature. Runs
         first among the optional pre-metadata-write steps, before
         --convert-images/--convert-grayscale/hyperlinking, all of which
         still run before the final embedded-metadata write either way.
@@ -539,12 +540,12 @@ def main() -> None:
     )
     background_layer_help = (
         "Tag each page's full-page decorative background as a toggleable Optional Content Group layer, "
-        "via a vendored script (see rpg_background_layer.py). For Castles and Crusades "
-        "rulebooks only. Mutually exclusive with --remove-background."
+        "via a vendored script (see rpg_background_layer.py). For Troll Lord Games PDFs "
+        "(Castles & Crusades) only. Mutually exclusive with --remove-background."
     )
     remove_background_help = (
         "Delete each page's full-page decorative background outright, via the same vendored script as "
-        "--background-layer. For Castles and Crusades rulebooks only. Mutually exclusive with "
+        "--background-layer. For Troll Lord Games PDFs (Castles & Crusades) only. Mutually exclusive with "
         "--background-layer."
     )
 
