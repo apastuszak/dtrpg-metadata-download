@@ -96,6 +96,7 @@ import pikepdf
 from lxml import etree
 from lxml.etree import QName
 
+from back_cover import move_back_cover
 from image_converter import convert_images_to_rgb
 from matcher import scan_pdfs
 from page_labels import PageLabelPlan, detect_page_labels, set_page_labels
@@ -306,6 +307,8 @@ def write_metadata(
     hyperlink_gurps: bool = False,
     hyperlink_mongoose: bool = False,
     page_labels: bool = False,
+    back_cover_to_page_2: bool = False,
+    back_cover_to_end: bool = False,
     log: Callable[[str], None] | None = None,
 ) -> WriteResult:
     """`log`, if given, is called with human-readable progress lines for
@@ -334,6 +337,18 @@ def write_metadata(
         backup(path)
     except OSError as exc:
         return WriteResult(path.name, False, f"backup failed: {exc}")
+
+    if back_cover_to_page_2 or back_cover_to_end:
+        # First, so every later step (and page-label detection) sees the
+        # final page order. Only moves on positive evidence -- see
+        # back_cover.py -- and a book with no separate back cover is just
+        # logged and left alone.
+        move = move_back_cover(path, "page-2" if back_cover_to_page_2 else "end")
+        if move.moved:
+            _log_both(log, logging.INFO, f"{path.name}: {move.message}")
+        else:
+            hint = " -- tag can ask about a back cover without a barcode" if "no barcode" in move.message else ""
+            _log_both(log, logging.INFO, f"Back cover not moved for {path.name}: {move.message}{hint}")
 
     if background_layer or remove_background:
         # Runs first among the optional pre-pikepdf steps -- if the
@@ -593,6 +608,8 @@ def write_approved(
     hyperlink_gurps: bool = False,
     hyperlink_mongoose: bool = False,
     page_labels: bool = False,
+    back_cover_to_page_2: bool = False,
+    back_cover_to_end: bool = False,
     log: Callable[[str], None] | None = None,
 ) -> list[WriteResult]:
     root = Path(root)
@@ -633,7 +650,8 @@ def write_approved(
                     convert_grayscale=convert_grayscale,
                     background_layer=background_layer, remove_background=remove_background,
                     hyperlink_gurps=hyperlink_gurps, hyperlink_mongoose=hyperlink_mongoose,
-                    page_labels=page_labels, log=log,
+                    page_labels=page_labels, back_cover_to_page_2=back_cover_to_page_2,
+                    back_cover_to_end=back_cover_to_end, log=log,
                 )
             )
         except Exception as exc:

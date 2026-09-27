@@ -30,9 +30,12 @@ Some publishers (Steve Jackson Games, Arc Dream's Delta Green) put the back
 cover second, right after the front cover, with an ad or a form as the
 last page. A back cover carries a retail barcode; nothing else near the
 front of a book does. So when PDF page 2 shows no page number and has a
-barcode (`has_barcode()`), page 2 is the back cover and the last page is
-numbered normally. Checked against page 2 of all 401 labeled test books:
-66 barcodes found, every one a real back cover.
+barcode (`page_render.py`), page 2 is the back cover and the last page is
+numbered normally (75 page-2 barcodes in the 490-book corpus, every one a
+real back cover). A book can also have no back cover at all: a landscape
+PDF page 1 in a portrait book is a single wraparound cover (Shadowrun),
+and a blank white last page isn't a cover -- in both cases the last page
+gets its number.
 
 Deliberately refuses rather than guesses (returning a reason, never
 raising) when the evidence doesn't support one consistent numbering:
@@ -59,12 +62,15 @@ page 1.
 
 from __future__ import annotations
 
+import statistics
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
 import pikepdf
 import pymupdf as fitz
+
+from page_render import page_has_barcode, page_is_blank
 
 BAND_FRACTION = 0.10
 MAX_PAGE_NUMBER_DIGITS = 4
@@ -74,17 +80,7 @@ MIN_SPAN = 0.5
 COMPETING_MIN_PAGES = 10
 COMPETING_FRACTION = 0.2
 COVER_LABEL = "Cover"
-
-# Barcode detection: a retail barcode renders as a band of fine vertical
-# stripes whose pattern repeats nearly identically row after row. EAN-13
-# has 30 bars (~60 edges) in ~1-1.5in; SJG's are only ~0.33in tall, which
-# is why the height minimum is low and the resolution is high.
-BARCODE_DPI = 300
-BARCODE_WINDOW_IN = 1.6
-BARCODE_MIN_EDGES = 40
-BARCODE_MIN_HEIGHT_IN = 0.2
-BARCODE_MIN_SIMILARITY = 0.9
-_DARK = bytes(1 if v < 128 else 0 for v in range(256))
+WRAPAROUND_ASPECT = 1.1
 
 _ROMAN = (
     (1000, "m"), (900, "cm"), (500, "d"), (400, "cd"), (100, "c"), (90, "xc"),
@@ -170,44 +166,23 @@ def read_page_numbers(doc: fitz.Document) -> list[set[int]]:
     return numbers
 
 
-def has_barcode(page: fitz.Page) -> bool:
-    """True if the page shows a retail barcode anywhere -- see the constants
-    above for what that means in pixels."""
-    pix = page.get_pixmap(dpi=BARCODE_DPI, colorspace=fitz.csGRAY, alpha=False)
-    width, height, samples = pix.width, pix.height, pix.samples
-    window = int(BARCODE_WINDOW_IN * BARCODE_DPI)
-    rows_needed = int(BARCODE_MIN_HEIGHT_IN * BARCODE_DPI / 2)  # every 2nd row is sampled
-    drift = BARCODE_DPI // 25
-    run, previous = 0, None
-    for y in range(0, height, 2):
-        bits = samples[y * width:(y + 1) * width].translate(_DARK)
-        edges = [x for x in range(1, width) if bits[x] != bits[x - 1]]
-        best, best_start, j = 0, 0, 0
-        for i in range(len(edges)):
-            while edges[i] - edges[j] > window:
-                j += 1
-            if i - j + 1 > best:
-                best, best_start = i - j + 1, edges[j]
-        if best < BARCODE_MIN_EDGES:
-            run, previous = 0, None
-            continue
-        segment = bits[best_start:best_start + window]
-        if previous is not None and abs(previous[0] - best_start) <= drift:
-            n = min(len(previous[1]), len(segment))
-            same = sum(1 for k in range(n) if previous[1][k] == segment[k])
-            run = run + 1 if n and same / n >= BARCODE_MIN_SIMILARITY else 1
-        else:
-            run = 1
-        previous = (best_start, segment)
-        if run >= rows_needed:
-            return True
-    return False
+def is_wraparound(doc: fitz.Document) -> bool:
+    """PDF page 1 is landscape while the book itself is portrait: a single
+    wraparound cover (front and back art on one page, e.g. Shadowrun), so
+    the book has no separate back cover."""
+    first = doc[0].rect
+    body_width = statistics.median(page.rect.width for page in doc)
+    body_height = statistics.median(page.rect.height for page in doc)
+    return first.width > first.height * WRAPAROUND_ASPECT and body_width < body_height
 
 
-def plan_page_labels(numbers: list[set[int]], back_cover_second: bool = False) -> tuple[PageLabelPlan | None, str]:
+def plan_page_labels(
+    numbers: list[set[int]], back_cover_second: bool = False, no_back_cover: bool = False,
+) -> tuple[PageLabelPlan | None, str]:
     """Pure: from each page's candidate numbers, the label plan -- or None
     and the reason it won't guess. `back_cover_second` puts the back cover
-    at PDF page 2 instead of the last page (see has_barcode())."""
+    at PDF page 2 instead of the last page (see page_render.py);
+    `no_back_cover` means there isn't one, so the last page is numbered."""
     page_count = len(numbers)
     pages_by_offset: dict[int, set[int]] = defaultdict(set)
     numbered = 0
@@ -230,7 +205,9 @@ def plan_page_labels(numbers: list[set[int]], back_cover_second: bool = False) -
             return None, "page numbering changes partway through (a merged or multi-part PDF?)"
 
     front_cover = 0 if 0 not in agreeing else None
-    if back_cover_second:
+    if no_back_cover:
+        back_cover = None
+    elif back_cover_second:
         back_cover = 1 if page_count > 1 and 1 not in agreeing else None
     else:
         back_cover = page_count - 1 if page_count > 1 and (page_count - 1) not in agreeing else None
@@ -273,13 +250,20 @@ def detect_page_labels(path: Path) -> tuple[PageLabelPlan | None, str]:
             numbers = read_page_numbers(doc)
             if not numbers:
                 return None, "the PDF has no pages"
-            plan, reason = plan_page_labels(numbers)
-            if plan is not None and plan.page_count > 2 and 1 not in plan.agreeing and has_barcode(doc[1]):
-                plan, reason = plan_page_labels(numbers, back_cover_second=True)
+            wraparound = is_wraparound(doc)
         finally:
             doc.close()
     except Exception as exc:
         return None, f"couldn't read the PDF: {exc}"
+    last_blank = len(numbers) > 1 and page_is_blank(path, len(numbers) - 1)
+    if wraparound or last_blank:
+        plan, reason = plan_page_labels(numbers, no_back_cover=True)
+        if plan is not None:
+            reason += "; no back cover (" + ("wraparound front cover" if wraparound else "last page is blank") + ")"
+        return plan, reason
+    plan, reason = plan_page_labels(numbers)
+    if plan is not None and plan.page_count > 2 and 1 not in plan.agreeing and page_has_barcode(path, 1):
+        plan, reason = plan_page_labels(numbers, back_cover_second=True)
     return plan, reason
 
 
@@ -298,3 +282,50 @@ def set_page_labels(pdf: pikepdf.Pdf, plan: PageLabelPlan) -> None:
             entry.St = r.first_value
         nums.extend([r.start, entry])
     pdf.Root.PageLabels = pdf.make_indirect(pikepdf.Dictionary(Nums=pikepdf.Array(nums)))
+
+
+def read_existing_labels(pdf: pikepdf.Pdf) -> list[tuple[str | None, str, int]] | None:
+    """Each page's existing label as (style, prefix, number), or None if the
+    PDF has no /PageLabels -- the decoded form reorder_page_labels() needs."""
+    if "/PageLabels" not in pdf.Root:
+        return None
+    starts = sorted((int(key), entry) for key, entry in pikepdf.NumberTree(pdf.Root.PageLabels).items())
+    per_page: list[tuple[str | None, str, int]] = []
+    k = -1
+    for index in range(len(pdf.pages)):
+        while k + 1 < len(starts) and starts[k + 1][0] <= index:
+            k += 1
+        if k < 0:
+            per_page.append(("/D", "", index + 1))  # no entry covers this page yet
+            continue
+        start, entry = starts[k]
+        style = str(entry.S) if "/S" in entry else None
+        prefix = str(entry.P) if "/P" in entry else ""
+        first = int(entry.St) if "/St" in entry else 1
+        per_page.append((style, prefix, first + index - start))
+    return per_page
+
+
+def write_existing_labels(pdf: pikepdf.Pdf, per_page: list[tuple[str | None, str, int]]) -> None:
+    """Inverse of read_existing_labels(): one /PageLabels entry per run of
+    pages that share style and prefix and count up by one."""
+    nums = []
+    previous = None
+    for index, (style, prefix, value) in enumerate(per_page):
+        continues = (
+            previous is not None
+            and previous[0] == style
+            and previous[1] == prefix
+            and (style is None or value == previous[2] + 1)
+        )
+        if not continues:
+            entry = pikepdf.Dictionary()
+            if style is not None:
+                entry.S = pikepdf.Name(style)
+                entry.St = value
+            if prefix:
+                entry.P = pikepdf.String(prefix)
+            nums.extend([index, entry])
+        previous = (style, prefix, value)
+    pdf.Root.PageLabels = pdf.make_indirect(pikepdf.Dictionary(Nums=pikepdf.Array(nums)))
+

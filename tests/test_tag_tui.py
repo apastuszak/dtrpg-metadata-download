@@ -45,7 +45,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pikepdf
-from textual.widgets import Input, TextArea
+from textual.widgets import Input, Label, TextArea
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -119,6 +119,104 @@ def _labels(path: Path) -> list[str]:
         doc.close()
 
 
+def _barcode_book(path: Path, back_cover_second: bool) -> None:
+    """Front cover, three body pages, and a back cover (text "BACK" plus a
+    drawn barcode) either second or last."""
+    import random
+
+    import pymupdf as fitz
+
+    doc = fitz.open()
+    order = ["FRONT", "BACK", "BODY 1", "BODY 2", "BODY 3"] if back_cover_second else ["FRONT", "BODY 1", "BODY 2", "BODY 3", "BACK"]
+    for text in order:
+        page = doc.new_page()
+        page.insert_text((72, 100), text)
+        if text == "BACK":
+            rnd, x = random.Random(1), 400.0
+            for _ in range(30):
+                w = rnd.choice([1.0, 1.5, 2.0, 3.0])
+                page.draw_rect(fitz.Rect(x, 650, x + w, 700), color=None, fill=(0, 0, 0))
+                x += w + rnd.choice([1.0, 1.5, 2.0, 3.0])
+    doc.save(path)
+    doc.close()
+
+
+def _page_texts(path: Path) -> list[str]:
+    import pymupdf as fitz
+
+    with fitz.open(path) as doc:
+        return [page.get_text("text").strip() for page in doc]
+
+
+async def test_back_cover_to_end_flag():
+    with tempfile.TemporaryDirectory() as tmp:
+        pdf = Path(tmp) / "Book.pdf"
+        _barcode_book(pdf, back_cover_second=True)
+        client = _client(
+            search_library=[
+                ProductMetadata(title="Picked Title", series="S", description="d",
+                                source=Source.DTRPG_LIBRARY, product_id="1")
+            ],
+        )
+        app = TagApp(pdfs=[pdf], client=client, manual_overrides={}, known_urls={},
+                     thresholds={}, bookorbit_mode=False, rename=False, root_mode=False,
+                     back_cover_to_end=True)
+        async with app.run_test() as pilot:
+            await pilot.pause(delay=0.3)
+            await pilot.press("enter")
+            await pilot.pause()
+            await pilot.press("enter")
+            for _ in range(150):
+                if any("Wrote metadata" in line for line in app.history):
+                    break
+                await pilot.pause(delay=0.1)
+
+        assert _page_texts(pdf) == ["FRONT", "BODY 1", "BODY 2", "BODY 3", "BACK"], _page_texts(pdf)
+        assert any("moved the back cover to the end" in line for line in app.history), app.history
+    print("PASS: back_cover_to_end_flag")
+
+
+async def test_back_cover_without_barcode_asks():
+    """No barcode (a PDF-only release): tag asks about the last page
+    instead of guessing, and only moves it on "yes"."""
+    import pymupdf as fitz
+
+    for answer, expected in (("#yes", ["FRONT", "BACK", "BODY 1", "BODY 2"]),
+                             ("#no", ["FRONT", "BODY 1", "BODY 2", "BACK"])):
+        with tempfile.TemporaryDirectory() as tmp:
+            pdf = Path(tmp) / "Book.pdf"
+            doc = fitz.open()
+            for text in ("FRONT", "BODY 1", "BODY 2", "BACK"):
+                doc.new_page().insert_text((72, 100), text)
+            doc.save(pdf)
+            doc.close()
+            client = _client(search_library=[
+                ProductMetadata(title="T", series="S", description="d", source=Source.DTRPG_LIBRARY, product_id="1")
+            ])
+            app = TagApp(pdfs=[pdf], client=client, manual_overrides={}, known_urls={},
+                         thresholds={}, bookorbit_mode=False, rename=False, root_mode=False,
+                         back_cover_to_page_2=True)
+            async with app.run_test() as pilot:
+                await pilot.pause(delay=0.3)
+                await pilot.press("enter")
+                await pilot.pause()
+                await pilot.press("enter")
+                for _ in range(150):
+                    if app.screen.query("#no"):
+                        break
+                    await pilot.pause(delay=0.1)
+                labels = [str(w.render()) for w in app.screen.query(Label)]
+                assert any("No barcode found" in line for line in labels), labels
+                assert any("PDF page 4 of 4" in line for line in labels), labels
+                await pilot.click(answer)
+                for _ in range(150):
+                    if any("Wrote metadata" in line for line in app.history):
+                        break
+                    await pilot.pause(delay=0.1)
+            assert _page_texts(pdf) == expected, (answer, _page_texts(pdf))
+    print("PASS: back_cover_without_barcode_asks")
+
+
 async def test_page_labels_flag():
     with tempfile.TemporaryDirectory() as tmp:
         pdf = Path(tmp) / "Book.pdf"
@@ -137,7 +235,12 @@ async def test_page_labels_flag():
             await pilot.press("enter")
             await pilot.pause()
             await pilot.press("enter")
-            await pilot.pause(delay=0.3)
+            # Label detection runs its render checks in child processes
+            # (see page_render.py), so the write takes a moment.
+            for _ in range(150):
+                if any("Wrote metadata" in line for line in app.history):
+                    break
+                await pilot.pause(delay=0.1)
 
         assert _labels(pdf) == expected, _labels(pdf)
         assert any("Page labels set" in line for line in app.history), app.history
@@ -600,6 +703,8 @@ async def test_no_watermark_modal_when_none_detected():
 TESTS = [
     test_candidate_pick_write,
     test_page_labels_flag,
+    test_back_cover_to_end_flag,
+    test_back_cover_without_barcode_asks,
     test_manual_override_confirm,
     test_confirm_screen_edit_before_write,
     test_series_dialog_when_blank,

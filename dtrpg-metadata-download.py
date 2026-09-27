@@ -125,6 +125,15 @@
         (scans, boxed sets, merged volumes) keep their existing labels.
         Written in the same final save as the metadata.
 
+    --back-cover-to-page-2 / --back-cover-to-end (on write-pdfs/all/tag):
+        moves the back cover right after the front cover, or to the end
+        of the book (see back_cover.py). Mutually exclusive. The back
+        cover is found by its retail barcode on PDF page 2 or the last
+        page; a book with a wraparound cover (Shadowrun) or no back cover
+        at all is left alone, with the reason logged. Runs first among
+        the pre-write steps; bookmarks, links and existing page labels
+        follow their pages.
+
     page-labels PDF_PATH | page-labels --root PATH [--dry-run]
         The same page labeling on its own, without tagging -- for books
         that are already tagged. Makes the usual one-time .bak backup.
@@ -297,6 +306,7 @@ def cmd_write_pdfs(args: argparse.Namespace, config: dict) -> None:
         background_layer=args.background_layer, remove_background=args.remove_background,
         hyperlink_gurps=args.hyperlink_gurps, hyperlink_mongoose=args.hyperlink_mongoose,
         page_labels=args.page_labels,
+        back_cover_to_page_2=args.back_cover_to_page_2, back_cover_to_end=args.back_cover_to_end,
     )
     succeeded = sum(1 for r in results if r.success)
     print(f"Wrote metadata to {succeeded}/{len(results)} approved files")
@@ -446,6 +456,8 @@ def cmd_tag(args: argparse.Namespace, config: dict) -> None:
         hyperlink_gurps=args.hyperlink_gurps,
         hyperlink_mongoose=args.hyperlink_mongoose,
         page_labels=args.page_labels,
+        back_cover_to_page_2=args.back_cover_to_page_2,
+        back_cover_to_end=args.back_cover_to_end,
         rename=args.rename,
         root_mode=bool(args.root),
     ).run()
@@ -542,6 +554,20 @@ def main() -> None:
         "numbering can't be read confidently keep their existing labels."
     )
 
+    back_cover_to_page_2_help = (
+        "Move the back cover (found by its barcode) to right after the front cover. Books with a "
+        "wraparound cover or no back cover are left alone. Mutually exclusive with --back-cover-to-end."
+    )
+    back_cover_to_end_help = (
+        "Move a back cover that sits right after the front cover (found by its barcode) to the end of "
+        "the book. Mutually exclusive with --back-cover-to-page-2."
+    )
+
+    def add_back_cover_options(subparser: argparse.ArgumentParser) -> None:
+        group = subparser.add_mutually_exclusive_group()
+        group.add_argument("--back-cover-to-page-2", action="store_true", help=back_cover_to_page_2_help)
+        group.add_argument("--back-cover-to-end", action="store_true", help=back_cover_to_end_help)
+
     write_parser = subparsers.add_parser("write-pdfs", help="Write approved metadata into PDFs")
     write_parser.add_argument("--root", help="Root folder of RPG PDFs (overrides config.yaml)")
     write_parser.add_argument("--review-csv", help="Path to review.csv (overrides config.yaml)")
@@ -555,6 +581,7 @@ def main() -> None:
     write_bg_group.add_argument("--background-layer", action="store_true", help=background_layer_help)
     write_bg_group.add_argument("--remove-background", action="store_true", help=remove_background_help)
     write_parser.add_argument("--page-labels", action="store_true", help=page_labels_help)
+    add_back_cover_options(write_parser)
     write_parser.set_defaults(func=cmd_write_pdfs)
 
     all_parser = subparsers.add_parser("all", help="Run scan, then write-pdfs")
@@ -572,6 +599,7 @@ def main() -> None:
     all_bg_group.add_argument("--background-layer", action="store_true", help=background_layer_help)
     all_bg_group.add_argument("--remove-background", action="store_true", help=remove_background_help)
     all_parser.add_argument("--page-labels", action="store_true", help=page_labels_help)
+    add_back_cover_options(all_parser)
     all_parser.set_defaults(func=cmd_all)
 
     tag_parser = subparsers.add_parser("tag", help="Match and tag PDF(s) interactively, no review.csv")
@@ -588,6 +616,7 @@ def main() -> None:
     tag_bg_group.add_argument("--background-layer", action="store_true", help=background_layer_help)
     tag_bg_group.add_argument("--remove-background", action="store_true", help=remove_background_help)
     tag_parser.add_argument("--page-labels", action="store_true", help=page_labels_help)
+    add_back_cover_options(tag_parser)
     tag_parser.add_argument(
         "--rename", action="store_true",
         help="Also rename the file (and its sidecars) to 'Series - Title' immediately after a successful write",

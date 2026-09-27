@@ -48,12 +48,13 @@ to be doing at the same time.
 from __future__ import annotations
 
 import queue
+import tempfile
 import threading
 from dataclasses import replace
 from pathlib import Path
 
 from PyQt6.QtCore import QObject, Qt, QThread, pyqtSignal, pyqtSlot
-from PyQt6.QtGui import QKeySequence, QShortcut
+from PyQt6.QtGui import QKeySequence, QPixmap, QShortcut
 from PyQt6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
@@ -72,6 +73,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from back_cover import describe_question, locate_back_cover, move_back_cover, prepare_question
 from matcher import extract_product_id, find_candidates, load_known_urls, load_manual_overrides, row_from_match, scan_pdfs
 from pdf_writer import backup, write_metadata
 from provenance import ProductMetadata, Source, Status
@@ -104,6 +106,7 @@ from gui_app import (
     _make_log_widget,
     _make_mutually_exclusive,
     _StyledTextEdit,
+    _add_back_cover_checks,
     build_client_safe,
 )
 from watermark_removal import describe_detection, detect_watermark, remove_watermark
@@ -142,6 +145,8 @@ class TagFlowController:
         hyperlink_gurps: bool = False,
         hyperlink_mongoose: bool = False,
         page_labels: bool = False,
+        back_cover_to_page_2: bool = False,
+        back_cover_to_end: bool = False,
     ):
         self.pdfs = pdfs
         self.client = client
@@ -156,6 +161,8 @@ class TagFlowController:
         self.hyperlink_gurps = hyperlink_gurps
         self.hyperlink_mongoose = hyperlink_mongoose
         self.page_labels = page_labels
+        self.back_cover_to_page_2 = back_cover_to_page_2
+        self.back_cover_to_end = back_cover_to_end
         self.rename = rename
         self.root_mode = root_mode
         self._notify = notify
@@ -183,6 +190,7 @@ class TagFlowController:
             "batch_series": None,
             "series": "",
             "watermark": False,
+            "back_cover": False,
             "candidate": CandidateResult(action="quit"),
             "manual_entry": ManualEntryResult(action="cancel"),
             "confirm": ConfirmResult(action="quit"),
@@ -339,6 +347,34 @@ class TagFlowController:
         series = self._ask("series", {"book_title": meta.title})
         return replace(meta, series=series) if series else meta
 
+    def _maybe_move_back_cover(self, path: Path) -> None:
+        """Port of TagApp._maybe_move_back_cover() -- see it for why this
+        lives in tag rather than write_metadata()."""
+        if not (self.back_cover_to_page_2 or self.back_cover_to_end):
+            return
+        to = "page-2" if self.back_cover_to_page_2 else "end"
+        self._log_cb(f"Looking for the back cover of {path.name}...")
+        location = locate_back_cover(path, to)
+        index, reason = location.index, location.reason
+        if index is None and location.candidate is not None:
+            with tempfile.TemporaryDirectory(prefix="dtrpg-back-cover-") as tmp:
+                question = prepare_question(path, location, to, Path(tmp))
+                confirmed = self._ask("back_cover", {"book_title": path.name, "question": question})
+            if not confirmed:
+                self._log(f"Back cover not moved for {path.name} (PDF page {question.page_index + 1} isn't the back cover)")
+                return
+            index, reason = question.page_index, "confirmed by you"
+        if index is None:
+            self._log(f"Back cover not moved for {path.name}: {reason}")
+            return
+        try:
+            backup(path)
+        except OSError as exc:
+            self._log(f"Back cover not moved for {path.name}: backup failed: {exc}")
+            return
+        result = move_back_cover(path, to, index, reason)
+        self._log(f"{path.name}: {result.message}" if result.moved else f"Back cover not moved for {path.name}: {result.message}")
+
     def _write_and_maybe_rename(self, path: Path, row: ReviewRow) -> None:
         # This controller already runs entirely on its own single worker
         # thread (no further threading inside write_metadata()), and
@@ -346,6 +382,7 @@ class TagFlowController:
         # callback (TagWorker._log, which just emits a Qt signal -- safe
         # from any thread) -- safe to call directly here with no
         # marshaling back to the GUI thread.
+        self._maybe_move_back_cover(path)
         result = write_metadata(
             path, row, bookorbit_mode=self.bookorbit_mode, convert_images=self.convert_images,
             convert_grayscale=self.convert_grayscale,
@@ -381,6 +418,7 @@ class TagWorker(QObject):
         convert_grayscale=False,
         background_layer=False, remove_background=False,
         hyperlink_gurps=False, hyperlink_mongoose=False, page_labels=False,
+        back_cover_to_page_2=False, back_cover_to_end=False,
     ):
         super().__init__()
         self.controller = TagFlowController(
@@ -391,6 +429,7 @@ class TagWorker(QObject):
             background_layer=background_layer, remove_background=remove_background,
             hyperlink_gurps=hyperlink_gurps, hyperlink_mongoose=hyperlink_mongoose,
             page_labels=page_labels,
+            back_cover_to_page_2=back_cover_to_page_2, back_cover_to_end=back_cover_to_end,
         )
 
     def _notify(self, kind: str, payload: dict, response_q: "queue.Queue") -> None:
@@ -495,6 +534,52 @@ class SeriesDialog(QDialog):
     def reject(self) -> None:
         self.value = self.edit.text().strip()
         super().reject()
+
+
+class BackCoverDialog(QDialog):
+    """Asked only when a back-cover move is on and no barcode was found
+    (see tag_tui.py's BackCoverModal): shows the front cover and the
+    candidate page side by side. Closing the window means "no"."""
+
+    THUMB_HEIGHT = 360
+
+    def __init__(self, parent, payload: dict):
+        super().__init__(parent)
+        question = payload["question"]
+        self.setWindowTitle("Back cover?")
+        self.value: bool = False
+
+        layout = QVBoxLayout(self)
+        for line in describe_question(payload["book_title"], question):
+            layout.addWidget(_plain_label(line))
+        pictures = QHBoxLayout()
+        for caption, png in (("Front cover (PDF page 1)", question.front_png),
+                             (f"PDF page {question.page_index + 1}", question.candidate_png)):
+            column = QVBoxLayout()
+            image = QLabel()
+            pixmap = QPixmap(str(png)) if png is not None else QPixmap()
+            if pixmap.isNull():
+                image.setText("(couldn't show this page)")
+            else:
+                image.setPixmap(pixmap.scaledToHeight(self.THUMB_HEIGHT, Qt.TransformationMode.SmoothTransformation))
+            column.addWidget(image)
+            column.addWidget(_plain_label(caption))
+            pictures.addLayout(column)
+        layout.addLayout(pictures)
+
+        buttons = QHBoxLayout()
+        self.yes_button = QPushButton("Yes, move it")
+        self.yes_button.clicked.connect(self._yes)
+        buttons.addWidget(self.yes_button)
+        self.no_button = QPushButton("No, leave it")
+        self.no_button.setDefault(True)
+        self.no_button.clicked.connect(self.reject)
+        buttons.addWidget(self.no_button)
+        layout.addLayout(buttons)
+
+    def _yes(self) -> None:
+        self.value = True
+        self.accept()
 
 
 class WatermarkDialog(QDialog):
@@ -841,6 +926,7 @@ _DIALOG_CLASSES = {
     "confirm": ConfirmDialog,
     "series": SeriesDialog,
     "watermark": WatermarkDialog,
+    "back_cover": BackCoverDialog,
 }
 
 
@@ -915,6 +1001,8 @@ class TagTab(QWidget):
         layout.addWidget(self.remove_background_check)
         layout.addWidget(_make_hint_label(REMOVE_BACKGROUND_HINT))
         _make_mutually_exclusive(self.background_layer_check, self.remove_background_check)
+
+        self.back_cover_to_page_2_check, self.back_cover_to_end_check = _add_back_cover_checks(layout)
 
         self.page_labels_check = QCheckBox("Set page labels (--page-labels)")
         layout.addWidget(self.page_labels_check)
@@ -996,6 +1084,8 @@ class TagTab(QWidget):
             hyperlink_gurps=self.hyperlink_gurps_check.isChecked(),
             hyperlink_mongoose=self.hyperlink_mongoose_check.isChecked(),
             page_labels=self.page_labels_check.isChecked(),
+            back_cover_to_page_2=self.back_cover_to_page_2_check.isChecked(),
+            back_cover_to_end=self.back_cover_to_end_check.isChecked(),
         )
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)

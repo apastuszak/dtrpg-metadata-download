@@ -47,6 +47,11 @@ inside the TUI itself.
 from __future__ import annotations
 
 import asyncio
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal
@@ -60,6 +65,7 @@ from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, Footer, Header, Input, Label, OptionList, Static, TextArea
 from textual.widgets.option_list import Option
 
+from back_cover import BackCoverQuestion, describe_question, locate_back_cover, move_back_cover, prepare_question
 from dtrpg_client import DtrpgClient
 from matcher import extract_product_id, find_candidates, row_from_match
 from pdf_writer import backup, write_metadata
@@ -287,6 +293,53 @@ class SeriesModal(ModalScreen[str]):
 
     def _submit(self) -> None:
         self.dismiss(self.query_one("#series", Input).value.strip())
+
+
+def open_in_viewer(path: Path) -> None:
+    """Opens a file in the system's default viewer, without waiting."""
+    if sys.platform == "darwin":
+        subprocess.Popen(["open", str(path)])
+    elif sys.platform == "win32":
+        os.startfile(path)  # noqa: S606 -- a local thumbnail this app just wrote
+    else:
+        subprocess.Popen(["xdg-open", str(path)])
+
+
+class BackCoverModal(ModalScreen[bool]):
+    """Asked only when a back-cover move is on and no barcode was found:
+    is this candidate page the back cover? A terminal can't show the page
+    itself, so "Open page" opens its thumbnail in the system viewer."""
+
+    DEFAULT_CSS = """
+    BackCoverModal { align: center middle; }
+    BackCoverModal > Vertical {
+        width: 80; height: auto; border: thick $warning; padding: 1 2;
+    }
+    """
+
+    def __init__(self, book_title: str, question: BackCoverQuestion):
+        super().__init__()
+        self.book_title = book_title
+        self.question = question
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            for line in describe_question(self.book_title, self.question):
+                yield Label(line, markup=False)
+            with Horizontal():
+                yield Button("Yes, move it", id="yes", variant="primary")
+                yield Button("No, leave it", id="no")
+                if self.question.candidate_png is not None:
+                    yield Button("Open page", id="open")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "open":
+            try:
+                open_in_viewer(self.question.candidate_png)
+            except OSError as exc:
+                self.notify(f"Couldn't open the page: {exc}", severity="error", markup=False)
+            return
+        self.dismiss(event.button.id == "yes")
 
 
 class WatermarkModal(ModalScreen[bool]):
@@ -623,6 +676,8 @@ class TagApp(App[None]):
         hyperlink_gurps: bool = False,
         hyperlink_mongoose: bool = False,
         page_labels: bool = False,
+        back_cover_to_page_2: bool = False,
+        back_cover_to_end: bool = False,
     ):
         super().__init__()
         self.pdfs = pdfs
@@ -638,9 +693,12 @@ class TagApp(App[None]):
         self.hyperlink_gurps = hyperlink_gurps
         self.hyperlink_mongoose = hyperlink_mongoose
         self.page_labels = page_labels
+        self.back_cover_to_page_2 = back_cover_to_page_2
+        self.back_cover_to_end = back_cover_to_end
         self.rename = rename
         self.root_mode = root_mode
         self.history: list[str] = []
+        self._tmpdirs: list[Path] = []
 
     def on_mount(self) -> None:
         self.run_flow()
@@ -664,6 +722,8 @@ class TagApp(App[None]):
                 self._log("Stopped.")
                 break
 
+        for tmpdir in self._tmpdirs:
+            shutil.rmtree(tmpdir, ignore_errors=True)
         summary = "\n".join(["Run summary:", *self.history]) if self.history else "Run summary: nothing to report."
         self.exit(message=summary)
 
@@ -841,6 +901,9 @@ class TagApp(App[None]):
         def log_line(line: str) -> None:
             self.call_from_thread(self._log, line)
 
+        # Moved here rather than by write_metadata()'s own back-cover step,
+        # because only tag can ask about a back cover with no barcode.
+        await self._maybe_move_back_cover(path)
         result = await self._call(
             write_metadata, path, row, bookorbit_mode=self.bookorbit_mode, convert_images=self.convert_images,
             convert_grayscale=self.convert_grayscale,
@@ -853,6 +916,38 @@ class TagApp(App[None]):
             outcome = await self._call(do_rename, path)
             if outcome:
                 self._log(outcome)
+
+    async def _maybe_move_back_cover(self, path: Path) -> None:
+        """--back-cover-to-page-2/--back-cover-to-end for one file: a
+        barcode locates the back cover automatically; with no barcode, ask
+        about the candidate page (PDF-only releases usually have none).
+        Backs up first, same as watermark removal, since this runs before
+        write_metadata() makes its own backup."""
+        if not (self.back_cover_to_page_2 or self.back_cover_to_end):
+            return
+        to = "page-2" if self.back_cover_to_page_2 else "end"
+        self.notify(f"Looking for the back cover of {path.name}...", timeout=6, markup=False)
+        location = await self._call(locate_back_cover, path, to)
+        index, reason = location.index, location.reason
+        if index is None and location.candidate is not None:
+            tmpdir = Path(tempfile.mkdtemp(prefix="dtrpg-back-cover-"))
+            self._tmpdirs.append(tmpdir)
+            question = await self._call(prepare_question, path, location, to, tmpdir)
+            if await self.push_screen_wait(BackCoverModal(path.name, question)):
+                index, reason = question.page_index, "confirmed by you"
+            else:
+                self._log(f"Back cover not moved for {path.name} (PDF page {question.page_index + 1} isn't the back cover)")
+                return
+        if index is None:
+            self._log(f"Back cover not moved for {path.name}: {reason}")
+            return
+        try:
+            await self._call(backup, path)
+        except OSError as exc:
+            self._log(f"Back cover not moved for {path.name}: backup failed: {exc}")
+            return
+        result = await self._call(move_back_cover, path, to, index, reason)
+        self._log(f"{path.name}: {result.message}" if result.moved else f"Back cover not moved for {path.name}: {result.message}")
 
     async def _call(self, fn, *args, **kwargs):
         """Run a blocking call (pikepdf/requests I/O) off the event loop

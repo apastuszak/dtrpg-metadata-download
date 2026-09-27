@@ -95,6 +95,14 @@ CONVERT_GRAYSCALE_HINT = (
     "on PATH). Mutually exclusive with converting to RGB above -- checking one unchecks the other."
 )
 RENAME_HINT = "Renames the file after the metadata update, using the format: Series Name - Book Name.pdf"
+BACK_COVER_TO_PAGE_2_HINT = (
+    "Moves the back cover to right after the front cover. The back cover is found by its barcode; "
+    "books with a wraparound cover or no back cover are left alone."
+)
+BACK_COVER_TO_END_HINT = (
+    "Moves a back cover that sits right after the front cover to the end of the book. Mutually "
+    "exclusive with the option above -- checking one unchecks the other."
+)
 PAGE_LABELS_HINT = (
     "Sets the page numbers your PDF reader shows: \"Cover\" for the front and back cover, i, ii, iii "
     "before page 1, then the page numbers printed in the book, read from its headers and footers. "
@@ -398,6 +406,19 @@ def _make_log_widget() -> QPlainTextEdit:
     return widget
 
 
+def _add_back_cover_checks(layout: QVBoxLayout) -> tuple[QCheckBox, QCheckBox]:
+    """The mutually exclusive --back-cover-to-page-2/--back-cover-to-end
+    pair, shared by the Tag, Write PDFs and All tabs."""
+    to_page_2 = QCheckBox("Move back cover to page 2 (--back-cover-to-page-2)")
+    layout.addWidget(to_page_2)
+    layout.addWidget(_make_hint_label(BACK_COVER_TO_PAGE_2_HINT))
+    to_end = QCheckBox("Move back cover to the end (--back-cover-to-end)")
+    layout.addWidget(to_end)
+    layout.addWidget(_make_hint_label(BACK_COVER_TO_END_HINT))
+    _make_mutually_exclusive(to_page_2, to_end)
+    return to_page_2, to_end
+
+
 def _make_mutually_exclusive(a: QCheckBox, b: QCheckBox) -> None:
     """Checking either box unchecks the other -- used for --convert-images
     vs --convert-grayscale (opposite operations on the same images).
@@ -444,7 +465,7 @@ def _do_write_pdfs(
     convert_grayscale: bool = False,
     background_layer: bool = False, remove_background: bool = False,
     hyperlink_gurps: bool = False, hyperlink_mongoose: bool = False,
-    page_labels: bool = False,
+    page_labels: bool = False, back_cover_to_page_2: bool = False, back_cover_to_end: bool = False,
 ) -> None:
     if not any(r.is_approved() for r in rows):
         log("No approved/auto-accepted rows to write.")
@@ -454,7 +475,8 @@ def _do_write_pdfs(
         convert_grayscale=convert_grayscale,
         background_layer=background_layer, remove_background=remove_background,
         hyperlink_gurps=hyperlink_gurps, hyperlink_mongoose=hyperlink_mongoose,
-        page_labels=page_labels, log=log,
+        page_labels=page_labels, back_cover_to_page_2=back_cover_to_page_2,
+        back_cover_to_end=back_cover_to_end, log=log,
     )
     succeeded = sum(1 for r in results if r.success)
     log(f"Wrote metadata to {succeeded}/{len(results)} approved files")
@@ -616,6 +638,8 @@ class WritePdfsTab(QWidget):
         layout.addWidget(_make_hint_label(REMOVE_BACKGROUND_HINT))
         _make_mutually_exclusive(self.background_layer_check, self.remove_background_check)
 
+        self.back_cover_to_page_2_check, self.back_cover_to_end_check = _add_back_cover_checks(layout)
+
         self.page_labels_check = QCheckBox("Set page labels (--page-labels)")
         layout.addWidget(self.page_labels_check)
         layout.addWidget(_make_hint_label(PAGE_LABELS_HINT))
@@ -646,6 +670,7 @@ class WritePdfsTab(QWidget):
             self.background_layer_check.isChecked(), self.remove_background_check.isChecked(),
             self.hyperlink_gurps_check.isChecked(), self.hyperlink_mongoose_check.isChecked(),
             self.page_labels_check.isChecked(),
+            self.back_cover_to_page_2_check.isChecked(), self.back_cover_to_end_check.isChecked(),
         )
 
     def _worker(
@@ -653,7 +678,7 @@ class WritePdfsTab(QWidget):
         convert_grayscale: bool,
         background_layer: bool, remove_background: bool,
         hyperlink_gurps: bool, hyperlink_mongoose: bool,
-        page_labels: bool,
+        page_labels: bool, back_cover_to_page_2: bool, back_cover_to_end: bool,
     ) -> None:
         rows = load_review(review_csv)
         _do_write_pdfs(
@@ -661,7 +686,7 @@ class WritePdfsTab(QWidget):
             convert_grayscale,
             background_layer, remove_background,
             hyperlink_gurps, hyperlink_mongoose,
-            page_labels,
+            page_labels, back_cover_to_page_2, back_cover_to_end,
         )
 
     def _on_done(self) -> None:
@@ -894,6 +919,8 @@ class AllTab(QWidget):
         layout.addWidget(_make_hint_label(CONVERT_GRAYSCALE_HINT))
         _make_mutually_exclusive(self.convert_images_check, self.convert_grayscale_check)
 
+        self.back_cover_to_page_2_check, self.back_cover_to_end_check = _add_back_cover_checks(layout)
+
         self.page_labels_check = QCheckBox("Set page labels (--page-labels)")
         layout.addWidget(self.page_labels_check)
         layout.addWidget(_make_hint_label(PAGE_LABELS_HINT))
@@ -925,16 +952,20 @@ class AllTab(QWidget):
             self.refresh_check.isChecked(), self.apply_review_check.isChecked(), self.bookorbit_check.isChecked(),
             self.convert_images_check.isChecked(), self.convert_grayscale_check.isChecked(),
             self.page_labels_check.isChecked(),
+            self.back_cover_to_page_2_check.isChecked(), self.back_cover_to_end_check.isChecked(),
         )
 
     def _worker(
         self, root: str, review_csv: Path, manual_overrides_path: Path, thresholds: dict,
         refresh_library: bool, apply_review: bool, bookorbit_mode: bool, convert_images: bool,
-        convert_grayscale: bool, page_labels: bool,
+        convert_grayscale: bool, page_labels: bool, back_cover_to_page_2: bool, back_cover_to_end: bool,
     ) -> None:
         log = self.runner.log
         merged = _do_scan(self.config_, log, root, review_csv, manual_overrides_path, thresholds, refresh_library, apply_review)
-        _do_write_pdfs(log, merged, root, bookorbit_mode, convert_images, convert_grayscale, page_labels=page_labels)
+        _do_write_pdfs(
+            log, merged, root, bookorbit_mode, convert_images, convert_grayscale, page_labels=page_labels,
+            back_cover_to_page_2=back_cover_to_page_2, back_cover_to_end=back_cover_to_end,
+        )
 
     def _on_done(self) -> None:
         self.run_button.setEnabled(True)

@@ -86,7 +86,7 @@ Renames each already-tagged PDF to `<series> - <title>.pdf` (or just `<title>.pd
 
 Sets the page "numbers" your PDF reader shows in its page box and thumbnail panel, so "go to page 47" lands on the page printed 47:
 
-- The front cover (PDF page 1) and back cover are labeled **Cover**. The back cover is normally the last page. Some publishers (Steve Jackson Games, Delta Green) put it second, right after the front cover; that's detected from the retail barcode on PDF page 2, and the last page is then numbered like any other page.
+- The front cover (PDF page 1) and back cover are labeled **Cover**. The back cover is normally the last page. Some publishers (Steve Jackson Games, Delta Green, Evil Hat) put it second, right after the front cover; that's detected from the retail barcode on PDF page 2, and the last page is then numbered like any other page. Books with no back cover at all are recognized in two common cases — a single wraparound cover as PDF page 1 (Shadowrun), or a blank last page — and their last page gets its number instead of "Cover".
 - Pages before printed page 1 get lowercase roman numerals: **i, ii, iii**, ...
 - Every other page gets the number actually printed on it, read automatically from the page headers and footers — including pages that show no number (title pages, full-page art, ads), and the pages before the first visible number. If the first number you can see is 5, the pages before it are worked back to 4, 3, 2, 1.
 
@@ -168,6 +168,14 @@ Available on `tag` and `write-pdfs` (and as checkboxes in the GUI's Tag/Write PD
 #### `--background-layer` / `--remove-background`
 
 Available on `tag`, `write-pdfs`, and `all` (and as checkboxes in the GUI's Tag/Write PDFs tabs). Tags each page's full-page decorative background as a toggleable layer, or deletes it outright, before metadata is written, using a vendored script (see `rpg_background_layer.py`/`castles_and_crusades_background_layer.py`). For Castles and Crusades rulebooks only. Off by default, and mutually exclusive with each other (opposite operations on the same background) — checking one unchecks the other in the GUI, and the CLI refuses both flags together. A publisher-specific integration, not a general feature of this project.
+
+#### `--back-cover-to-page-2` / `--back-cover-to-end`
+
+Available on `tag`, `write-pdfs`, and `all` (and as checkboxes in the GUI's Tag, Write PDFs, and All tabs). Moves the back cover to right after the front cover, or from there to the end of the book, so your whole library can follow one convention. Off by default, and mutually exclusive with each other.
+
+The back cover is found by its retail barcode on PDF page 2 or the last page. A book with a single wraparound cover (Shadowrun) has no separate back cover and is left alone, with the reason logged, as is one whose back cover is already where you asked.
+
+PDF-only releases usually have no barcode. For those, `tag` asks: it shows you the page that would be the back cover (the last page when moving to page 2, page 2 when moving to the end) and moves it only if you say yes. The GUI shows it next to the front cover. The terminal UI shows its text and has an "Open page" button that opens it in your PDF viewer. A blank page is never offered, so books that simply end on a blank page aren't asked about. `write-pdfs` and `all` can't ask, so there a book without a barcode is left alone, with a note that `tag` can handle it. Bookmarks, in-document links, and existing page labels all follow their pages. Runs first among the write steps, before any other conversion and before page labels are worked out.
 
 #### `--page-labels`
 

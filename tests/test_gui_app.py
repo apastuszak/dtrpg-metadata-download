@@ -169,6 +169,99 @@ def _labels(path: Path) -> list[str]:
         doc.close()
 
 
+def test_controller_back_cover_to_page_2():
+    import random
+
+    import pymupdf as fitz
+
+    with tempfile.TemporaryDirectory() as tmp:
+        pdf = Path(tmp) / "Book.pdf"
+        doc = fitz.open()
+        for text in ("FRONT", "BODY 1", "BODY 2", "BODY 3", "BACK"):
+            page = doc.new_page()
+            page.insert_text((72, 100), text)
+            if text == "BACK":
+                rnd, x = random.Random(1), 400.0
+                for _ in range(30):
+                    w = rnd.choice([1.0, 1.5, 2.0, 3.0])
+                    page.draw_rect(fitz.Rect(x, 650, x + w, 700), color=None, fill=(0, 0, 0))
+                    x += w + rnd.choice([1.0, 1.5, 2.0, 3.0])
+        doc.save(pdf)
+        doc.close()
+        meta = ProductMetadata(title="T", series="S", description="d", source=Source.DTRPG_LIBRARY, product_id="1")
+        with patch("gui_tag_flow.find_candidates", return_value=[(meta, 95.0)]):
+            responses = {
+                "candidate": lambda payload: CandidateResult(action="pick", index=0),
+                "confirm": lambda payload: ConfirmResult(action="confirm", meta=payload["meta"]),
+            }
+            controller = _drive_controller([pdf], _client(), responses, back_cover_to_page_2=True)
+
+        with fitz.open(pdf) as moved:
+            texts = [page.get_text("text").strip() for page in moved]
+        assert texts == ["FRONT", "BACK", "BODY 1", "BODY 2", "BODY 3"], texts
+        assert any("moved the back cover to PDF page 2" in line for line in controller.history), controller.history
+    print("PASS: controller_back_cover_to_page_2")
+
+
+def test_controller_back_cover_without_barcode_asks():
+    """No barcode: the controller asks (a "back_cover" dialog request with
+    the candidate page) and moves only on a "yes"."""
+    import pymupdf as fitz
+
+    with tempfile.TemporaryDirectory() as tmp:
+        pdf = Path(tmp) / "Book.pdf"
+        doc = fitz.open()
+        for text in ("FRONT", "BODY 1", "BODY 2", "BACK"):
+            doc.new_page().insert_text((72, 100), text)
+        doc.save(pdf)
+        doc.close()
+        meta = ProductMetadata(title="T", series="S", description="d", source=Source.DTRPG_LIBRARY, product_id="1")
+        asked = []
+
+        def answer(payload):
+            question = payload["question"]
+            asked.append((question.page_index, question.front_png is not None, question.candidate_png is not None))
+            return True
+
+        with patch("gui_tag_flow.find_candidates", return_value=[(meta, 95.0)]):
+            responses = {
+                "candidate": lambda payload: CandidateResult(action="pick", index=0),
+                "confirm": lambda payload: ConfirmResult(action="confirm", meta=payload["meta"]),
+                "back_cover": answer,
+            }
+            _drive_controller([pdf], _client(), responses, back_cover_to_page_2=True)
+
+        with fitz.open(pdf) as moved:
+            texts = [page.get_text("text").strip() for page in moved]
+        assert asked == [(3, True, True)], asked
+        assert texts == ["FRONT", "BACK", "BODY 1", "BODY 2"], texts
+    print("PASS: controller_back_cover_without_barcode_asks")
+
+
+def test_back_cover_dialog_shows_both_pages() -> None:
+    import pymupdf as fitz
+
+    from back_cover import locate_back_cover, prepare_question
+    from gui_tag_flow import BackCoverDialog
+
+    with tempfile.TemporaryDirectory() as tmp:
+        pdf = Path(tmp) / "Book.pdf"
+        doc = fitz.open()
+        for text in ("FRONT", "BODY", "BACK"):
+            doc.new_page().insert_text((72, 100), text)
+        doc.save(pdf)
+        doc.close()
+        location = locate_back_cover(pdf, "page-2")
+        question = prepare_question(pdf, location, "page-2", Path(tmp))
+        dialog = BackCoverDialog(None, {"book_title": "Book.pdf", "question": question})
+        from PyQt6.QtWidgets import QLabel as _QLabel
+        pictures = [label for label in dialog.findChildren(_QLabel) if label.pixmap() is not None and not label.pixmap().isNull()]
+        assert len(pictures) == 2, "expected thumbnails of the front cover and the candidate page"
+        QTest.mouseClick(dialog.yes_button, Qt.MouseButton.LeftButton)
+        assert dialog.value is True
+    print("PASS: back_cover_dialog_shows_both_pages")
+
+
 def test_controller_page_labels_written():
     with tempfile.TemporaryDirectory() as tmp:
         pdf = Path(tmp) / "Book.pdf"
@@ -710,6 +803,8 @@ def test_page_labels_tab_dry_run_then_write(app: QApplication) -> None:
 NO_APP_TESTS = [
     test_controller_candidate_pick_write,
     test_controller_page_labels_written,
+    test_controller_back_cover_to_page_2,
+    test_controller_back_cover_without_barcode_asks,
     test_controller_watermark_detected_removed,
     test_controller_watermark_removal_backs_up_original_first,
     test_controller_manual_entry_write,
@@ -719,6 +814,7 @@ NO_APP_TESTS = [
 
 NO_ARG_APP_TESTS = [
     test_show_confirm_dialog_edit_before_confirm,
+    test_back_cover_dialog_shows_both_pages,
     test_watermark_dialog_remove,
     test_watermark_dialog_leave,
     test_show_manual_entry_dialog_multiline_description,
