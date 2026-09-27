@@ -622,6 +622,7 @@ class TagApp(App[None]):
         remove_background: bool = False,
         hyperlink_gurps: bool = False,
         hyperlink_mongoose: bool = False,
+        page_labels: bool = False,
     ):
         super().__init__()
         self.pdfs = pdfs
@@ -636,6 +637,7 @@ class TagApp(App[None]):
         self.remove_background = remove_background
         self.hyperlink_gurps = hyperlink_gurps
         self.hyperlink_mongoose = hyperlink_mongoose
+        self.page_labels = page_labels
         self.rename = rename
         self.root_mode = root_mode
         self.history: list[str] = []
@@ -844,7 +846,7 @@ class TagApp(App[None]):
             convert_grayscale=self.convert_grayscale,
             background_layer=self.background_layer, remove_background=self.remove_background,
             hyperlink_gurps=self.hyperlink_gurps, hyperlink_mongoose=self.hyperlink_mongoose,
-            log=log_line,
+            page_labels=self.page_labels, log=log_line,
         )
         self._log(f"Wrote metadata to {path.name}" if result.success else f"FAILED: {result.message}")
         if result.success and self.rename:

@@ -143,6 +143,49 @@ def test_controller_candidate_pick_write():
     print("PASS: controller_candidate_pick_write")
 
 
+def _numbered_book(path: Path) -> list[str]:
+    """Same synthetic book as tests/test_tag_tui.py's helper of this name --
+    see its docstring. Returns the labels --page-labels should produce."""
+    import pymupdf as fitz
+
+    doc = fitz.open()
+    for printed in (None, None, None, 2, 3, 4, 5, None):
+        page = doc.new_page()
+        page.insert_text((72, 100), "Body text")
+        if printed is not None:
+            page.insert_text((page.rect.width / 2, page.rect.height - 30), str(printed))
+    doc.save(path)
+    doc.close()
+    return ["Cover", "i", "1", "2", "3", "4", "5", "Cover"]
+
+
+def _labels(path: Path) -> list[str]:
+    import pymupdf as fitz
+
+    doc = fitz.open(path)
+    try:
+        return [page.get_label() for page in doc]
+    finally:
+        doc.close()
+
+
+def test_controller_page_labels_written():
+    with tempfile.TemporaryDirectory() as tmp:
+        pdf = Path(tmp) / "Book.pdf"
+        expected = _numbered_book(pdf)
+        meta = ProductMetadata(title="T", series="S", description="d", source=Source.DTRPG_LIBRARY, product_id="1")
+        with patch("gui_tag_flow.find_candidates", return_value=[(meta, 95.0)]):
+            responses = {
+                "candidate": lambda payload: CandidateResult(action="pick", index=0),
+                "confirm": lambda payload: ConfirmResult(action="confirm", meta=payload["meta"]),
+            }
+            controller = _drive_controller([pdf], _client(), responses, page_labels=True)
+
+        assert _labels(pdf) == expected, _labels(pdf)
+        assert any("Page labels set" in line for line in controller.history), controller.history
+    print("PASS: controller_page_labels_written")
+
+
 def test_controller_watermark_detected_removed():
     # detect_watermark()/remove_watermark() are verified against the real
     # sibling script with ad hoc scripts (see watermark_removal.py's own
@@ -630,8 +673,43 @@ def test_tag_worker_run_catches_exception(app: QApplication) -> None:
     print("PASS: tag_worker_run_catches_exception")
 
 
+def test_page_labels_tab_dry_run_then_write(app: QApplication) -> None:
+    """Dry run must show the plan and leave the file (and its absence of a
+    .bak) untouched; a real run writes the labels and makes the backup."""
+    from gui_app import PageLabelsTab
+
+    def run_and_wait(tab: PageLabelsTab) -> None:
+        QTest.mouseClick(tab.run_button, Qt.MouseButton.LeftButton)
+        deadline = __import__("time").time() + 20
+        while not tab.run_button.isEnabled() and __import__("time").time() < deadline:
+            app.processEvents()
+        assert tab.run_button.isEnabled(), "page-labels run never finished"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        pdf = Path(tmp) / "Book.pdf"
+        expected = _numbered_book(pdf)
+        original = pdf.read_bytes()
+        tab = PageLabelsTab({})
+        tab.file_radio.setChecked(True)
+        tab.path_edit.setText(str(pdf))
+
+        tab.dry_run_check.setChecked(True)
+        run_and_wait(tab)
+        log = tab.log.toPlainText()
+        assert "Would label: Book.pdf" in log and "PDF pages 3-7: 1 to 5" in log, log
+        assert pdf.read_bytes() == original, "dry run modified the PDF"
+        assert not pdf.with_suffix(".pdf.bak").exists(), "dry run made a backup"
+
+        tab.dry_run_check.setChecked(False)
+        run_and_wait(tab)
+        assert _labels(pdf) == expected, _labels(pdf)
+        assert pdf.with_suffix(".pdf.bak").read_bytes() == original
+    print("PASS: page_labels_tab_dry_run_then_write")
+
+
 NO_APP_TESTS = [
     test_controller_candidate_pick_write,
+    test_controller_page_labels_written,
     test_controller_watermark_detected_removed,
     test_controller_watermark_removal_backs_up_original_first,
     test_controller_manual_entry_write,
@@ -656,6 +734,7 @@ NO_ARG_APP_TESTS = [
 APP_ARG_TESTS = [
     test_tag_worker_signal_round_trip,
     test_tag_worker_run_catches_exception,
+    test_page_labels_tab_dry_run_then_write,
 ]
 
 

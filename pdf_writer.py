@@ -98,6 +98,7 @@ from lxml.etree import QName
 
 from image_converter import convert_images_to_rgb
 from matcher import scan_pdfs
+from page_labels import PageLabelPlan, detect_page_labels, set_page_labels
 from review import ReviewRow
 from rpg_background_layer import apply_background_layer
 from rpg_grayscale import convert_pdf_grayscale
@@ -231,6 +232,43 @@ def backup(path: Path) -> Path:
     return backup_path
 
 
+def _log_both(log: Callable[[str], None] | None, level: int, message: str) -> None:
+    logger.log(level, message)
+    if log is not None:
+        log(message)
+
+
+@dataclass
+class PageLabelResult:
+    status: str  # "labeled", "skipped" or "failed"
+    message: str
+    plan: PageLabelPlan | None = None
+
+
+def write_page_labels_only(path: Path, dry_run: bool = False) -> PageLabelResult:
+    """The standalone `page-labels` command's per-file step: detect, then
+    (unless dry_run) back up and write only /PageLabels. Lives here rather
+    than in page_labels.py so the one-time backup rule stays in one place."""
+    if not path.exists():
+        return PageLabelResult("failed", "file not found")
+    plan, reason = detect_page_labels(path)
+    if plan is None:
+        return PageLabelResult("skipped", reason)
+    if dry_run:
+        return PageLabelResult("labeled", reason, plan)
+    try:
+        backup(path)
+        with pikepdf.open(path, allow_overwriting_input=True) as pdf:
+            set_page_labels(pdf, plan)
+            # pikepdf's default re-serializes the whole XMP packet on save;
+            # this path must leave an already-tagged file's Calibre XMP
+            # byte-for-byte alone (see the "Calibre series bug" history).
+            pdf.save(path, fix_metadata_version=False)
+    except (pikepdf.PdfError, OSError, ValueError) as exc:
+        return PageLabelResult("failed", f"write failed: {exc}", plan)
+    return PageLabelResult("labeled", reason, plan)
+
+
 def _run_hyperlink_step(
     path: Path, system_label: str, script_path: str | Path, log: Callable[[str], None] | None
 ) -> None:
@@ -267,6 +305,7 @@ def write_metadata(
     remove_background: bool = False,
     hyperlink_gurps: bool = False,
     hyperlink_mongoose: bool = False,
+    page_labels: bool = False,
     log: Callable[[str], None] | None = None,
 ) -> WriteResult:
     """`log`, if given, is called with human-readable progress lines for
@@ -377,8 +416,25 @@ def write_metadata(
     if hyperlink_mongoose:
         _run_hyperlink_step(path, "Mongoose", MONGOOSE_HYPERLINK_SCRIPT, log)
 
+    # Read after every step above (they rewrite the file) and written in
+    # the same pikepdf save as the metadata below -- labels live in the
+    # document catalog, not the metadata, so --bookorbit-mode's wipe
+    # doesn't touch them. Best-effort, like every other optional step.
+    label_plan: PageLabelPlan | None = None
+    label_reason = ""
+    if page_labels:
+        label_plan, label_reason = detect_page_labels(path)
+        if label_plan is None:
+            _log_both(log, logging.WARNING, f"Page labels left unchanged for {path.name}: {label_reason}")
+
     try:
         with pikepdf.open(path, allow_overwriting_input=True) as pdf:
+            if label_plan is not None:
+                try:
+                    set_page_labels(pdf, label_plan)
+                    _log_both(log, logging.INFO, f"Page labels set for {path.name} ({label_reason})")
+                except ValueError as exc:
+                    _log_both(log, logging.WARNING, f"Page labels left unchanged for {path.name}: {exc}")
             if bookorbit_mode:
                 # See module docstring: wipe everything, not just this
                 # tool's own fields, so BookOrbit's embedded-metadata
@@ -536,6 +592,7 @@ def write_approved(
     remove_background: bool = False,
     hyperlink_gurps: bool = False,
     hyperlink_mongoose: bool = False,
+    page_labels: bool = False,
     log: Callable[[str], None] | None = None,
 ) -> list[WriteResult]:
     root = Path(root)
@@ -576,7 +633,7 @@ def write_approved(
                     convert_grayscale=convert_grayscale,
                     background_layer=background_layer, remove_background=remove_background,
                     hyperlink_gurps=hyperlink_gurps, hyperlink_mongoose=hyperlink_mongoose,
-                    log=log,
+                    page_labels=page_labels, log=log,
                 )
             )
         except Exception as exc:

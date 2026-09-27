@@ -95,6 +95,7 @@ from gui_app import (
     CONVERT_IMAGES_HINT,
     HYPERLINK_GURPS_HINT,
     HYPERLINK_MONGOOSE_HINT,
+    PAGE_LABELS_HINT,
     REMOVE_BACKGROUND_HINT,
     RENAME_HINT,
     _make_description_label,
@@ -140,6 +141,7 @@ class TagFlowController:
         remove_background: bool = False,
         hyperlink_gurps: bool = False,
         hyperlink_mongoose: bool = False,
+        page_labels: bool = False,
     ):
         self.pdfs = pdfs
         self.client = client
@@ -153,6 +155,7 @@ class TagFlowController:
         self.remove_background = remove_background
         self.hyperlink_gurps = hyperlink_gurps
         self.hyperlink_mongoose = hyperlink_mongoose
+        self.page_labels = page_labels
         self.rename = rename
         self.root_mode = root_mode
         self._notify = notify
@@ -348,7 +351,7 @@ class TagFlowController:
             convert_grayscale=self.convert_grayscale,
             background_layer=self.background_layer, remove_background=self.remove_background,
             hyperlink_gurps=self.hyperlink_gurps, hyperlink_mongoose=self.hyperlink_mongoose,
-            log=self._log,
+            page_labels=self.page_labels, log=self._log,
         )
         self._log(f"Wrote metadata to {path.name}" if result.success else f"FAILED: {result.message}")
         if result.success and self.rename:
@@ -377,7 +380,7 @@ class TagWorker(QObject):
         bookorbit_mode, rename, root_mode, stop_event, convert_images=False,
         convert_grayscale=False,
         background_layer=False, remove_background=False,
-        hyperlink_gurps=False, hyperlink_mongoose=False,
+        hyperlink_gurps=False, hyperlink_mongoose=False, page_labels=False,
     ):
         super().__init__()
         self.controller = TagFlowController(
@@ -387,6 +390,7 @@ class TagWorker(QObject):
             convert_grayscale=convert_grayscale,
             background_layer=background_layer, remove_background=remove_background,
             hyperlink_gurps=hyperlink_gurps, hyperlink_mongoose=hyperlink_mongoose,
+            page_labels=page_labels,
         )
 
     def _notify(self, kind: str, payload: dict, response_q: "queue.Queue") -> None:
@@ -912,6 +916,10 @@ class TagTab(QWidget):
         layout.addWidget(_make_hint_label(REMOVE_BACKGROUND_HINT))
         _make_mutually_exclusive(self.background_layer_check, self.remove_background_check)
 
+        self.page_labels_check = QCheckBox("Set page labels (--page-labels)")
+        layout.addWidget(self.page_labels_check)
+        layout.addWidget(_make_hint_label(PAGE_LABELS_HINT))
+
         self.rename_check = QCheckBox("Rename after write (--rename)")
         layout.addWidget(self.rename_check)
         layout.addWidget(_make_hint_label(RENAME_HINT))
@@ -987,6 +995,7 @@ class TagTab(QWidget):
             remove_background=self.remove_background_check.isChecked(),
             hyperlink_gurps=self.hyperlink_gurps_check.isChecked(),
             hyperlink_mongoose=self.hyperlink_mongoose_check.isChecked(),
+            page_labels=self.page_labels_check.isChecked(),
         )
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)

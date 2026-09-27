@@ -91,6 +91,59 @@ async def test_candidate_pick_write():
     print("PASS: candidate_pick_write")
 
 
+def _numbered_book(path: Path) -> list[str]:
+    """8 pages: an unnumbered cover, two unnumbered front pages, footer
+    numbers 2-5 (the first visible number is 2, so the page before it has
+    to be worked back to 1), and an unnumbered back cover. Returns the
+    labels --page-labels should produce."""
+    import pymupdf as fitz
+
+    doc = fitz.open()
+    for printed in (None, None, None, 2, 3, 4, 5, None):
+        page = doc.new_page()
+        page.insert_text((72, 100), "Body text")
+        if printed is not None:
+            page.insert_text((page.rect.width / 2, page.rect.height - 30), str(printed))
+    doc.save(path)
+    doc.close()
+    return ["Cover", "i", "1", "2", "3", "4", "5", "Cover"]
+
+
+def _labels(path: Path) -> list[str]:
+    import pymupdf as fitz
+
+    doc = fitz.open(path)
+    try:
+        return [page.get_label() for page in doc]
+    finally:
+        doc.close()
+
+
+async def test_page_labels_flag():
+    with tempfile.TemporaryDirectory() as tmp:
+        pdf = Path(tmp) / "Book.pdf"
+        expected = _numbered_book(pdf)
+        client = _client(
+            search_library=[
+                ProductMetadata(title="Picked Title", series="S", description="d",
+                                source=Source.DTRPG_LIBRARY, product_id="1")
+            ],
+        )
+        app = TagApp(pdfs=[pdf], client=client, manual_overrides={}, known_urls={},
+                     thresholds={}, bookorbit_mode=False, rename=False, root_mode=False,
+                     page_labels=True)
+        async with app.run_test() as pilot:
+            await pilot.pause(delay=0.3)
+            await pilot.press("enter")
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause(delay=0.3)
+
+        assert _labels(pdf) == expected, _labels(pdf)
+        assert any("Page labels set" in line for line in app.history), app.history
+    print("PASS: page_labels_flag")
+
+
 async def test_manual_override_confirm():
     with tempfile.TemporaryDirectory() as tmp:
         pdf = Path(tmp) / "Override.pdf"
@@ -546,6 +599,7 @@ async def test_no_watermark_modal_when_none_detected():
 
 TESTS = [
     test_candidate_pick_write,
+    test_page_labels_flag,
     test_manual_override_confirm,
     test_confirm_screen_edit_before_write,
     test_series_dialog_when_blank,

@@ -1,5 +1,5 @@
 """PyQt6 desktop GUI for dtrpg-metadata-download, covering every
-subcommand in one window (Tag/Scan/Review/Write PDFs/Rename/All).
+subcommand in one window (Tag/Scan/Review/Write PDFs/Rename/Page Labels/All/Preferences).
 
 Presentation layer only, exactly like tag_tui.py is for `tag` alone: every
 tab here calls straight into matcher.py/review.py/pdf_writer.py/renamer.py
@@ -65,7 +65,7 @@ from PyQt6.QtWidgets import (
 
 from dtrpg_client import DtrpgClient
 from matcher import load_known_urls, load_manual_overrides, run_scan_batch, scan_pdfs
-from pdf_writer import write_approved
+from pdf_writer import write_approved, write_page_labels_only
 from preferences import (
     DEFAULT_PREFERENCES_PATH,
     Preferences,
@@ -95,6 +95,11 @@ CONVERT_GRAYSCALE_HINT = (
     "on PATH). Mutually exclusive with converting to RGB above -- checking one unchecks the other."
 )
 RENAME_HINT = "Renames the file after the metadata update, using the format: Series Name - Book Name.pdf"
+PAGE_LABELS_HINT = (
+    "Sets the page numbers your PDF reader shows: \"Cover\" for the front and back cover, i, ii, iii "
+    "before page 1, then the page numbers printed in the book, read from its headers and footers. "
+    "Books whose numbering can't be read confidently keep their existing labels."
+)
 HYPERLINK_GURPS_HINT = (
     "Auto-hyperlinks in-text page and chapter references (e.g. \"see p. 208\") using a vendored "
     "GURPS-specific script. Only useful for GURPS PDFs."
@@ -439,6 +444,7 @@ def _do_write_pdfs(
     convert_grayscale: bool = False,
     background_layer: bool = False, remove_background: bool = False,
     hyperlink_gurps: bool = False, hyperlink_mongoose: bool = False,
+    page_labels: bool = False,
 ) -> None:
     if not any(r.is_approved() for r in rows):
         log("No approved/auto-accepted rows to write.")
@@ -447,7 +453,8 @@ def _do_write_pdfs(
         rows, root, bookorbit_mode=bookorbit_mode, convert_images=convert_images,
         convert_grayscale=convert_grayscale,
         background_layer=background_layer, remove_background=remove_background,
-        hyperlink_gurps=hyperlink_gurps, hyperlink_mongoose=hyperlink_mongoose, log=log,
+        hyperlink_gurps=hyperlink_gurps, hyperlink_mongoose=hyperlink_mongoose,
+        page_labels=page_labels, log=log,
     )
     succeeded = sum(1 for r in results if r.success)
     log(f"Wrote metadata to {succeeded}/{len(results)} approved files")
@@ -473,6 +480,23 @@ def _rename_one(pdf_path: Path, dry_run: bool, log) -> str:
     verb = "Would rename" if dry_run else "Renamed"
     log(f"{verb}: {pdf_path.name} -> {result.new_pdf.name}")
     return "renamed"
+
+
+def _label_one(pdf_path: Path, dry_run: bool, show_ranges: bool, log) -> str:
+    """GUI twin of dtrpg-metadata-download.py's _label_one(), same reason
+    _rename_one() above is duplicated."""
+    result = write_page_labels_only(pdf_path, dry_run=dry_run)
+    if result.status == "skipped":
+        log(f"SKIP: {pdf_path.name} ({result.message})")
+    elif result.status == "failed":
+        log(f"FAILED: {pdf_path.name}: {result.message}")
+    else:
+        verb = "Would label" if dry_run else "Labeled"
+        log(f"{verb}: {pdf_path.name} ({result.message})")
+        if show_ranges:
+            for line in result.plan.describe():
+                log(f"    {line}")
+    return result.status
 
 
 # ---------------------------------------------------------------------------
@@ -592,6 +616,10 @@ class WritePdfsTab(QWidget):
         layout.addWidget(_make_hint_label(REMOVE_BACKGROUND_HINT))
         _make_mutually_exclusive(self.background_layer_check, self.remove_background_check)
 
+        self.page_labels_check = QCheckBox("Set page labels (--page-labels)")
+        layout.addWidget(self.page_labels_check)
+        layout.addWidget(_make_hint_label(PAGE_LABELS_HINT))
+
         self.run_button = QPushButton("Write Approved PDFs")
         self.run_button.clicked.connect(self._run)
         layout.addWidget(self.run_button, alignment=Qt.AlignmentFlag.AlignLeft)
@@ -617,6 +645,7 @@ class WritePdfsTab(QWidget):
             self.convert_grayscale_check.isChecked(),
             self.background_layer_check.isChecked(), self.remove_background_check.isChecked(),
             self.hyperlink_gurps_check.isChecked(), self.hyperlink_mongoose_check.isChecked(),
+            self.page_labels_check.isChecked(),
         )
 
     def _worker(
@@ -624,6 +653,7 @@ class WritePdfsTab(QWidget):
         convert_grayscale: bool,
         background_layer: bool, remove_background: bool,
         hyperlink_gurps: bool, hyperlink_mongoose: bool,
+        page_labels: bool,
     ) -> None:
         rows = load_review(review_csv)
         _do_write_pdfs(
@@ -631,6 +661,7 @@ class WritePdfsTab(QWidget):
             convert_grayscale,
             background_layer, remove_background,
             hyperlink_gurps, hyperlink_mongoose,
+            page_labels,
         )
 
     def _on_done(self) -> None:
@@ -732,6 +763,98 @@ class RenameTab(QWidget):
         self.run_button.setEnabled(True)
 
 
+class PageLabelsTab(QWidget):
+    def __init__(self, config: dict):
+        super().__init__()
+        self.config_ = config
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(_make_description_label(
+            "Sets the page numbers your PDF reader shows, without tagging: \"Cover\" for the front "
+            "and back cover, i, ii, iii before page 1, then the page numbers printed in the book, read "
+            "from its headers and footers. Makes a one-time .bak backup first. Books whose numbering "
+            "can't be read confidently are skipped and keep their existing labels."
+        ))
+
+        mode_row = QHBoxLayout()
+        self.file_radio = QRadioButton("Single file")
+        self.root_radio = QRadioButton("Whole folder")
+        self.root_radio.setChecked(True)
+        self.mode_group = QButtonGroup(self)
+        self.mode_group.addButton(self.file_radio)
+        self.mode_group.addButton(self.root_radio)
+        mode_row.addWidget(self.file_radio)
+        mode_row.addWidget(self.root_radio)
+        mode_row.addStretch(1)
+        layout.addLayout(mode_row)
+
+        path_row = QHBoxLayout()
+        self.path_edit = QLineEdit(config.get("root", ""))
+        path_row.addWidget(self.path_edit, 1)
+        browse_button = QPushButton("Browse...")
+        browse_button.clicked.connect(self._browse)
+        path_row.addWidget(browse_button)
+        layout.addLayout(path_row)
+
+        # Off by default, same as RenameTab's (see its comment for the bug
+        # an on-by-default dry-run checkbox caused there).
+        self.dry_run_check = QCheckBox("Dry run (show planned labels only)")
+        layout.addWidget(self.dry_run_check)
+
+        self.run_button = QPushButton("Set Page Labels")
+        self.run_button.clicked.connect(self._run)
+        layout.addWidget(self.run_button, alignment=Qt.AlignmentFlag.AlignLeft)
+
+        self.log = _make_log_widget()
+        layout.addWidget(self.log, 1)
+        self.runner = UiTaskRunner(self.log, on_done=self._on_done)
+
+    def _browse(self) -> None:
+        if self.file_radio.isChecked():
+            p, _ = QFileDialog.getOpenFileName(self, "Select PDF", "", "PDF files (*.pdf)")
+        else:
+            p = QFileDialog.getExistingDirectory(self, "Root folder", self.path_edit.text() or ".")
+        if p:
+            self.path_edit.setText(p)
+
+    def _run(self) -> None:
+        path = self.path_edit.text().strip()
+        if not path:
+            QMessageBox.critical(self, "Page Labels", "No file/folder given.")
+            return
+        self.run_button.setEnabled(False)
+        mode = "file" if self.file_radio.isChecked() else "root"
+        self.runner.start(self._worker, mode, path, self.dry_run_check.isChecked())
+
+    def _worker(self, mode: str, path: str, dry_run: bool) -> None:
+        log = self.runner.log
+        if mode == "file":
+            pdf_path = Path(path)
+            if not pdf_path.exists():
+                log(f"ERROR: file not found: {pdf_path}")
+                return
+            if pdf_path.suffix.lower() != ".pdf":
+                log(f"ERROR: not a PDF: {pdf_path}")
+                return
+            _label_one(pdf_path, dry_run, True, log)
+            return
+
+        pdfs = scan_pdfs(path)
+        if not pdfs:
+            log(f"No PDFs found under {path}")
+            return
+        counts = {"labeled": 0, "skipped": 0, "failed": 0}
+        for pdf_path in pdfs:
+            counts[_label_one(pdf_path, dry_run, dry_run, log)] += 1
+        summary = f"{counts['labeled']} labeled, {counts['skipped']} skipped, {counts['failed']} failed"
+        if dry_run:
+            summary += " (dry run, nothing changed)"
+        log(summary)
+
+    def _on_done(self) -> None:
+        self.run_button.setEnabled(True)
+
+
 class AllTab(QWidget):
     def __init__(self, config: dict):
         super().__init__()
@@ -771,6 +894,10 @@ class AllTab(QWidget):
         layout.addWidget(_make_hint_label(CONVERT_GRAYSCALE_HINT))
         _make_mutually_exclusive(self.convert_images_check, self.convert_grayscale_check)
 
+        self.page_labels_check = QCheckBox("Set page labels (--page-labels)")
+        layout.addWidget(self.page_labels_check)
+        layout.addWidget(_make_hint_label(PAGE_LABELS_HINT))
+
         self.run_button = QPushButton("Run Scan + Write PDFs")
         self.run_button.clicked.connect(self._run)
         layout.addWidget(self.run_button, alignment=Qt.AlignmentFlag.AlignLeft)
@@ -797,16 +924,17 @@ class AllTab(QWidget):
             self._worker, root, review_csv, manual_overrides_path, thresholds,
             self.refresh_check.isChecked(), self.apply_review_check.isChecked(), self.bookorbit_check.isChecked(),
             self.convert_images_check.isChecked(), self.convert_grayscale_check.isChecked(),
+            self.page_labels_check.isChecked(),
         )
 
     def _worker(
         self, root: str, review_csv: Path, manual_overrides_path: Path, thresholds: dict,
         refresh_library: bool, apply_review: bool, bookorbit_mode: bool, convert_images: bool,
-        convert_grayscale: bool,
+        convert_grayscale: bool, page_labels: bool,
     ) -> None:
         log = self.runner.log
         merged = _do_scan(self.config_, log, root, review_csv, manual_overrides_path, thresholds, refresh_library, apply_review)
-        _do_write_pdfs(log, merged, root, bookorbit_mode, convert_images, convert_grayscale)
+        _do_write_pdfs(log, merged, root, bookorbit_mode, convert_images, convert_grayscale, page_labels=page_labels)
 
     def _on_done(self) -> None:
         self.run_button.setEnabled(True)
@@ -1116,6 +1244,7 @@ class GuiApp(QWidget):
         tabs.addTab(ReviewTab(config), "Review")
         tabs.addTab(WritePdfsTab(config), "Write PDFs")
         tabs.addTab(RenameTab(config), "Rename")
+        tabs.addTab(PageLabelsTab(config), "Page Labels")
         tabs.addTab(AllTab(config), "All")
         tabs.addTab(PreferencesTab(config), "Preferences")
 

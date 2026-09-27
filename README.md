@@ -76,6 +76,22 @@ If you'd rather review matches in bulk before anything gets written, use the CSV
 
 Renames each already-tagged PDF to `<series> - <title>.pdf` (or just `<title>.pdf` when there's no series), reading title/series back from that file's `.metadata.json` sidecar — the only one of the three outputs that's plain, flat JSON, since Calibre's/BookOrbit's embedded XMP series fields are qualified/structured properties that can't be read back reliably through pikepdf's public API (see `renamer.py`). The `.pdf.bak`, `.opf`, `.metadata.json`, and (if hyperlinking was used) `_link_report.csv` siblings are renamed right along with the PDF, since they're all named from its stem. Files with no sidecar (never tagged) or already named correctly are skipped; if the computed name collides with an existing file, that one's left alone and reported as failed rather than overwritten. If renaming one file's companion group fails partway through (permissions, a file locked by another app), whatever in that group already succeeded is rolled back rather than left split across old and new names, and the batch continues with the next file instead of aborting.
 
+### Page labels
+
+```bash
+./dtrpg-metadata-download.py page-labels "some_book.pdf"                       # a single file
+./dtrpg-metadata-download.py page-labels --root "/path/to/rpg/pdfs" --dry-run  # preview first
+./dtrpg-metadata-download.py page-labels --root "/path/to/rpg/pdfs"
+```
+
+Sets the page "numbers" your PDF reader shows in its page box and thumbnail panel, so "go to page 47" lands on the page printed 47:
+
+- The front cover (PDF page 1) and back cover are labeled **Cover**. The back cover is normally the last page. Some publishers (Steve Jackson Games, Delta Green) put it second, right after the front cover; that's detected from the retail barcode on PDF page 2, and the last page is then numbered like any other page.
+- Pages before printed page 1 get lowercase roman numerals: **i, ii, iii**, ...
+- Every other page gets the number actually printed on it, read automatically from the page headers and footers — including pages that show no number (title pages, full-page art, ads), and the pages before the first visible number. If the first number you can see is 5, the pages before it are worked back to 4, 3, 2, 1.
+
+Works for most commercial RPG PDFs without any setup. Books whose numbering can't be read confidently are skipped with a reason and keep their existing labels: scans whose page numbers aren't text, boxed sets where only one booklet is numbered, and merged multi-volume PDFs whose numbering jumps partway through. A one-time `.pdf.bak` backup is made first, and nothing else in the file (including tagged metadata) is changed. The same labeling is also available while tagging, via `--page-labels` (see below).
+
 ### Manual overrides
 
 For titles DriveThruRPG doesn't sell at all (Bits and Mortar exclusives, publisher-direct purchases, etc.) — where there's no DriveThruRPG listing to fetch — fill in `data/manual_overrides.yaml` keyed by exact filename with the full metadata by hand; see the template in that file for the format. Both `tag` and `scan` check this first, before anything else. For a one-off file rather than something you want recorded for every future run, `tag`'s `m` option (above) prompts for the same fields interactively instead of editing this file.
@@ -98,7 +114,7 @@ The `drivethrurpg_url` column accepts a full product URL, `id:PRODUCT_ID`, or a 
 ./dtrpg-metadata-download.py gui
 ```
 
-A PyQt6 desktop window with a tab for every subcommand above — Tag (the same candidate-pick/manual-entry/confirm/series flow as the terminal UI, in dialog windows instead), Scan, Review (an editable table for `review.csv` — approve a row, tweak its series, edit its description — instead of opening it in a spreadsheet app), Write PDFs, Rename, All, and Preferences (your API key and DriveThruRPG name — see Setup above). Long-running work happens in the background so the window stays responsive.
+A PyQt6 desktop window with a tab for every subcommand above — Tag (the same candidate-pick/manual-entry/confirm/series flow as the terminal UI, in dialog windows instead), Scan, Review (an editable table for `review.csv` — approve a row, tweak its series, edit its description — instead of opening it in a spreadsheet app), Write PDFs, Rename, Page Labels, All, and Preferences (your API key and DriveThruRPG name — see Setup above). Long-running work happens in the background so the window stays responsive.
 
 The Tag, Write PDFs, and All tabs each have **"Convert all images to RGB JPEG"** and **"Convert PDF to grayscale"** checkboxes (`--convert-images`/`--convert-grayscale` on the matching CLI subcommands — see below); checking one unchecks the other, since they're opposite operations on the same images.
 
@@ -152,6 +168,10 @@ Available on `tag` and `write-pdfs` (and as checkboxes in the GUI's Tag/Write PD
 #### `--background-layer` / `--remove-background`
 
 Available on `tag`, `write-pdfs`, and `all` (and as checkboxes in the GUI's Tag/Write PDFs tabs). Tags each page's full-page decorative background as a toggleable layer, or deletes it outright, before metadata is written, using a vendored script (see `rpg_background_layer.py`/`castles_and_crusades_background_layer.py`). For Castles and Crusades rulebooks only. Off by default, and mutually exclusive with each other (opposite operations on the same background) — checking one unchecks the other in the GUI, and the CLI refuses both flags together. A publisher-specific integration, not a general feature of this project.
+
+#### `--page-labels`
+
+Available on `tag`, `write-pdfs`, and `all` (and as a checkbox in the GUI's Tag, Write PDFs, and All tabs). Sets page labels as described under "Page labels" above, in the same final save as the metadata. Off by default. A book whose numbering can't be read confidently is still tagged normally; only its page labels are left as they were, with the reason logged.
 
 #### Watermark detection and removal
 

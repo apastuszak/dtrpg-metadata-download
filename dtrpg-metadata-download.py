@@ -117,6 +117,19 @@
         checkbox -- always checked; not available on write-pdfs/all,
         which have no way to ask anything.
 
+    --page-labels (on write-pdfs/all/tag): sets the page labels a PDF
+        viewer shows (see page_labels.py) -- "Cover" for the front and back
+        cover, lowercase roman numerals before printed page 1, and the
+        printed page number everywhere else, read automatically from page
+        headers/footers. Books whose numbering can't be read confidently
+        (scans, boxed sets, merged volumes) keep their existing labels.
+        Written in the same final save as the metadata.
+
+    page-labels PDF_PATH | page-labels --root PATH [--dry-run]
+        The same page labeling on its own, without tagging -- for books
+        that are already tagged. Makes the usual one-time .bak backup.
+        --dry-run shows the planned labels without writing anything.
+
     rename PDF_PATH | rename --root PATH [--dry-run]
         Rename a single already-tagged PDF, or every one under --root
         (plus its .bak/.opf/.metadata.json/_link_report.csv companions), to
@@ -163,7 +176,7 @@ from textual.logging import TextualHandler
 
 from dtrpg_client import DtrpgClient
 from matcher import load_known_urls, load_manual_overrides, run_scan_batch, scan_pdfs
-from pdf_writer import write_approved
+from pdf_writer import write_approved, write_page_labels_only
 from preferences import DEFAULT_PREFERENCES_PATH, load_preferences, resolve_api_key
 from renamer import apply_rename, plan_rename
 from review import load_review, save_review
@@ -283,6 +296,7 @@ def cmd_write_pdfs(args: argparse.Namespace, config: dict) -> None:
         convert_grayscale=args.convert_grayscale,
         background_layer=args.background_layer, remove_background=args.remove_background,
         hyperlink_gurps=args.hyperlink_gurps, hyperlink_mongoose=args.hyperlink_mongoose,
+        page_labels=args.page_labels,
     )
     succeeded = sum(1 for r in results if r.success)
     print(f"Wrote metadata to {succeeded}/{len(results)} approved files")
@@ -342,6 +356,52 @@ def cmd_rename(args: argparse.Namespace, config: dict) -> None:
     print(f"\n{summary}")
 
 
+def _label_one(pdf_path: Path, dry_run: bool, show_ranges: bool) -> str:
+    """Label one PDF, print the outcome, and return 'labeled'/'skipped'/
+    'failed' for the caller's tally."""
+    result = write_page_labels_only(pdf_path, dry_run=dry_run)
+    if result.status == "skipped":
+        print(f"SKIP: {pdf_path.name} ({result.message})")
+    elif result.status == "failed":
+        print(f"FAILED: {pdf_path.name}: {result.message}")
+    else:
+        verb = "Would label" if dry_run else "Labeled"
+        print(f"{verb}: {pdf_path.name} ({result.message})")
+        if show_ranges:
+            for line in result.plan.describe():
+                print(f"    {line}")
+    return result.status
+
+
+def cmd_page_labels(args: argparse.Namespace, config: dict) -> None:
+    if args.pdf:
+        path = Path(args.pdf)
+        if not path.exists():
+            sys.exit(f"File not found: {path}")
+        if path.suffix.lower() != ".pdf":
+            sys.exit(f"Not a PDF: {path}")
+        _label_one(path, args.dry_run, show_ranges=True)
+        return
+
+    root = args.root or config.get("root")
+    if not root:
+        sys.exit("No --root given and no 'root' set in config.yaml")
+
+    pdfs = scan_pdfs(root)
+    if not pdfs:
+        print(f"No PDFs found under {root}")
+        return
+
+    counts = {"labeled": 0, "skipped": 0, "failed": 0}
+    for pdf_path in pdfs:
+        counts[_label_one(pdf_path, args.dry_run, show_ranges=args.dry_run)] += 1
+
+    summary = f"{counts['labeled']} labeled, {counts['skipped']} skipped, {counts['failed']} failed"
+    if args.dry_run:
+        summary += " (dry run, nothing changed)"
+    print(f"\n{summary}")
+
+
 def cmd_tag(args: argparse.Namespace, config: dict) -> None:
     """Thin dispatch into tag_tui.TagApp -- the actual interactive flow
     (candidate list, manual entry, confirm-then-write, --rename) lives
@@ -385,6 +445,7 @@ def cmd_tag(args: argparse.Namespace, config: dict) -> None:
         remove_background=args.remove_background,
         hyperlink_gurps=args.hyperlink_gurps,
         hyperlink_mongoose=args.hyperlink_mongoose,
+        page_labels=args.page_labels,
         rename=args.rename,
         root_mode=bool(args.root),
     ).run()
@@ -475,6 +536,12 @@ def main() -> None:
         "--background-layer."
     )
 
+    page_labels_help = (
+        "Set the page labels a PDF viewer shows: 'Cover' for the covers, i, ii, ... before printed "
+        "page 1, then the printed page numbers, read automatically from headers/footers. Books whose "
+        "numbering can't be read confidently keep their existing labels."
+    )
+
     write_parser = subparsers.add_parser("write-pdfs", help="Write approved metadata into PDFs")
     write_parser.add_argument("--root", help="Root folder of RPG PDFs (overrides config.yaml)")
     write_parser.add_argument("--review-csv", help="Path to review.csv (overrides config.yaml)")
@@ -487,6 +554,7 @@ def main() -> None:
     write_bg_group = write_parser.add_mutually_exclusive_group()
     write_bg_group.add_argument("--background-layer", action="store_true", help=background_layer_help)
     write_bg_group.add_argument("--remove-background", action="store_true", help=remove_background_help)
+    write_parser.add_argument("--page-labels", action="store_true", help=page_labels_help)
     write_parser.set_defaults(func=cmd_write_pdfs)
 
     all_parser = subparsers.add_parser("all", help="Run scan, then write-pdfs")
@@ -503,6 +571,7 @@ def main() -> None:
     all_bg_group = all_parser.add_mutually_exclusive_group()
     all_bg_group.add_argument("--background-layer", action="store_true", help=background_layer_help)
     all_bg_group.add_argument("--remove-background", action="store_true", help=remove_background_help)
+    all_parser.add_argument("--page-labels", action="store_true", help=page_labels_help)
     all_parser.set_defaults(func=cmd_all)
 
     tag_parser = subparsers.add_parser("tag", help="Match and tag PDF(s) interactively, no review.csv")
@@ -518,6 +587,7 @@ def main() -> None:
     tag_bg_group = tag_parser.add_mutually_exclusive_group()
     tag_bg_group.add_argument("--background-layer", action="store_true", help=background_layer_help)
     tag_bg_group.add_argument("--remove-background", action="store_true", help=remove_background_help)
+    tag_parser.add_argument("--page-labels", action="store_true", help=page_labels_help)
     tag_parser.add_argument(
         "--rename", action="store_true",
         help="Also rename the file (and its sidecars) to 'Series - Title' immediately after a successful write",
@@ -530,6 +600,15 @@ def main() -> None:
     rename_group.add_argument("--root", help="Rename every already-tagged PDF under this directory instead of a single file")
     rename_parser.add_argument("--dry-run", action="store_true", help="Preview renames without changing anything")
     rename_parser.set_defaults(func=cmd_rename)
+
+    labels_parser = subparsers.add_parser(
+        "page-labels", help="Set page labels (Cover / i, ii / printed page numbers) without tagging"
+    )
+    labels_group = labels_parser.add_mutually_exclusive_group()
+    labels_group.add_argument("pdf", nargs="?", help="Path to a single PDF file to label")
+    labels_group.add_argument("--root", help="Label every PDF under this directory instead of a single file")
+    labels_parser.add_argument("--dry-run", action="store_true", help="Show the planned labels without writing anything")
+    labels_parser.set_defaults(func=cmd_page_labels)
 
     gui_parser = subparsers.add_parser(
         "gui", help="Launch the desktop GUI (PyQt6), covering every subcommand above"
