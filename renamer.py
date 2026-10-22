@@ -1,16 +1,22 @@
 """Renames a tagged PDF (and its sidecars) to "<series> - <title>.pdf".
 
-Reads title/series back from the Grimmory `.metadata.json` sidecar
-(sidecar_writer.py) rather than the embedded PDF XMP. The embedded
-Calibre `calibre:series` field is a qualified/structured XMP property
-(nested rdf:value) that pikepdf's public dict API can't read back any
-more reliably than it can write it (see pdf_writer.py's module
-docstring) — and the plain-scalar `bookorbit:seriesName` fallback isn't
-guaranteed present on every file (confirmed missing on a real,
-previously-tagged file in Books/, most likely written before that field
-existed). The JSON sidecar has no such ambiguity: it's flat JSON,
-fully regenerated on every write (no staleness risk), and already
-carries exactly `title` and `series.name`.
+Reads title/series back from whatever the file was tagged with, in this
+order (see pdf_writer.METADATA_MODES for which mode writes what):
+
+1. the Grimmory `.metadata.json` sidecar -- flat JSON, fully regenerated
+   on every write, carrying exactly `title` and `series.name`;
+2. the BookOrbit `.opf` sidecar -- `dc:title` and
+   `<meta name="calibre:series">`;
+3. the embedded Calibre XMP -- `dc:title`, and `calibre:series`'s nested
+   `rdf:value`, read from the raw XMP with lxml. pikepdf's public dict
+   API can't read that structured property back any more reliably than it
+   can write it (see pdf_writer.py's module docstring), so it isn't used
+   for the series. A file with a title but no series there is renamed
+   without one -- reading the raw structure is exact, so "no series"
+   means the file has none.
+
+`tag --rename` passes the confirmed title and series in directly instead,
+so it works even with metadata tagging off.
 
 Renaming a PDF means renaming everything else that shares its stem too
 (sidecar_writer.py, pdf_writer.py's own backup logic, and rpg_hyperlink.py
@@ -28,6 +34,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 logger = logging.getLogger("renamer")
+
+_DC_NS = "http://purl.org/dc/elements/1.1/"
+_OPF_NS = "http://www.idpf.org/2007/opf"
+_RDF_NS = "http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+_CALIBRE_NS = "http://calibre-ebook.com/xmp-namespace"  # pdf_writer.CALIBRE_NS
 
 _UNSAFE_CHARS_RE = re.compile(r'[/\\:*?"<>|\x00]')
 # Matches a colon with at least one trailing space, plus any surrounding
@@ -87,6 +98,70 @@ def _read_sidecar_metadata(pdf_path: Path) -> tuple[str | None, str | None]:
     return title, series
 
 
+def _read_opf_metadata(pdf_path: Path) -> tuple[str | None, str | None]:
+    """Title and series from the BookOrbit `.opf` sidecar, as
+    sidecar_writer.write_bookorbit_opf() writes them."""
+    from lxml import etree
+
+    opf_path = pdf_path.with_suffix(".opf")
+    if not opf_path.exists():
+        return None, None
+    try:
+        root = etree.parse(str(opf_path), etree.XMLParser(resolve_entities=False, no_network=True)).getroot()
+    except (OSError, etree.XMLSyntaxError):
+        return None, None
+    title = root.findtext(f".//{{{_DC_NS}}}title")
+    series = next(
+        (m.get("content") for m in root.iter(f"{{{_OPF_NS}}}meta") if m.get("name") == "calibre:series"), None)
+    return (title or "").strip() or None, (series or "").strip() or None
+
+
+def _read_embedded_metadata(pdf_path: Path) -> tuple[str | None, str | None]:
+    """Title and series from the PDF's embedded Calibre XMP (see the
+    module docstring for why the series is read from the raw XMP)."""
+    import pikepdf
+    from lxml import etree
+
+    try:
+        with pikepdf.open(pdf_path) as pdf:
+            stream = pdf.Root.get("/Metadata")
+            if stream is None:
+                return None, None
+            xmp = stream.read_bytes()
+    except (pikepdf.PdfError, OSError):
+        return None, None
+    try:
+        root = etree.fromstring(xmp, etree.XMLParser(resolve_entities=False, no_network=True, recover=True))
+    except etree.XMLSyntaxError:
+        return None, None
+    if root is None:
+        return None, None
+    title_el = root.find(f".//{{{_DC_NS}}}title")
+    title = None
+    if title_el is not None:
+        # dc:title is an rdf:Alt of language alternatives; take the first
+        title = next((li.text for li in title_el.iter(f"{{{_RDF_NS}}}li") if li.text), title_el.text)
+    series = None
+    series_el = root.find(f".//{{{_CALIBRE_NS}}}series")
+    if series_el is not None:
+        series = series_el.findtext(f".//{{{_RDF_NS}}}value") or series_el.text
+    return (title or "").strip() or None, (series or "").strip() or None
+
+
+def read_title_and_series(pdf_path: Path) -> tuple[str | None, str | None, str | None]:
+    """(title, series, where it came from) from the first source that has
+    a title -- see the module docstring for the order."""
+    for source, read in (
+        (".metadata.json sidecar", _read_sidecar_metadata),
+        (".opf sidecar", _read_opf_metadata),
+        ("embedded metadata", _read_embedded_metadata),
+    ):
+        title, series = read(pdf_path)
+        if title:
+            return title, series, source
+    return None, None, None
+
+
 def _target_stem(title: str, series: str | None) -> str:
     title = _sanitize_component(title)
     if series:
@@ -101,10 +176,16 @@ class RenamePlan:
     reason: str | None = None  # set means this file will be skipped, not renamed
 
 
-def plan_rename(pdf_path: Path) -> RenamePlan:
-    title, series = _read_sidecar_metadata(pdf_path)
+def plan_rename(pdf_path: Path, title: str | None = None, series: str | None = None) -> RenamePlan:
+    """Plans renaming `pdf_path` from `title`/`series` if given (tag's
+    --rename passes what was just confirmed), or else from what the file
+    was tagged with (`read_title_and_series()`)."""
     if not title:
-        return RenamePlan(pdf_path, pdf_path.stem, reason="no title in .metadata.json sidecar (untagged file?)")
+        title, series, _source = read_title_and_series(pdf_path)
+    if not title:
+        return RenamePlan(
+            pdf_path, pdf_path.stem,
+            reason="no title in a .metadata.json or .opf sidecar or the embedded metadata (untagged file?)")
     new_stem = _target_stem(title, series)
     if new_stem == pdf_path.stem:
         return RenamePlan(pdf_path, new_stem, reason="already named correctly")

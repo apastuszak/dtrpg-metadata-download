@@ -350,7 +350,7 @@ def convert_images_to_rgb(path: Path, jpeg_quality: int = DEFAULT_QUALITY) -> Im
 
             total_converted += 1
 
-        # Hidden prefix -- see rpg_hyperlink.py's run_hyperlink_script() for why.
+        # Hidden prefix -- see rpg_hyperlink.py's run_hyperlink() for why.
         tmp_fd, tmp_out_path = tempfile.mkstemp(suffix=".pdf", prefix=".dtrpg-tmp-", dir=str(path.parent))
         os.close(tmp_fd)
         # garbage=0: objects are replaced in-place via update_object/

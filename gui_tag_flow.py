@@ -84,30 +84,27 @@ from tag_tui import (
     ManualEntryResult,
     apply_edits,
     build_manual_metadata,
+    describe_write,
     do_rename,
     format_candidate_lines,
     resolve_series,
 )
 
 from gui_app import (
-    BACKGROUND_LAYER_HINT,
-    BOOKORBIT_HINT,
-    BOOKORBIT_URL,
-    CONVERT_GRAYSCALE_HINT,
-    CONVERT_IMAGES_HINT,
-    HYPERLINK_GURPS_HINT,
-    HYPERLINK_DELTAGREEN_HINT,
-    HYPERLINK_MONGOOSE_HINT,
     PAGE_LABELS_HINT,
-    REMOVE_BACKGROUND_HINT,
+    DRY_RUN_HINT,
     RENAME_HINT,
+    _add_background_picker,
+    _add_convert_images_picker,
+    _add_metadata_picker,
+    _add_hyperlink_picker,
     _make_description_label,
     _make_hint_label,
-    _make_link_label,
     _make_log_widget,
-    _make_mutually_exclusive,
     _StyledTextEdit,
-    _add_back_cover_checks,
+    _add_back_cover_picker,
+    _label_one,
+    _rename_one,
     build_client_safe,
 )
 from watermark_removal import describe_detection, detect_watermark, remove_watermark
@@ -133,7 +130,7 @@ class TagFlowController:
         manual_overrides: dict,
         known_urls: dict[str, str],
         thresholds: dict,
-        bookorbit_mode: bool,
+        metadata: str,
         rename: bool,
         root_mode: bool,
         notify,
@@ -143,26 +140,24 @@ class TagFlowController:
         convert_grayscale: bool = False,
         background_layer: bool = False,
         remove_background: bool = False,
-        hyperlink_gurps: bool = False,
-        hyperlink_mongoose: bool = False,
-        hyperlink_deltagreen: bool = False,
+        hyperlink: str | None = None,
         page_labels: bool = False,
         back_cover_to_page_2: bool = False,
         back_cover_to_end: bool = False,
+        dry_run: bool = False,
     ):
         self.pdfs = pdfs
+        self.dry_run = dry_run
         self.client = client
         self.manual_overrides = manual_overrides
         self.known_urls = known_urls
         self.thresholds = thresholds
-        self.bookorbit_mode = bookorbit_mode
+        self.metadata = metadata
         self.convert_images = convert_images
         self.convert_grayscale = convert_grayscale
         self.background_layer = background_layer
         self.remove_background = remove_background
-        self.hyperlink_gurps = hyperlink_gurps
-        self.hyperlink_mongoose = hyperlink_mongoose
-        self.hyperlink_deltagreen = hyperlink_deltagreen
+        self.hyperlink = hyperlink
         self.page_labels = page_labels
         self.back_cover_to_page_2 = back_cover_to_page_2
         self.back_cover_to_end = back_cover_to_end
@@ -200,8 +195,11 @@ class TagFlowController:
         }[kind]
 
     def run(self) -> None:
+        if self.dry_run and not (self.rename or self.page_labels):
+            self._log("Dry run: nothing to preview -- turn on Set page labels and/or Rename.")
+            return
         default_series: str | None = None
-        if self.root_mode and len(self.pdfs) > 1:
+        if self.root_mode and len(self.pdfs) > 1 and self.metadata != "off" and not self.dry_run:
             default_series = self._ask("batch_series", {})
 
         stopped = False
@@ -242,7 +240,23 @@ class TagFlowController:
             self._log(f"Watermark removal failed for {path.name}: {result.message}")
 
     def _process_one(self, path: Path, progress: str, default_series: str | None) -> bool:
+        if self.dry_run:
+            # GUI only (the CLI has `rename --dry-run`/`page-labels
+            # --dry-run`): what page labels and rename would do to the file
+            # as it is now -- no matching, nothing written.
+            if self.page_labels:
+                _label_one(path, True, True, self._log)
+            if self.rename:
+                _rename_one(path, True, self._log)
+            return False
+
         self._maybe_remove_watermark(path)
+
+        if self.metadata == "off":
+            # Port of TagApp's: no matching, file steps only, and --rename
+            # reads the metadata already in the file.
+            self._write_and_maybe_rename(path, ReviewRow(filename=path.name))
+            return False
 
         if path.name in self.manual_overrides:
             return self._confirm_and_write(
@@ -387,16 +401,15 @@ class TagFlowController:
         # marshaling back to the GUI thread.
         self._maybe_move_back_cover(path)
         result = write_metadata(
-            path, row, bookorbit_mode=self.bookorbit_mode, convert_images=self.convert_images,
+            path, row, metadata=self.metadata, convert_images=self.convert_images,
             convert_grayscale=self.convert_grayscale,
             background_layer=self.background_layer, remove_background=self.remove_background,
-            hyperlink_gurps=self.hyperlink_gurps, hyperlink_mongoose=self.hyperlink_mongoose,
-            hyperlink_deltagreen=self.hyperlink_deltagreen,
+            hyperlink=self.hyperlink,
             page_labels=self.page_labels, log=self._log,
         )
-        self._log(f"Wrote metadata to {path.name}" if result.success else f"FAILED: {result.message}")
+        self._log(describe_write(path, result, self.metadata))
         if result.success and self.rename:
-            outcome = do_rename(path)
+            outcome = do_rename(path, row.matched_title, row.series)
             if outcome:
                 self._log(outcome)
 
@@ -418,23 +431,23 @@ class TagWorker(QObject):
 
     def __init__(
         self, pdfs, client, manual_overrides, known_urls, thresholds,
-        bookorbit_mode, rename, root_mode, stop_event, convert_images=False,
+        metadata, rename, root_mode, stop_event, convert_images=False,
         convert_grayscale=False,
         background_layer=False, remove_background=False,
-        hyperlink_gurps=False, hyperlink_mongoose=False, hyperlink_deltagreen=False, page_labels=False,
-        back_cover_to_page_2=False, back_cover_to_end=False,
+        hyperlink=None, page_labels=False,
+        back_cover_to_page_2=False, back_cover_to_end=False, dry_run=False,
     ):
         super().__init__()
         self.controller = TagFlowController(
             pdfs=pdfs, client=client, manual_overrides=manual_overrides, known_urls=known_urls,
-            thresholds=thresholds, bookorbit_mode=bookorbit_mode, rename=rename, root_mode=root_mode,
+            thresholds=thresholds, metadata=metadata, rename=rename, root_mode=root_mode,
             notify=self._notify, log=self._log, stop_event=stop_event, convert_images=convert_images,
             convert_grayscale=convert_grayscale,
             background_layer=background_layer, remove_background=remove_background,
-            hyperlink_gurps=hyperlink_gurps, hyperlink_mongoose=hyperlink_mongoose,
-            hyperlink_deltagreen=hyperlink_deltagreen,
+            hyperlink=hyperlink,
             page_labels=page_labels,
             back_cover_to_page_2=back_cover_to_page_2, back_cover_to_end=back_cover_to_end,
+            dry_run=dry_run,
         )
 
     def _notify(self, kind: str, payload: dict, response_q: "queue.Queue") -> None:
@@ -949,7 +962,9 @@ class TagTab(QWidget):
         layout.addWidget(_make_description_label(
             "Match and tag PDF(s) interactively -- choose a book from the list provided, enter "
             "metadata by hand, or paste a known URL, then confirm each one before it's written. "
-            "Works on a single file or every PDF in a folder; no review.csv involved."
+            "Works on a single file or every PDF in a folder; no review.csv involved. With "
+            "Metadata tagging off, nothing is matched: only the options you pick run -- e.g. just "
+            "Rename or Set page labels on files that are already tagged."
         ))
 
         mode_row = QHBoxLayout()
@@ -972,54 +987,27 @@ class TagTab(QWidget):
         path_row.addWidget(browse_button)
         layout.addLayout(path_row)
 
-        self.bookorbit_check = QCheckBox("BookOrbit mode (--bookorbit-mode)")
-        layout.addWidget(self.bookorbit_check)
-        layout.addWidget(_make_hint_label(BOOKORBIT_HINT))
-        layout.addWidget(_make_link_label(BOOKORBIT_URL))
+        self.metadata_combo = _add_metadata_picker(layout)
 
-        self.convert_images_check = QCheckBox("Convert all images to RGB JPEG (--convert-images)")
-        layout.addWidget(self.convert_images_check)
-        layout.addWidget(_make_hint_label(CONVERT_IMAGES_HINT))
+        self.convert_combo = _add_convert_images_picker(layout)
 
-        self.convert_grayscale_check = QCheckBox("Convert PDF to grayscale (--convert-grayscale)")
-        layout.addWidget(self.convert_grayscale_check)
-        layout.addWidget(_make_hint_label(CONVERT_GRAYSCALE_HINT))
-        _make_mutually_exclusive(self.convert_images_check, self.convert_grayscale_check)
+        self.hyperlink_combo = _add_hyperlink_picker(layout)
 
-        self.hyperlink_gurps_check = QCheckBox("Hyperlink GURPS page/chapter references (--hyperlink-gurps)")
-        layout.addWidget(self.hyperlink_gurps_check)
-        layout.addWidget(_make_hint_label(HYPERLINK_GURPS_HINT))
+        self.background_combo = _add_background_picker(layout)
 
-        self.hyperlink_mongoose_check = QCheckBox(
-            "Hyperlink Mongoose Traveller page/chapter references (--hyperlink-mongoose)"
-        )
-        layout.addWidget(self.hyperlink_mongoose_check)
-        layout.addWidget(_make_hint_label(HYPERLINK_MONGOOSE_HINT))
-
-        self.hyperlink_deltagreen_check = QCheckBox("Hyperlink Delta Green page references (--hyperlink-deltagreen)")
-        layout.addWidget(self.hyperlink_deltagreen_check)
-        layout.addWidget(_make_hint_label(HYPERLINK_DELTAGREEN_HINT))
-
-        self.background_layer_check = QCheckBox(
-            "Tag background as its own layer -- Troll Lord Games PDFs only (--background-layer)"
-        )
-        layout.addWidget(self.background_layer_check)
-        layout.addWidget(_make_hint_label(BACKGROUND_LAYER_HINT))
-
-        self.remove_background_check = QCheckBox("Remove background -- Troll Lord Games PDFs only (--remove-background)")
-        layout.addWidget(self.remove_background_check)
-        layout.addWidget(_make_hint_label(REMOVE_BACKGROUND_HINT))
-        _make_mutually_exclusive(self.background_layer_check, self.remove_background_check)
-
-        self.back_cover_to_page_2_check, self.back_cover_to_end_check = _add_back_cover_checks(layout)
+        self.back_cover_combo = _add_back_cover_picker(layout)
 
         self.page_labels_check = QCheckBox("Set page labels (--page-labels)")
         layout.addWidget(self.page_labels_check)
         layout.addWidget(_make_hint_label(PAGE_LABELS_HINT))
 
-        self.rename_check = QCheckBox("Rename after write (--rename)")
+        self.rename_check = QCheckBox("Rename (--rename)")
         layout.addWidget(self.rename_check)
         layout.addWidget(_make_hint_label(RENAME_HINT))
+
+        self.dry_run_check = QCheckBox("Dry run")
+        layout.addWidget(self.dry_run_check)
+        layout.addWidget(_make_hint_label(DRY_RUN_HINT))
 
         self.start_button = QPushButton("Start")
         self.start_button.clicked.connect(self._start)
@@ -1070,11 +1058,15 @@ class TagTab(QWidget):
             pdfs = [path]
             known_urls = load_known_urls(path.parent)
 
-        try:
-            client = build_client_safe(self.config_)
-        except RuntimeError as exc:
-            QMessageBox.critical(self, "Tag", str(exc))
-            return
+        dry_run = self.dry_run_check.isChecked()
+        metadata = self.metadata_combo.currentData()
+        client = None
+        if metadata != "off" and not dry_run:  # nothing is matched otherwise
+            try:
+                client = build_client_safe(self.config_)
+            except RuntimeError as exc:
+                QMessageBox.critical(self, "Tag", str(exc))
+                return
 
         manual_overrides_path = Path(self.config_.get("manual_overrides", "data/manual_overrides.yaml"))
         manual_overrides = load_manual_overrides(manual_overrides_path)
@@ -1084,18 +1076,16 @@ class TagTab(QWidget):
         self._thread = QThread()
         self._worker = TagWorker(
             pdfs=pdfs, client=client, manual_overrides=manual_overrides, known_urls=known_urls,
-            thresholds=thresholds, bookorbit_mode=self.bookorbit_check.isChecked(),
+            thresholds=thresholds, metadata=metadata, dry_run=dry_run,
             rename=self.rename_check.isChecked(), root_mode=root_mode, stop_event=self.stop_event,
-            convert_images=self.convert_images_check.isChecked(),
-            convert_grayscale=self.convert_grayscale_check.isChecked(),
-            background_layer=self.background_layer_check.isChecked(),
-            remove_background=self.remove_background_check.isChecked(),
-            hyperlink_gurps=self.hyperlink_gurps_check.isChecked(),
-            hyperlink_mongoose=self.hyperlink_mongoose_check.isChecked(),
-            hyperlink_deltagreen=self.hyperlink_deltagreen_check.isChecked(),
+            convert_images=self.convert_combo.currentData() == "rgb",
+            convert_grayscale=self.convert_combo.currentData() == "grayscale",
+            background_layer=self.background_combo.currentData() == "layer",
+            remove_background=self.background_combo.currentData() == "remove",
+            hyperlink=self.hyperlink_combo.currentData(),
             page_labels=self.page_labels_check.isChecked(),
-            back_cover_to_page_2=self.back_cover_to_page_2_check.isChecked(),
-            back_cover_to_end=self.back_cover_to_end_check.isChecked(),
+            back_cover_to_page_2=self.back_cover_combo.currentData() == "page-2",
+            back_cover_to_end=self.back_cover_combo.currentData() == "end",
         )
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)

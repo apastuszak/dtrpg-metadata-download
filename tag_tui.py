@@ -175,7 +175,17 @@ def format_candidate_lines(meta: ProductMetadata, score: float | None = None) ->
     return "\n".join(lines)
 
 
-def do_rename(path: Path) -> str | None:
+def describe_write(path: Path, result, metadata: str) -> str:
+    """The outcome line for one write_metadata() call."""
+    if not result.success:
+        return f"FAILED: {result.message}"
+    if metadata == "off":
+        return f"Done with {path.name} (metadata tagging off)"
+    labels = {"calibre": "Calibre", "grimmory": "Calibre + Grimmory sidecar", "bookorbit": "BookOrbit sidecar only"}
+    return f"Wrote metadata to {path.name} ({labels.get(metadata, metadata)})"
+
+
+def do_rename(path: Path, title: str | None = None, series: str | None = None) -> str | None:
     """Same rename-one-file logic dtrpg-metadata-download.py's own
     _rename_one() implements for the standalone `rename` subcommand
     (plan_rename() + apply_rename(), both untouched), reimplemented here
@@ -183,8 +193,12 @@ def do_rename(path: Path) -> str | None:
     and can't be imported by name, and its print()-based reporting
     doesn't fit a TUI. Returns a one-line outcome message, or None on
     success with nothing worth reporting beyond the caller's own message.
+    `title`/`series` are what was just confirmed, so the new name doesn't
+    depend on which metadata mode was written; with none given (metadata
+    tagging off, so nothing was matched), it comes from the metadata
+    already in the file, exactly as the `rename` subcommand does.
     """
-    plan = plan_rename(path)
+    plan = plan_rename(path, title, series)
     result = apply_rename(plan, dry_run=False)
     if not result.success:
         if plan.reason is not None:
@@ -666,16 +680,14 @@ class TagApp(App[None]):
         manual_overrides: dict,
         known_urls: dict[str, str],
         thresholds: dict,
-        bookorbit_mode: bool,
+        metadata: str,
         rename: bool,
         root_mode: bool,
         convert_images: bool = False,
         convert_grayscale: bool = False,
         background_layer: bool = False,
         remove_background: bool = False,
-        hyperlink_gurps: bool = False,
-        hyperlink_mongoose: bool = False,
-        hyperlink_deltagreen: bool = False,
+        hyperlink: str | None = None,
         page_labels: bool = False,
         back_cover_to_page_2: bool = False,
         back_cover_to_end: bool = False,
@@ -686,14 +698,12 @@ class TagApp(App[None]):
         self.manual_overrides = manual_overrides
         self.known_urls = known_urls
         self.thresholds = thresholds
-        self.bookorbit_mode = bookorbit_mode
+        self.metadata = metadata
         self.convert_images = convert_images
         self.convert_grayscale = convert_grayscale
         self.background_layer = background_layer
         self.remove_background = remove_background
-        self.hyperlink_gurps = hyperlink_gurps
-        self.hyperlink_mongoose = hyperlink_mongoose
-        self.hyperlink_deltagreen = hyperlink_deltagreen
+        self.hyperlink = hyperlink
         self.page_labels = page_labels
         self.back_cover_to_page_2 = back_cover_to_page_2
         self.back_cover_to_end = back_cover_to_end
@@ -715,7 +725,7 @@ class TagApp(App[None]):
     @work
     async def run_flow(self) -> None:
         default_series: str | None = None
-        if self.root_mode and len(self.pdfs) > 1:
+        if self.root_mode and len(self.pdfs) > 1 and self.metadata != "off":
             default_series = await self.push_screen_wait(BatchSeriesModal())
 
         for i, path in enumerate(self.pdfs, 1):
@@ -777,6 +787,12 @@ class TagApp(App[None]):
         """Returns True if the user asked to stop the whole batch --
         the direct async equivalent of the old _tag_one()'s bool return."""
         await self._maybe_remove_watermark(path)
+
+        if self.metadata == "off":
+            # Nothing to match against: run the file steps, and let
+            # --rename read the metadata already in the file.
+            await self._write_and_maybe_rename(path, ReviewRow(filename=path.name))
+            return False
 
         if path.name in self.manual_overrides:
             return await self._confirm_and_write(
@@ -907,16 +923,15 @@ class TagApp(App[None]):
         # because only tag can ask about a back cover with no barcode.
         await self._maybe_move_back_cover(path)
         result = await self._call(
-            write_metadata, path, row, bookorbit_mode=self.bookorbit_mode, convert_images=self.convert_images,
+            write_metadata, path, row, metadata=self.metadata, convert_images=self.convert_images,
             convert_grayscale=self.convert_grayscale,
             background_layer=self.background_layer, remove_background=self.remove_background,
-            hyperlink_gurps=self.hyperlink_gurps, hyperlink_mongoose=self.hyperlink_mongoose,
-            hyperlink_deltagreen=self.hyperlink_deltagreen,
+            hyperlink=self.hyperlink,
             page_labels=self.page_labels, log=log_line,
         )
-        self._log(f"Wrote metadata to {path.name}" if result.success else f"FAILED: {result.message}")
+        self._log(describe_write(path, result, self.metadata))
         if result.success and self.rename:
-            outcome = await self._call(do_rename, path)
+            outcome = await self._call(do_rename, path, row.matched_title, row.series)
             if outcome:
                 self._log(outcome)
 

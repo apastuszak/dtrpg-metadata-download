@@ -1,5 +1,7 @@
 """PyQt6 desktop GUI for dtrpg-metadata-download, covering every
-subcommand in one window (Tag/Scan/Review/Write PDFs/Rename/Page Labels/All/Preferences).
+subcommand in one window (Tag/Scan/Review/Write PDFs/All/Preferences).
+`rename` and `page-labels` have no tab of their own: the Tag tab does
+both with Metadata tagging off (no matching), including a dry run.
 
 Presentation layer only, exactly like tag_tui.py is for `tag` alone: every
 tab here calls straight into matcher.py/review.py/pdf_writer.py/renamer.py
@@ -40,7 +42,6 @@ from PyQt6.QtGui import QColor, QPainter, QPen
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
-    QButtonGroup,
     QCheckBox,
     QComboBox,
     QFileDialog,
@@ -54,7 +55,6 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
-    QRadioButton,
     QStyledItemDelegate,
     QTableWidget,
     QTableWidgetItem,
@@ -64,8 +64,8 @@ from PyQt6.QtWidgets import (
 )
 
 from dtrpg_client import DtrpgClient
-from matcher import load_known_urls, load_manual_overrides, run_scan_batch, scan_pdfs
-from pdf_writer import write_approved, write_page_labels_only
+from matcher import load_known_urls, load_manual_overrides, run_scan_batch
+from pdf_writer import DEFAULT_METADATA, write_approved, write_page_labels_only
 from preferences import (
     DEFAULT_PREFERENCES_PATH,
     Preferences,
@@ -76,60 +76,65 @@ from preferences import (
 from provenance import Status
 from renamer import apply_rename, plan_rename
 from review import ReviewRow, load_review, save_review
+from rpg_hyperlink import rule_sets
 
 # Shared checkbox explanatory text -- defined once so WritePdfsTab/AllTab
 # (here) and TagTab (gui_tag_flow.py) can't drift apart on wording for the
 # same flag.
-BOOKORBIT_HINT = (
-    "Writes no metadata into the PDF itself -- only a BookOrbit sidecar (.opf) file next to it. "
-    "Use only if you actually use BookOrbit:"
+# "Metadata tagging" choices (pdf_writer.METADATA_MODES), each with the hint
+# shown under the dropdown while it's selected.
+METADATA_CHOICES = (
+    ("Off", "off", "Writes no metadata. Any other options below still run."),
+    ("Calibre", "calibre", "Writes Calibre metadata into the PDF itself, with no sidecar files."),
+    ("Grimmory", "grimmory",
+     "Writes Calibre metadata into the PDF, plus a Grimmory sidecar (.metadata.json) file next to it."),
+    ("BookOrbit", "bookorbit",
+     "Writes no metadata into the PDF itself (and removes what's there) -- only a BookOrbit sidecar "
+     "(.opf) file next to it. BookOrbit only reads it if the library's metadata precedence (in its "
+     "library settings) puts OPF file ahead of Embedded; by default it reads the PDF itself and "
+     "ignores the sidecar. Use only if you actually use BookOrbit:"),
 )
+METADATA_HINT_SUFFIX = " A sidecar file the chosen option doesn't write is removed if an earlier run left one."
 BOOKORBIT_URL = "https://bookorbit.app/"
 CONVERT_IMAGES_HINT = (
-    "Converts all images in the PDF from CMYK to RGB, and all JPEG2000 images to JPEG. This can "
+    "RGB: converts all images in the PDF from CMYK to RGB, and all JPEG2000 images to JPEG. This can "
     "speed up file rendering on slower hardware, and can fix an issue on macOS with missing images "
     "in the PDF. This WILL increase the file size."
 )
 CONVERT_GRAYSCALE_HINT = (
-    "Converts the whole PDF to grayscale using a vendored script (requires Ghostscript -- 'gs' -- "
-    "on PATH). Mutually exclusive with converting to RGB above -- checking one unchecks the other."
+    "Grayscale: converts the whole PDF to grayscale using a vendored script (requires Ghostscript "
+    "-- 'gs' -- on PATH)."
 )
-RENAME_HINT = "Renames the file after the metadata update, using the format: Series Name - Book Name.pdf"
-BACK_COVER_TO_PAGE_2_HINT = (
-    "Moves the back cover to right after the front cover. The back cover is found by its barcode; "
-    "books with a wraparound cover or no back cover are left alone."
+RENAME_HINT = (
+    "Renames the file to: Series Name - Book Name.pdf -- after the metadata update, from the "
+    "confirmed match; with Metadata tagging off, from the metadata already in the file."
 )
-BACK_COVER_TO_END_HINT = (
-    "Moves a back cover that sits right after the front cover to the end of the book. Mutually "
-    "exclusive with the option above -- checking one unchecks the other."
+DRY_RUN_HINT = (
+    "Shows what Set page labels and Rename would do, without matching or changing any file. "
+    "Every other option is ignored."
 )
+BACK_COVER_HINT = (
+    "The back cover is found by its barcode; books with a wraparound cover or no back cover are "
+    "left alone."
+)
+BACK_COVER_TO_PAGE_2_HINT = "Page 2: moves the back cover to right after the front cover."
+BACK_COVER_TO_END_HINT = "End: moves a back cover that sits right after the front cover to the end of the book."
 PAGE_LABELS_HINT = (
     "Sets the page numbers your PDF reader shows: \"Cover\" for the front and back cover, i, ii, iii "
     "before page 1, then the page numbers printed in the book, read from its headers and footers. "
     "Books whose numbering can't be read confidently keep their existing labels."
 )
-HYPERLINK_GURPS_HINT = (
-    "Auto-hyperlinks in-text page and chapter references (e.g. \"see p. 208\") using a vendored "
-    "GURPS-specific script. Only useful for GURPS PDFs."
+HYPERLINK_HINT = (
+    "Auto-hyperlinks the book's own page and chapter references (e.g. \"see p. 208\"), plus its "
+    "Table of Contents and Index, using one publisher's rules. Each rule set is tuned to its "
+    "publisher's way of writing references, so only use it on that publisher's books."
 )
-HYPERLINK_MONGOOSE_HINT = (
-    "Auto-hyperlinks in-text page and chapter references using a vendored script specific to "
-    "Mongoose Publishing's Traveller line. Only useful for Mongoose Traveller PDFs."
-)
-HYPERLINK_DELTAGREEN_HINT = (
-    "Auto-hyperlinks in-text page references (e.g. \"see COMBAT on page 48\"), plus the Table of "
-    "Contents and Index when they aren't linked already. Only useful for Delta Green PDFs."
-)
+BACKGROUND_HINT = "For Troll Lord Games PDFs (Castles and Crusades) only, using a vendored script."
 BACKGROUND_LAYER_HINT = (
-    "Tags each page's full-page decorative background as a toggleable layer, using a vendored "
-    "script. For Troll Lord Games PDFs (Castles and Crusades) only. Mutually exclusive with removing the "
-    "background below -- checking one unchecks the other."
+    "Layer: tags each page's full-page decorative background as a toggleable layer, so a PDF "
+    "reader can hide it."
 )
-REMOVE_BACKGROUND_HINT = (
-    "Deletes each page's full-page decorative background outright, using the same script as "
-    "above. For Troll Lord Games PDFs (Castles and Crusades) only. Mutually exclusive with tagging the background "
-    "as a layer -- checking one unchecks the other."
-)
+REMOVE_BACKGROUND_HINT = "Remove: deletes each page's full-page decorative background outright."
 
 # QLineEdit gets a native-looking grey border (blue on focus) for free from
 # Qt's macOS style, since qmacstyle draws it the way a real NSTextField
@@ -410,31 +415,146 @@ def _make_log_widget() -> QPlainTextEdit:
     return widget
 
 
-def _add_back_cover_checks(layout: QVBoxLayout) -> tuple[QCheckBox, QCheckBox]:
-    """The mutually exclusive --back-cover-to-page-2/--back-cover-to-end
-    pair, shared by the Tag, Write PDFs and All tabs."""
-    to_page_2 = QCheckBox("Move back cover to page 2 (--back-cover-to-page-2)")
-    layout.addWidget(to_page_2)
-    layout.addWidget(_make_hint_label(BACK_COVER_TO_PAGE_2_HINT))
-    to_end = QCheckBox("Move back cover to the end (--back-cover-to-end)")
-    layout.addWidget(to_end)
-    layout.addWidget(_make_hint_label(BACK_COVER_TO_END_HINT))
-    _make_mutually_exclusive(to_page_2, to_end)
-    return to_page_2, to_end
+def _add_back_cover_picker(layout: QVBoxLayout) -> QComboBox:
+    """The back-cover move, shared by the Tag, Write PDFs and All tabs:
+    Off, Page 2 (--back-cover-to-page-2) or End (--back-cover-to-end) --
+    one dropdown, since the two are opposite moves of the same page.
+    `currentData()` is "page-2", "end" or None (back_cover.py's own names
+    for the two directions). The hint under it explains the selected
+    move."""
+    row = QHBoxLayout()
+    row.addWidget(QLabel("Move back cover:"))
+    combo = QComboBox()
+    combo.addItem("Off", None)
+    combo.addItem("To page 2 (--back-cover-to-page-2)", "page-2")
+    combo.addItem("To the end (--back-cover-to-end)", "end")
+    row.addWidget(combo, 1)
+    layout.addLayout(row)
+    hints = {"page-2": BACK_COVER_TO_PAGE_2_HINT, "end": BACK_COVER_TO_END_HINT}
+    both = f"{BACK_COVER_TO_PAGE_2_HINT}\n\n{BACK_COVER_TO_END_HINT}\n\n{BACK_COVER_HINT}"
+    hint = _make_hint_label(both)
+    layout.addWidget(hint)
+
+    def show_hint() -> None:
+        choice = combo.currentData()
+        hint.setText(f"{hints[choice]} {BACK_COVER_HINT}" if choice else both)
+
+    combo.currentIndexChanged.connect(show_hint)
+    return combo
 
 
-def _make_mutually_exclusive(a: QCheckBox, b: QCheckBox) -> None:
-    """Checking either box unchecks the other -- used for --convert-images
-    vs --convert-grayscale (opposite operations on the same images).
-    `toggled` only fires on an actual state change, so `setChecked(False)`
-    on an already-unchecked box is a no-op, not an infinite signal loop."""
-    a.toggled.connect(lambda checked: b.setChecked(False) if checked else None)
-    b.toggled.connect(lambda checked: a.setChecked(False) if checked else None)
+def _add_metadata_picker(layout: QVBoxLayout) -> QComboBox:
+    """The --metadata MODE choice, shared by the Tag, Write PDFs and All
+    tabs. `currentData()` is the mode name; it starts on
+    pdf_writer.DEFAULT_METADATA. The hint under it explains the selected
+    mode, and the BookOrbit link shows only while BookOrbit is selected."""
+    row = QHBoxLayout()
+    row.addWidget(QLabel("Metadata tagging (--metadata):"))
+    combo = QComboBox()
+    for label, mode, _hint in METADATA_CHOICES:
+        combo.addItem(label, mode)
+    row.addWidget(combo, 1)
+    layout.addLayout(row)
+    hints = {mode: hint for _label, mode, hint in METADATA_CHOICES}
+    hint = _make_hint_label("")
+    layout.addWidget(hint)
+    link = _make_link_label(BOOKORBIT_URL)
+    layout.addWidget(link)
+
+    def show_hint() -> None:
+        mode = combo.currentData()
+        hint.setText(hints[mode] + ("" if mode == "off" else METADATA_HINT_SUFFIX))
+        link.setVisible(mode == "bookorbit")
+
+    combo.currentIndexChanged.connect(show_hint)
+    combo.setCurrentIndex(combo.findData(DEFAULT_METADATA))
+    show_hint()
+    return combo
+
+
+def _add_background_picker(layout: QVBoxLayout) -> QComboBox:
+    """The page-background choice, shared by the Tag and Write PDFs tabs:
+    Off, Layer (--background-layer) or Remove (--remove-background) -- one
+    dropdown, since the two are opposite operations on the same
+    background. `currentData()` is "layer", "remove" or None. The hint
+    under it explains the selected choice."""
+    row = QHBoxLayout()
+    row.addWidget(QLabel("Page background (Troll Lord Games PDFs only):"))
+    combo = QComboBox()
+    combo.addItem("Off", None)
+    combo.addItem("Layer (--background-layer)", "layer")
+    combo.addItem("Remove (--remove-background)", "remove")
+    row.addWidget(combo, 1)
+    layout.addLayout(row)
+    hints = {"layer": BACKGROUND_LAYER_HINT, "remove": REMOVE_BACKGROUND_HINT}
+    both = f"{BACKGROUND_HINT}\n\n{BACKGROUND_LAYER_HINT}\n\n{REMOVE_BACKGROUND_HINT}"
+    hint = _make_hint_label(both)
+    layout.addWidget(hint)
+
+    def show_hint() -> None:
+        choice = combo.currentData()
+        hint.setText(f"{BACKGROUND_HINT} {hints[choice]}" if choice else both)
+
+    combo.currentIndexChanged.connect(show_hint)
+    return combo
+
+
+def _add_convert_images_picker(layout: QVBoxLayout) -> QComboBox:
+    """The "Convert images" choice, shared by the Tag, Write PDFs and All
+    tabs: Off, RGB (--convert-images) or Grayscale (--convert-grayscale) --
+    one dropdown, since the two are opposite operations on the same images.
+    `currentData()` is "rgb", "grayscale" or None. The hint under it
+    explains the selected conversion."""
+    row = QHBoxLayout()
+    row.addWidget(QLabel("Convert images:"))
+    combo = QComboBox()
+    combo.addItem("Off", None)
+    combo.addItem("RGB (--convert-images)", "rgb")
+    combo.addItem("Grayscale (--convert-grayscale)", "grayscale")
+    row.addWidget(combo, 1)
+    layout.addLayout(row)
+    hints = {"rgb": CONVERT_IMAGES_HINT, "grayscale": CONVERT_GRAYSCALE_HINT}
+    hint = _make_hint_label(CONVERT_IMAGES_HINT + "\n\n" + CONVERT_GRAYSCALE_HINT)
+    layout.addWidget(hint)
+
+    def show_hint() -> None:
+        choice = combo.currentData()
+        hint.setText(hints[choice] if choice else CONVERT_IMAGES_HINT + "\n\n" + CONVERT_GRAYSCALE_HINT)
+
+    combo.currentIndexChanged.connect(show_hint)
+    return combo
+
+
+def _add_hyperlink_picker(layout: QVBoxLayout) -> QComboBox:
+    """The --hyperlink RULES choice, shared by the Tag and Write PDFs tabs:
+    "Off" plus every rule set found in hyperlink_rules/ (so a newly added
+    one appears here with no GUI change). `currentData()` is the rule-set
+    name, or None for off. The hint under it adds the selected rule set's
+    own description, as plain text."""
+    row = QHBoxLayout()
+    row.addWidget(QLabel("Hyperlink references (--hyperlink):"))
+    combo = QComboBox()
+    combo.addItem("Off", None)
+    for info in rule_sets():
+        combo.addItem(info.label, info.name)
+    row.addWidget(combo, 1)
+    layout.addLayout(row)
+    hint = _make_hint_label(HYPERLINK_HINT)
+    hint.setTextFormat(Qt.TextFormat.PlainText)
+    layout.addWidget(hint)
+    descriptions = {info.name: info.description for info in rule_sets()}
+
+    def show_description() -> None:
+        name = combo.currentData()
+        hint.setText(HYPERLINK_HINT + (f"\n\n{descriptions[name]}" if descriptions.get(name) else ""))
+
+    combo.currentIndexChanged.connect(show_description)
+    return combo
 
 
 # ---------------------------------------------------------------------------
 # Shared scan/write-pdfs/rename logic -- factored out once so ScanTab/
-# WritePdfsTab/RenameTab/AllTab don't each keep their own copy (the same
+# WritePdfsTab/AllTab/TagTab don't each keep their own copy (the same
 # reasoning that moved cmd_scan's loop into matcher.run_scan_batch()).
 # None of these functions touch Qt (or touched tkinter before them) --
 # they take a plain `log` callable, so the Tk->Qt port needed no changes
@@ -465,21 +585,20 @@ def _do_scan(
 
 
 def _do_write_pdfs(
-    log, rows: list[ReviewRow], root: str, bookorbit_mode: bool, convert_images: bool = False,
+    log, rows: list[ReviewRow], root: str, metadata: str, convert_images: bool = False,
     convert_grayscale: bool = False,
     background_layer: bool = False, remove_background: bool = False,
-    hyperlink_gurps: bool = False, hyperlink_mongoose: bool = False, hyperlink_deltagreen: bool = False,
+    hyperlink: str | None = None,
     page_labels: bool = False, back_cover_to_page_2: bool = False, back_cover_to_end: bool = False,
 ) -> None:
     if not any(r.is_approved() for r in rows):
         log("No approved/auto-accepted rows to write.")
         return
     results = write_approved(
-        rows, root, bookorbit_mode=bookorbit_mode, convert_images=convert_images,
+        rows, root, metadata=metadata, convert_images=convert_images,
         convert_grayscale=convert_grayscale,
         background_layer=background_layer, remove_background=remove_background,
-        hyperlink_gurps=hyperlink_gurps, hyperlink_mongoose=hyperlink_mongoose,
-        hyperlink_deltagreen=hyperlink_deltagreen,
+        hyperlink=hyperlink,
         page_labels=page_labels, back_cover_to_page_2=back_cover_to_page_2,
         back_cover_to_end=back_cover_to_end, log=log,
     )
@@ -608,46 +727,15 @@ class WritePdfsTab(QWidget):
         root_row.addWidget(browse_button)
         layout.addLayout(root_row)
 
-        self.bookorbit_check = QCheckBox("BookOrbit mode (--bookorbit-mode)")
-        layout.addWidget(self.bookorbit_check)
-        layout.addWidget(_make_hint_label(BOOKORBIT_HINT))
-        layout.addWidget(_make_link_label(BOOKORBIT_URL))
+        self.metadata_combo = _add_metadata_picker(layout)
 
-        self.convert_images_check = QCheckBox("Convert all images to RGB JPEG (--convert-images)")
-        layout.addWidget(self.convert_images_check)
-        layout.addWidget(_make_hint_label(CONVERT_IMAGES_HINT))
+        self.convert_combo = _add_convert_images_picker(layout)
 
-        self.convert_grayscale_check = QCheckBox("Convert PDF to grayscale (--convert-grayscale)")
-        layout.addWidget(self.convert_grayscale_check)
-        layout.addWidget(_make_hint_label(CONVERT_GRAYSCALE_HINT))
-        _make_mutually_exclusive(self.convert_images_check, self.convert_grayscale_check)
+        self.hyperlink_combo = _add_hyperlink_picker(layout)
 
-        self.hyperlink_gurps_check = QCheckBox("Hyperlink GURPS page/chapter references (--hyperlink-gurps)")
-        layout.addWidget(self.hyperlink_gurps_check)
-        layout.addWidget(_make_hint_label(HYPERLINK_GURPS_HINT))
+        self.background_combo = _add_background_picker(layout)
 
-        self.hyperlink_mongoose_check = QCheckBox(
-            "Hyperlink Mongoose Traveller page/chapter references (--hyperlink-mongoose)"
-        )
-        layout.addWidget(self.hyperlink_mongoose_check)
-        layout.addWidget(_make_hint_label(HYPERLINK_MONGOOSE_HINT))
-
-        self.hyperlink_deltagreen_check = QCheckBox("Hyperlink Delta Green page references (--hyperlink-deltagreen)")
-        layout.addWidget(self.hyperlink_deltagreen_check)
-        layout.addWidget(_make_hint_label(HYPERLINK_DELTAGREEN_HINT))
-
-        self.background_layer_check = QCheckBox(
-            "Tag background as its own layer -- Troll Lord Games PDFs only (--background-layer)"
-        )
-        layout.addWidget(self.background_layer_check)
-        layout.addWidget(_make_hint_label(BACKGROUND_LAYER_HINT))
-
-        self.remove_background_check = QCheckBox("Remove background -- Troll Lord Games PDFs only (--remove-background)")
-        layout.addWidget(self.remove_background_check)
-        layout.addWidget(_make_hint_label(REMOVE_BACKGROUND_HINT))
-        _make_mutually_exclusive(self.background_layer_check, self.remove_background_check)
-
-        self.back_cover_to_page_2_check, self.back_cover_to_end_check = _add_back_cover_checks(layout)
+        self.back_cover_combo = _add_back_cover_picker(layout)
 
         self.page_labels_check = QCheckBox("Set page labels (--page-labels)")
         layout.addWidget(self.page_labels_check)
@@ -674,217 +762,29 @@ class WritePdfsTab(QWidget):
         self.run_button.setEnabled(False)
         review_csv = Path(self.config_.get("review_csv", "data/review.csv"))
         self.runner.start(
-            self._worker, review_csv, root, self.bookorbit_check.isChecked(), self.convert_images_check.isChecked(),
-            self.convert_grayscale_check.isChecked(),
-            self.background_layer_check.isChecked(), self.remove_background_check.isChecked(),
-            self.hyperlink_gurps_check.isChecked(), self.hyperlink_mongoose_check.isChecked(),
-            self.hyperlink_deltagreen_check.isChecked(),
+            self._worker, review_csv, root, self.metadata_combo.currentData(),
+            self.convert_combo.currentData() == "rgb", self.convert_combo.currentData() == "grayscale",
+            self.background_combo.currentData() == "layer", self.background_combo.currentData() == "remove",
+            self.hyperlink_combo.currentData(),
             self.page_labels_check.isChecked(),
-            self.back_cover_to_page_2_check.isChecked(), self.back_cover_to_end_check.isChecked(),
+            self.back_cover_combo.currentData() == "page-2", self.back_cover_combo.currentData() == "end",
         )
 
     def _worker(
-        self, review_csv: Path, root: str, bookorbit_mode: bool, convert_images: bool,
+        self, review_csv: Path, root: str, metadata: str, convert_images: bool,
         convert_grayscale: bool,
         background_layer: bool, remove_background: bool,
-        hyperlink_gurps: bool, hyperlink_mongoose: bool, hyperlink_deltagreen: bool,
+        hyperlink: str | None,
         page_labels: bool, back_cover_to_page_2: bool, back_cover_to_end: bool,
     ) -> None:
         rows = load_review(review_csv)
         _do_write_pdfs(
-            self.runner.log, rows, root, bookorbit_mode, convert_images,
+            self.runner.log, rows, root, metadata, convert_images,
             convert_grayscale,
             background_layer, remove_background,
-            hyperlink_gurps, hyperlink_mongoose, hyperlink_deltagreen,
+            hyperlink,
             page_labels, back_cover_to_page_2, back_cover_to_end,
         )
-
-    def _on_done(self) -> None:
-        self.run_button.setEnabled(True)
-
-
-class RenameTab(QWidget):
-    def __init__(self, config: dict):
-        super().__init__()
-        self.config_ = config
-
-        layout = QVBoxLayout(self)
-        layout.addWidget(_make_description_label(
-            "Renames an already-tagged PDF (and its .bak/.opf/.metadata.json sidecars) to "
-            '"Series Name - Book Name.pdf", using the title/series recorded in its '
-            ".metadata.json sidecar. Untagged or already-correctly-named files are skipped."
-        ))
-
-        mode_row = QHBoxLayout()
-        self.file_radio = QRadioButton("Single file")
-        self.root_radio = QRadioButton("Whole folder")
-        self.root_radio.setChecked(True)
-        self.mode_group = QButtonGroup(self)
-        self.mode_group.addButton(self.file_radio)
-        self.mode_group.addButton(self.root_radio)
-        mode_row.addWidget(self.file_radio)
-        mode_row.addWidget(self.root_radio)
-        mode_row.addStretch(1)
-        layout.addLayout(mode_row)
-
-        path_row = QHBoxLayout()
-        self.path_edit = QLineEdit(config.get("root", ""))
-        path_row.addWidget(self.path_edit, 1)
-        browse_button = QPushButton("Browse...")
-        browse_button.clicked.connect(self._browse)
-        path_row.addWidget(browse_button)
-        layout.addLayout(path_row)
-
-        # False by default, matching the CLI's own --dry-run flag (which
-        # is action="store_true" -- off unless passed, so `rename` really
-        # renames by default). Defaulting this checkbox to True would
-        # invert that: clicking "Run Rename" without noticing/unchecking
-        # it first would silently only preview, never actually renaming --
-        # a real bug this GUI shipped with once already (see CLAUDE.md).
-        self.dry_run_check = QCheckBox("Dry run (preview only)")
-        layout.addWidget(self.dry_run_check)
-
-        self.run_button = QPushButton("Run Rename")
-        self.run_button.clicked.connect(self._run)
-        layout.addWidget(self.run_button, alignment=Qt.AlignmentFlag.AlignLeft)
-
-        self.log = _make_log_widget()
-        layout.addWidget(self.log, 1)
-        self.runner = UiTaskRunner(self.log, on_done=self._on_done)
-
-    def _browse(self) -> None:
-        if self.file_radio.isChecked():
-            p, _ = QFileDialog.getOpenFileName(self, "Select PDF", "", "PDF files (*.pdf)")
-        else:
-            p = QFileDialog.getExistingDirectory(self, "Root folder", self.path_edit.text() or ".")
-        if p:
-            self.path_edit.setText(p)
-
-    def _run(self) -> None:
-        path = self.path_edit.text().strip()
-        if not path:
-            QMessageBox.critical(self, "Rename", "No file/folder given.")
-            return
-        self.run_button.setEnabled(False)
-        mode = "file" if self.file_radio.isChecked() else "root"
-        self.runner.start(self._worker, mode, path, self.dry_run_check.isChecked())
-
-    def _worker(self, mode: str, path: str, dry_run: bool) -> None:
-        log = self.runner.log
-        if mode == "file":
-            pdf_path = Path(path)
-            if not pdf_path.exists():
-                log(f"ERROR: file not found: {pdf_path}")
-                return
-            if pdf_path.suffix.lower() != ".pdf":
-                log(f"ERROR: not a PDF: {pdf_path}")
-                return
-            _rename_one(pdf_path, dry_run, log)
-            return
-
-        pdfs = scan_pdfs(path)
-        if not pdfs:
-            log(f"No PDFs found under {path}")
-            return
-        counts = {"renamed": 0, "skipped": 0, "failed": 0}
-        for pdf_path in pdfs:
-            counts[_rename_one(pdf_path, dry_run, log)] += 1
-        summary = f"{counts['renamed']} renamed, {counts['skipped']} skipped, {counts['failed']} failed"
-        if dry_run:
-            summary += " (dry run, nothing changed)"
-        log(summary)
-
-    def _on_done(self) -> None:
-        self.run_button.setEnabled(True)
-
-
-class PageLabelsTab(QWidget):
-    def __init__(self, config: dict):
-        super().__init__()
-        self.config_ = config
-
-        layout = QVBoxLayout(self)
-        layout.addWidget(_make_description_label(
-            "Sets the page numbers your PDF reader shows, without tagging: \"Cover\" for the front "
-            "and back cover, i, ii, iii before page 1, then the page numbers printed in the book, read "
-            "from its headers and footers. Makes a one-time .bak backup first. Books whose numbering "
-            "can't be read confidently are skipped and keep their existing labels."
-        ))
-
-        mode_row = QHBoxLayout()
-        self.file_radio = QRadioButton("Single file")
-        self.root_radio = QRadioButton("Whole folder")
-        self.root_radio.setChecked(True)
-        self.mode_group = QButtonGroup(self)
-        self.mode_group.addButton(self.file_radio)
-        self.mode_group.addButton(self.root_radio)
-        mode_row.addWidget(self.file_radio)
-        mode_row.addWidget(self.root_radio)
-        mode_row.addStretch(1)
-        layout.addLayout(mode_row)
-
-        path_row = QHBoxLayout()
-        self.path_edit = QLineEdit(config.get("root", ""))
-        path_row.addWidget(self.path_edit, 1)
-        browse_button = QPushButton("Browse...")
-        browse_button.clicked.connect(self._browse)
-        path_row.addWidget(browse_button)
-        layout.addLayout(path_row)
-
-        # Off by default, same as RenameTab's (see its comment for the bug
-        # an on-by-default dry-run checkbox caused there).
-        self.dry_run_check = QCheckBox("Dry run (show planned labels only)")
-        layout.addWidget(self.dry_run_check)
-
-        self.run_button = QPushButton("Set Page Labels")
-        self.run_button.clicked.connect(self._run)
-        layout.addWidget(self.run_button, alignment=Qt.AlignmentFlag.AlignLeft)
-
-        self.log = _make_log_widget()
-        layout.addWidget(self.log, 1)
-        self.runner = UiTaskRunner(self.log, on_done=self._on_done)
-
-    def _browse(self) -> None:
-        if self.file_radio.isChecked():
-            p, _ = QFileDialog.getOpenFileName(self, "Select PDF", "", "PDF files (*.pdf)")
-        else:
-            p = QFileDialog.getExistingDirectory(self, "Root folder", self.path_edit.text() or ".")
-        if p:
-            self.path_edit.setText(p)
-
-    def _run(self) -> None:
-        path = self.path_edit.text().strip()
-        if not path:
-            QMessageBox.critical(self, "Page Labels", "No file/folder given.")
-            return
-        self.run_button.setEnabled(False)
-        mode = "file" if self.file_radio.isChecked() else "root"
-        self.runner.start(self._worker, mode, path, self.dry_run_check.isChecked())
-
-    def _worker(self, mode: str, path: str, dry_run: bool) -> None:
-        log = self.runner.log
-        if mode == "file":
-            pdf_path = Path(path)
-            if not pdf_path.exists():
-                log(f"ERROR: file not found: {pdf_path}")
-                return
-            if pdf_path.suffix.lower() != ".pdf":
-                log(f"ERROR: not a PDF: {pdf_path}")
-                return
-            _label_one(pdf_path, dry_run, True, log)
-            return
-
-        pdfs = scan_pdfs(path)
-        if not pdfs:
-            log(f"No PDFs found under {path}")
-            return
-        counts = {"labeled": 0, "skipped": 0, "failed": 0}
-        for pdf_path in pdfs:
-            counts[_label_one(pdf_path, dry_run, dry_run, log)] += 1
-        summary = f"{counts['labeled']} labeled, {counts['skipped']} skipped, {counts['failed']} failed"
-        if dry_run:
-            summary += " (dry run, nothing changed)"
-        log(summary)
 
     def _on_done(self) -> None:
         self.run_button.setEnabled(True)
@@ -915,21 +815,11 @@ class AllTab(QWidget):
         self.apply_review_check = QCheckBox("Only match new files (--apply-review)")
         layout.addWidget(self.apply_review_check)
 
-        self.bookorbit_check = QCheckBox("BookOrbit mode (--bookorbit-mode)")
-        layout.addWidget(self.bookorbit_check)
-        layout.addWidget(_make_hint_label(BOOKORBIT_HINT))
-        layout.addWidget(_make_link_label(BOOKORBIT_URL))
+        self.metadata_combo = _add_metadata_picker(layout)
 
-        self.convert_images_check = QCheckBox("Convert all images to RGB JPEG (--convert-images)")
-        layout.addWidget(self.convert_images_check)
-        layout.addWidget(_make_hint_label(CONVERT_IMAGES_HINT))
+        self.convert_combo = _add_convert_images_picker(layout)
 
-        self.convert_grayscale_check = QCheckBox("Convert PDF to grayscale (--convert-grayscale)")
-        layout.addWidget(self.convert_grayscale_check)
-        layout.addWidget(_make_hint_label(CONVERT_GRAYSCALE_HINT))
-        _make_mutually_exclusive(self.convert_images_check, self.convert_grayscale_check)
-
-        self.back_cover_to_page_2_check, self.back_cover_to_end_check = _add_back_cover_checks(layout)
+        self.back_cover_combo = _add_back_cover_picker(layout)
 
         self.page_labels_check = QCheckBox("Set page labels (--page-labels)")
         layout.addWidget(self.page_labels_check)
@@ -959,21 +849,21 @@ class AllTab(QWidget):
         thresholds = self.config_.get("matching", {})
         self.runner.start(
             self._worker, root, review_csv, manual_overrides_path, thresholds,
-            self.refresh_check.isChecked(), self.apply_review_check.isChecked(), self.bookorbit_check.isChecked(),
-            self.convert_images_check.isChecked(), self.convert_grayscale_check.isChecked(),
+            self.refresh_check.isChecked(), self.apply_review_check.isChecked(), self.metadata_combo.currentData(),
+            self.convert_combo.currentData() == "rgb", self.convert_combo.currentData() == "grayscale",
             self.page_labels_check.isChecked(),
-            self.back_cover_to_page_2_check.isChecked(), self.back_cover_to_end_check.isChecked(),
+            self.back_cover_combo.currentData() == "page-2", self.back_cover_combo.currentData() == "end",
         )
 
     def _worker(
         self, root: str, review_csv: Path, manual_overrides_path: Path, thresholds: dict,
-        refresh_library: bool, apply_review: bool, bookorbit_mode: bool, convert_images: bool,
+        refresh_library: bool, apply_review: bool, metadata: str, convert_images: bool,
         convert_grayscale: bool, page_labels: bool, back_cover_to_page_2: bool, back_cover_to_end: bool,
     ) -> None:
         log = self.runner.log
         merged = _do_scan(self.config_, log, root, review_csv, manual_overrides_path, thresholds, refresh_library, apply_review)
         _do_write_pdfs(
-            log, merged, root, bookorbit_mode, convert_images, convert_grayscale, page_labels=page_labels,
+            log, merged, root, metadata, convert_images, convert_grayscale, page_labels=page_labels,
             back_cover_to_page_2=back_cover_to_page_2, back_cover_to_end=back_cover_to_end,
         )
 
@@ -1284,8 +1174,6 @@ class GuiApp(QWidget):
         tabs.addTab(ScanTab(config), "Scan")
         tabs.addTab(ReviewTab(config), "Review")
         tabs.addTab(WritePdfsTab(config), "Write PDFs")
-        tabs.addTab(RenameTab(config), "Rename")
-        tabs.addTab(PageLabelsTab(config), "Page Labels")
         tabs.addTab(AllTab(config), "All")
         tabs.addTab(PreferencesTab(config), "Preferences")
 

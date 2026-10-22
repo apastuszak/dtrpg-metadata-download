@@ -23,16 +23,16 @@
     review-status
         Print match counts by status from data/review.csv.
 
-    write-pdfs --root PATH [--bookorbit-mode]
+    write-pdfs --root PATH [--metadata MODE]
         Write metadata for every "approved"/"auto-accepted" row in
         data/review.csv into the corresponding PDF (in place, with a
         one-time .bak backup per file).
 
-    all --root PATH [--refresh-library] [--apply-review] [--bookorbit-mode]
+    all --root PATH [--refresh-library] [--apply-review] [--metadata MODE]
         Run scan, then write-pdfs. Still gated by review.csv status —
         rows left at needs-review/no-match are not written.
 
-    tag PDF_PATH | tag --root PATH [--bookorbit-mode] [--rename]
+    tag PDF_PATH | tag --root PATH [--metadata MODE] [--rename]
         Match PDF(s) by filename and write the one you pick straight
         into it, via a full-screen terminal UI (see tag_tui.py) — no
         review.csv. A single file and --root both use this UI; --root
@@ -61,14 +61,27 @@
         write that failed, and for any file skipped/cancelled/left
         unwritten.
 
-    --bookorbit-mode (on write-pdfs/all/tag): instead of writing Calibre
-        metadata into the PDF, strips ALL PDF-level metadata (full XMP
-        packet + classic Info dictionary, not just this tool's own
-        fields) and writes the BookOrbit .opf sidecar. Off by default,
-        in which case .opf is not written at all (BookOrbit's scanner
-        never opens it when the embedded PDF has any metadata, which it
-        normally does — see pdf_writer.py). The Grimmory .metadata.json
-        sidecar is unaffected either way.
+        With --metadata off, tag matches nothing (no API key needed): it
+        runs only the file options given, and --rename names each file
+        from the metadata already in it -- e.g. `tag --root DIR
+        --metadata off --page-labels --rename`.
+
+    --metadata MODE (on write-pdfs/all/tag): what metadata to write.
+        off       -- none; the other options (image conversion,
+                     hyperlinking, page labels, ...) still run.
+        calibre   -- Calibre metadata embedded in the PDF, no sidecars.
+        grimmory  -- Calibre metadata plus the Grimmory .metadata.json
+                     sidecar (the default).
+        bookorbit -- strips ALL PDF-level metadata (full XMP packet +
+                     classic Info dictionary, not just this tool's own
+                     fields) and writes only the BookOrbit .opf sidecar.
+                     BookOrbit reads that sidecar only if the library's
+                     metadata precedence puts "OPF file" ahead of
+                     "Embedded"; by default it never opens it for a PDF
+                     (see pdf_writer.py).
+        A sidecar the chosen mode doesn't write is removed if an earlier
+        run left one. --bookorbit-mode still works and means
+        --metadata bookorbit.
 
     --convert-images (on write-pdfs/all/tag): converts every CMYK/
         grayscale/JPEG2000 image in the PDF to RGB JPEG before metadata
@@ -86,16 +99,16 @@
         on the same images) -- the GUI enforces this by unchecking one
         when the other is checked.
 
-    --hyperlink-gurps / --hyperlink-mongoose / --hyperlink-deltagreen (on write-pdfs/all/tag):
-        auto-hyperlinks in-text page/chapter references (see
-        rpg_hyperlink.py), via hyperlink_pdf_universal.py/
-        hyperlink_pdf_mongoose.py (vendored) and
-        hyperlink_pdf_deltagreen.py (written for this project). Off by
-        default, and publisher-specific -- each is tuned for one
-        publisher's own reference conventions (GURPS / Mongoose
-        Publishing's Traveller line / Arc Dream's Delta Green), not a
-        general feature. All run before the embedded-metadata write, same
-        reasoning as --convert-images.
+    --hyperlink RULES (on write-pdfs/all/tag): auto-hyperlinks in-text
+        page/chapter references, the Table of Contents and the Index, via
+        hyperlink_engine.py (see rpg_hyperlink.py). RULES is a publisher
+        rule set -- a module name in hyperlink_rules/ (gurps, mongoose,
+        deltagreen, or any added later); an unknown name lists the
+        available ones. Off by default, and publisher-specific: each rule
+        set is tuned for one publisher's own reference conventions. Runs
+        before the embedded-metadata write, same reasoning as
+        --convert-images. --hyperlink-gurps / --hyperlink-mongoose /
+        --hyperlink-deltagreen still work, as hidden aliases.
 
     --background-layer / --remove-background (on write-pdfs/all/tag):
         tags each page's full-page decorative background as a toggleable
@@ -176,7 +189,7 @@ from textual.logging import TextualHandler
 
 from dtrpg_client import DtrpgClient
 from matcher import load_known_urls, load_manual_overrides, run_scan_batch, scan_pdfs
-from pdf_writer import write_approved, write_page_labels_only
+from pdf_writer import DEFAULT_METADATA, METADATA_MODES, write_approved, write_page_labels_only
 from preferences import DEFAULT_PREFERENCES_PATH, load_preferences, resolve_api_key
 from renamer import apply_rename, plan_rename
 from review import load_review, save_review
@@ -292,11 +305,10 @@ def cmd_write_pdfs(args: argparse.Namespace, config: dict) -> None:
         return
 
     results = write_approved(
-        rows, root, bookorbit_mode=args.bookorbit_mode, convert_images=args.convert_images,
+        rows, root, metadata=args.metadata, convert_images=args.convert_images,
         convert_grayscale=args.convert_grayscale,
         background_layer=args.background_layer, remove_background=args.remove_background,
-        hyperlink_gurps=args.hyperlink_gurps, hyperlink_mongoose=args.hyperlink_mongoose,
-        hyperlink_deltagreen=args.hyperlink_deltagreen,
+        hyperlink=args.hyperlink,
         page_labels=args.page_labels,
         back_cover_to_page_2=args.back_cover_to_page_2, back_cover_to_end=args.back_cover_to_end,
     )
@@ -411,7 +423,9 @@ def cmd_tag(args: argparse.Namespace, config: dict) -> None:
     URLs/thresholds, resolving the PDF list, building the DtrpgClient) is
     unchanged from before the TUI rewrite -- a missing DTRPG_API_KEY
     still sys.exit()s here, on a normal terminal, before the TUI ever
-    starts."""
+    starts. With --metadata off nothing is matched, so no client (or API
+    key) is needed."""
+    needs_client = args.metadata != "off"
     manual_overrides_path = Path(config.get("manual_overrides", "data/manual_overrides.yaml"))
     manual_overrides = load_manual_overrides(manual_overrides_path)
     thresholds = config.get("matching", {})
@@ -422,7 +436,7 @@ def cmd_tag(args: argparse.Namespace, config: dict) -> None:
         if not pdfs:
             print(f"No PDFs found under {root}")
             return
-        client = build_client(config)
+        client = build_client(config) if needs_client else None
         known_urls = load_known_urls(root)
     else:
         path = Path(args.pdf)
@@ -431,7 +445,7 @@ def cmd_tag(args: argparse.Namespace, config: dict) -> None:
         if path.suffix.lower() != ".pdf":
             sys.exit(f"Not a PDF: {path}")
         pdfs = [path]
-        client = build_client(config)
+        client = build_client(config) if needs_client else None
         known_urls = load_known_urls(path.parent)
 
     TagApp(
@@ -440,14 +454,12 @@ def cmd_tag(args: argparse.Namespace, config: dict) -> None:
         manual_overrides=manual_overrides,
         known_urls=known_urls,
         thresholds=thresholds,
-        bookorbit_mode=args.bookorbit_mode,
+        metadata=args.metadata,
         convert_images=args.convert_images,
         convert_grayscale=args.convert_grayscale,
         background_layer=args.background_layer,
         remove_background=args.remove_background,
-        hyperlink_gurps=args.hyperlink_gurps,
-        hyperlink_mongoose=args.hyperlink_mongoose,
-        hyperlink_deltagreen=args.hyperlink_deltagreen,
+        hyperlink=args.hyperlink,
         page_labels=args.page_labels,
         back_cover_to_page_2=args.back_cover_to_page_2,
         back_cover_to_end=args.back_cover_to_end,
@@ -510,10 +522,20 @@ def main() -> None:
     status_parser.add_argument("--review-csv", help="Path to review.csv (overrides config.yaml)")
     status_parser.set_defaults(func=cmd_review_status)
 
-    bookorbit_mode_help = (
-        "Strip all PDF-level metadata instead of writing Calibre metadata, "
-        "and write the BookOrbit .opf sidecar (skipped otherwise)"
+    metadata_help = (
+        "What metadata to write: off (none; other options still run), calibre (embedded in the PDF), "
+        "grimmory (embedded plus a Grimmory .metadata.json sidecar), or bookorbit (strip all PDF "
+        "metadata, write only a BookOrbit .opf sidecar; BookOrbit reads it only with 'OPF file' ahead of "
+        f"'Embedded' in the library's metadata precedence). Default: {DEFAULT_METADATA}"
     )
+
+    def add_metadata_options(subparser: argparse.ArgumentParser) -> None:
+        group = subparser.add_mutually_exclusive_group()
+        group.add_argument("--metadata", metavar="MODE", choices=METADATA_MODES, default=DEFAULT_METADATA,
+                           help=metadata_help)
+        # The flag from before there was a choice.
+        group.add_argument("--bookorbit-mode", dest="metadata", action="store_const", const="bookorbit",
+                           help=argparse.SUPPRESS)
     convert_images_help = (
         "Convert CMYK/grayscale/JPEG2000 images in the PDF to RGB JPEG before writing metadata"
     )
@@ -522,18 +544,32 @@ def main() -> None:
         "(see rpg_grayscale.py; requires Ghostscript ('gs') on PATH). Mutually exclusive with "
         "--convert-images."
     )
-    hyperlink_gurps_help = (
-        "Auto-hyperlink in-text page/chapter references via a vendored GURPS-specific script "
-        "(see rpg_hyperlink.py)"
+    hyperlink_help = (
+        "Auto-hyperlink in-text page/chapter references, the Table of Contents and the Index, using "
+        "publisher rule set RULES (a module in hyperlink_rules/: gurps, mongoose, deltagreen, ...). "
+        "An unknown name lists the available ones."
     )
-    hyperlink_mongoose_help = (
-        "Auto-hyperlink in-text page/chapter references via a vendored Mongoose-Traveller-"
-        "specific script (see rpg_hyperlink.py)"
-    )
-    hyperlink_deltagreen_help = (
-        "Auto-hyperlink in-text page references, the Table of Contents and the Index in a Delta Green "
-        "(Arc Dream) PDF (see hyperlink_pdf_deltagreen.py)"
-    )
+
+    def hyperlink_rule_set(name: str) -> str:
+        # Checked only when --hyperlink is given, so other subcommands
+        # never import the engine just to build the parser.
+        from rpg_hyperlink import rule_sets
+
+        names = [r.name for r in rule_sets()]
+        if name not in names:
+            raise argparse.ArgumentTypeError(
+                f"unknown rule set {name!r} (available: {', '.join(names) or 'none'})")
+        return name
+
+    def add_hyperlink_options(subparser: argparse.ArgumentParser) -> None:
+        group = subparser.add_mutually_exclusive_group()
+        group.add_argument("--hyperlink", metavar="RULES", type=hyperlink_rule_set, help=hyperlink_help)
+        # The per-publisher flags from before rule sets were discoverable.
+        for alias, rules in (("--hyperlink-gurps", "gurps"), ("--hyperlink-mongoose", "mongoose"),
+                             ("--hyperlink-deltagreen", "deltagreen")):
+            group.add_argument(alias, dest="hyperlink", action="store_const", const=rules,
+                               help=argparse.SUPPRESS)
+
     background_layer_help = (
         "Tag each page's full-page decorative background as a toggleable Optional Content Group layer, "
         "via a vendored script (see rpg_background_layer.py). For Troll Lord Games PDFs "
@@ -568,13 +604,11 @@ def main() -> None:
     write_parser = subparsers.add_parser("write-pdfs", help="Write approved metadata into PDFs")
     write_parser.add_argument("--root", help="Root folder of RPG PDFs (overrides config.yaml)")
     write_parser.add_argument("--review-csv", help="Path to review.csv (overrides config.yaml)")
-    write_parser.add_argument("--bookorbit-mode", action="store_true", help=bookorbit_mode_help)
+    add_metadata_options(write_parser)
     write_color_group = write_parser.add_mutually_exclusive_group()
     write_color_group.add_argument("--convert-images", action="store_true", help=convert_images_help)
     write_color_group.add_argument("--convert-grayscale", action="store_true", help=convert_grayscale_help)
-    write_parser.add_argument("--hyperlink-gurps", action="store_true", help=hyperlink_gurps_help)
-    write_parser.add_argument("--hyperlink-mongoose", action="store_true", help=hyperlink_mongoose_help)
-    write_parser.add_argument("--hyperlink-deltagreen", action="store_true", help=hyperlink_deltagreen_help)
+    add_hyperlink_options(write_parser)
     write_bg_group = write_parser.add_mutually_exclusive_group()
     write_bg_group.add_argument("--background-layer", action="store_true", help=background_layer_help)
     write_bg_group.add_argument("--remove-background", action="store_true", help=remove_background_help)
@@ -587,10 +621,8 @@ def main() -> None:
     all_parser.add_argument("--review-csv", help="Path to review.csv (overrides config.yaml)")
     all_parser.add_argument("--refresh-library", action="store_true")
     all_parser.add_argument("--apply-review", action="store_true")
-    all_parser.add_argument("--bookorbit-mode", action="store_true", help=bookorbit_mode_help)
-    all_parser.add_argument("--hyperlink-gurps", action="store_true", help=hyperlink_gurps_help)
-    all_parser.add_argument("--hyperlink-mongoose", action="store_true", help=hyperlink_mongoose_help)
-    all_parser.add_argument("--hyperlink-deltagreen", action="store_true", help=hyperlink_deltagreen_help)
+    add_metadata_options(all_parser)
+    add_hyperlink_options(all_parser)
     all_color_group = all_parser.add_mutually_exclusive_group()
     all_color_group.add_argument("--convert-images", action="store_true", help=convert_images_help)
     all_color_group.add_argument("--convert-grayscale", action="store_true", help=convert_grayscale_help)
@@ -605,13 +637,11 @@ def main() -> None:
     tag_group = tag_parser.add_mutually_exclusive_group(required=True)
     tag_group.add_argument("pdf", nargs="?", help="Path to a single PDF file to match and tag")
     tag_group.add_argument("--root", help="Process every PDF under this directory instead of a single file")
-    tag_parser.add_argument("--bookorbit-mode", action="store_true", help=bookorbit_mode_help)
+    add_metadata_options(tag_parser)
     tag_color_group = tag_parser.add_mutually_exclusive_group()
     tag_color_group.add_argument("--convert-images", action="store_true", help=convert_images_help)
     tag_color_group.add_argument("--convert-grayscale", action="store_true", help=convert_grayscale_help)
-    tag_parser.add_argument("--hyperlink-gurps", action="store_true", help=hyperlink_gurps_help)
-    tag_parser.add_argument("--hyperlink-mongoose", action="store_true", help=hyperlink_mongoose_help)
-    tag_parser.add_argument("--hyperlink-deltagreen", action="store_true", help=hyperlink_deltagreen_help)
+    add_hyperlink_options(tag_parser)
     tag_bg_group = tag_parser.add_mutually_exclusive_group()
     tag_bg_group.add_argument("--background-layer", action="store_true", help=background_layer_help)
     tag_bg_group.add_argument("--remove-background", action="store_true", help=remove_background_help)

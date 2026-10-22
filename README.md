@@ -1,6 +1,6 @@
 # dtrpg-metadata-download
 
-Matches local RPG PDF files against DriveThruRPG metadata — checking manual overrides, then a pre-supplied product URL, then your purchased library, then DriveThruRPG's public catalog, in that order — and writes the result into each PDF's embedded XMP metadata in Calibre's own format, plus a [BookOrbit](https://bookorbit.app) `.opf` sidecar and a [Grimmory](https://grimmory.org) `.metadata.json` sidecar alongside it. No database, no server — a CLI you run against a folder of PDFs.
+Matches local RPG PDF files against DriveThruRPG metadata — checking manual overrides, then a pre-supplied product URL, then your purchased library, then DriveThruRPG's public catalog, in that order — and writes the result into each PDF's embedded XMP metadata in Calibre's own format, a [Grimmory](https://grimmory.org) `.metadata.json` sidecar, or a [BookOrbit](https://bookorbit.app) `.opf` sidecar, depending on `--metadata` (see [What gets written](#what-gets-written)). No database, no server — a CLI you run against a folder of PDFs.
 
 ## Setup
 
@@ -74,7 +74,7 @@ If you'd rather review matches in bulk before anything gets written, use the CSV
 ./dtrpg-metadata-download.py rename --root "/path/to/rpg/pdfs"
 ```
 
-Renames each already-tagged PDF to `<series> - <title>.pdf` (or just `<title>.pdf` when there's no series), reading title/series back from that file's `.metadata.json` sidecar — the only one of the three outputs that's plain, flat JSON, since Calibre's/BookOrbit's embedded XMP series fields are qualified/structured properties that can't be read back reliably through pikepdf's public API (see `renamer.py`). The `.pdf.bak`, `.opf`, `.metadata.json`, and (if hyperlinking was used) `_link_report.csv` siblings are renamed right along with the PDF, since they're all named from its stem. Files with no sidecar (never tagged) or already named correctly are skipped; if the computed name collides with an existing file, that one's left alone and reported as failed rather than overwritten. If renaming one file's companion group fails partway through (permissions, a file locked by another app), whatever in that group already succeeded is rolled back rather than left split across old and new names, and the batch continues with the next file instead of aborting.
+Renames each already-tagged PDF to `<series> - <title>.pdf` (or just `<title>.pdf` when there's no series), reading title/series back from whatever that file was tagged with: its `.metadata.json` sidecar, else its `.opf` sidecar, else the Calibre metadata embedded in the PDF (see `renamer.py`). The `.pdf.bak`, `.opf`, `.metadata.json`, and (if hyperlinking was used) `_link_report.csv` siblings are renamed right along with the PDF, since they're all named from its stem. Files with none of those (never tagged) or already named correctly are skipped; if the computed name collides with an existing file, that one's left alone and reported as failed rather than overwritten. If renaming one file's companion group fails partway through (permissions, a file locked by another app), whatever in that group already succeeded is rolled back rather than left split across old and new names, and the batch continues with the next file instead of aborting.
 
 ### Page labels
 
@@ -86,7 +86,7 @@ Renames each already-tagged PDF to `<series> - <title>.pdf` (or just `<title>.pd
 
 Sets the page "numbers" your PDF reader shows in its page box and thumbnail panel, so "go to page 47" lands on the page printed 47:
 
-- The front cover (PDF page 1) and back cover are labeled **Cover**. The back cover is normally the last page. Some publishers (Steve Jackson Games, Delta Green, Evil Hat) put it second, right after the front cover; that's detected from the retail barcode on PDF page 2, and the last page is then numbered like any other page. Books with no back cover at all are recognized in two common cases — a single wraparound cover as PDF page 1 (Shadowrun), or a blank last page — and their last page gets its number instead of "Cover".
+- The front cover (PDF page 1) and back cover are labeled **Cover**. The back cover is normally the last page. Some publishers (Steve Jackson Games, Delta Green, Evil Hat) put it second, right after the front cover; that's detected from the retail barcode on PDF page 2, and the last page is then numbered like any other page. Books with no back cover at all are recognized in two common cases — a single wraparound cover as PDF page 1 (Shadowrun Sixth World), or a blank last page — and their last page gets its number instead of "Cover".
 - Pages before printed page 1 get lowercase roman numerals: **i, ii, iii**, ...
 - Every other page gets the number actually printed on it, read automatically from the page headers and footers — including pages that show no number (title pages, full-page art, ads), and the pages before the first visible number. If the first number you can see is 5, the pages before it are worked back to 4, 3, 2, 1.
 
@@ -114,15 +114,26 @@ The `drivethrurpg_url` column accepts a full product URL, `id:PRODUCT_ID`, or a 
 ./dtrpg-metadata-download.py gui
 ```
 
-A PyQt6 desktop window with a tab for every subcommand above — Tag (the same candidate-pick/manual-entry/confirm/series flow as the terminal UI, in dialog windows instead), Scan, Review (an editable table for `review.csv` — approve a row, tweak its series, edit its description — instead of opening it in a spreadsheet app), Write PDFs, Rename, Page Labels, All, and Preferences (your API key and DriveThruRPG name — see Setup above). Long-running work happens in the background so the window stays responsive.
+A PyQt6 desktop window with tabs for the subcommands above — Tag (the same candidate-pick/manual-entry/confirm/series flow as the terminal UI, in dialog windows instead), Scan, Review (an editable table for `review.csv` — approve a row, tweak its series, edit its description — instead of opening it in a spreadsheet app), Write PDFs, All, and Preferences (your API key and DriveThruRPG name — see Setup above).
 
-The Tag, Write PDFs, and All tabs each have **"Convert all images to RGB JPEG"** and **"Convert PDF to grayscale"** checkboxes (`--convert-images`/`--convert-grayscale` on the matching CLI subcommands — see below); checking one unchecks the other, since they're opposite operations on the same images.
+Renaming and page labels have no tab of their own: use the Tag tab with **Metadata tagging set to Off**. Then nothing is matched against DriveThruRPG (no API key needed, no dialogs), and only the options you pick run, so for example **Set page labels** and **Rename** alone do what `page-labels` and `rename` do, with the new name taken from the metadata already in each file. Tick **Dry run** to see what they'd do without changing anything. Long-running work happens in the background so the window stays responsive.
+
+The Tag, Write PDFs, and All tabs each have a **"Metadata tagging"** dropdown — Off, Calibre, Grimmory or BookOrbit (`--metadata` on the CLI — see [What gets written](#what-gets-written)), starting on Grimmory — and a **"Convert images"** dropdown — Off, RGB or Grayscale (`--convert-images`/`--convert-grayscale` on the matching CLI subcommands — see below). It's one choice because they're opposite operations on the same images.
 
 PyQt6 is a normal dependency, installed automatically the first time you run `gui` via `uv run --script` — no separate install step, unlike an earlier Tkinter-based version of this GUI, which needed a Python built with Tk bindings.
 
 ## What gets written
 
-Up to three things happen on every write, all from the same matched data — embedded metadata and the Grimmory sidecar always, the BookOrbit `.opf` only with `--bookorbit-mode`:
+`--metadata MODE` (on `tag`, `write-pdfs`, and `all`; the "Metadata tagging" dropdown in the GUI) chooses what's written, all from the same matched data:
+
+| Mode | Embedded Calibre metadata | Grimmory `.metadata.json` | BookOrbit `.opf` |
+|---|---|---|---|
+| `off` | — | — | — |
+| `calibre` | ✓ | — | — |
+| `grimmory` (the default) | ✓ | ✓ | — |
+| `bookorbit` | removed (see below) | — | ✓ |
+
+`off` writes no metadata at all, but every other option you pass (image conversion, hyperlinking, page labels, back-cover moves) still runs, and `tag --rename` still renames from the match you confirmed. A file that `off` doesn't change at all isn't backed up either. Every other mode also deletes a sidecar it doesn't write, if an earlier run in another mode left one, so an old sidecar can't disagree with the new match. `--bookorbit-mode`, from before there was a choice, still works and means `--metadata bookorbit`.
 
 ### 1. Embedded PDF metadata, in Calibre's format
 
@@ -147,54 +158,80 @@ The same tags/categories are additionally written to the classic `pdf:Keywords` 
 
 Standard EPUB2/Calibre-style OPF, written next to the PDF. BookOrbit reads a same-stem (or `metadata.opf`) sidecar automatically — confirmed by running BookOrbit's own real OPF parser (from its open-source repo) against files this tool writes. Series comes from the same `<meta name="calibre:series">` convention Calibre itself uses; ISBN is auto-bucketed into ISBN-10/13 on BookOrbit's end from a single `<dc:identifier opf:scheme="ISBN">`.
 
-**Why series is also written directly into the embedded PDF (`bookorbit:seriesName`), not just here:** BookOrbit's default scan order tries embedded PDF metadata *first*, and only opens the `.opf` sidecar if the embedded extraction returns *nothing at all* — it's a whole-source fallback, not a per-field merge. Since a Calibre-tagged PDF always has some embedded metadata (title, authors, etc.), the sidecar's series data was silently unreachable in practice. Confirmed against BookOrbit's real scanner source and its real XMP reader, not just theory. **By default the `.opf` isn't even written** — pointless when the embedded PDF always "wins" — unless `--bookorbit-mode` is passed (see below), which flips the whole strategy: strip the embedded PDF metadata entirely instead, forcing BookOrbit to actually fall through to this file.
+**Why series is also written directly into the embedded PDF (`bookorbit:seriesName`), not just here:** BookOrbit's default scan order tries embedded PDF metadata *first*, and only opens the `.opf` sidecar if the embedded extraction returns *nothing at all* — it's a whole-source fallback, not a per-field merge. And BookOrbit's PDF reader always returns something for a PDF it can open: with no metadata in the file, it makes up a title from the filename. So **with BookOrbit's default settings, the `.opf` is never read for a PDF**, whatever the PDF contains. Confirmed against BookOrbit's real scanner source and its real PDF and XMP readers. That's why the `.opf` is written only with `--metadata bookorbit` (below).
 
-#### `--bookorbit-mode`
+#### `--metadata bookorbit`
 
-Available on `tag`, `write-pdfs`, and `all`. Instead of writing Calibre metadata into the PDF, this strips **all** PDF-level metadata — the full XMP packet and the classic Info dictionary, not just the fields this tool would otherwise write, since a leftover publisher-set `/Title` alone is enough for BookOrbit's embedded source to "win" — and writes the `.opf` sidecar (which is otherwise skipped, see above). The Grimmory `.metadata.json` sidecar is written either way; this flag only changes the embedded-PDF/`.opf` tradeoff for BookOrbit. Off by default — re-tagging a file with the flag now on top of a previous non-`--bookorbit-mode` write correctly wipes whatever Calibre metadata that earlier write left behind, and conversely, re-tagging *without* the flag after a previous `--bookorbit-mode` write deletes the stale `.opf` rather than leaving it behind with the old match's data.
+**This only works if you change one BookOrbit setting:** in the library's settings, set its metadata precedence so **OPF file comes before Embedded**. BookOrbit then reads the `.opf` first. With the default order it reads the PDF instead and ignores the `.opf`, even though this mode has emptied the PDF; you'd get a title made from the filename and nothing else.
+
+Instead of writing Calibre metadata into the PDF, this strips **all** PDF-level metadata — the full XMP packet and the classic Info dictionary, not just the fields this tool would otherwise write — so the PDF carries nothing that could disagree with the `.opf`, and writes only the `.opf` sidecar. Re-tagging a file in this mode on top of an earlier Calibre/Grimmory write correctly wipes whatever Calibre metadata that earlier write left behind (and its `.metadata.json`), and re-tagging in another mode after a BookOrbit write deletes the stale `.opf`.
 
 #### `--convert-images`
 
-Available on `tag`, `write-pdfs`, and `all` (and as a checkbox in the GUI's Tag/Write PDFs/All tabs). Converts every CMYK, grayscale, and JPEG2000 (JPX) image in the PDF to standard RGB JPEG before metadata is written — useful for PDFs from print workflows, which often carry CMYK images and/or JPX compression that some readers (notably Apple's PDF renderer on macOS/iOS) handle poorly, showing images as missing or wrong-colored. Indexed/palette images (diagrams, pixel art) are kept lossless rather than run through JPEG, which would blur their sharp edges. CMYK images without their own embedded color profile are re-tagged with a real CMYK ICC profile first (macOS only — falls back to a plain conversion elsewhere), and converted images get an explicit sRGB profile rather than bare `/DeviceRGB`, both aimed at avoiding the color casts a naive conversion produces in some readers. Runs before metadata is written, never after, so it can't disturb the Calibre-specific XMP structure `--bookorbit-mode`'s sibling section above already went through the trouble of getting right. Off by default; ported from a separate tool ([mac-pdf-rgb-fix](https://github.com/apastuszak/mac-pdf-rgb-fix)) built specifically for this problem.
+Available on `tag`, `write-pdfs`, and `all` (and as "RGB" in the GUI's "Convert images" dropdown on the Tag/Write PDFs/All tabs). Converts every CMYK, grayscale, and JPEG2000 (JPX) image in the PDF to standard RGB JPEG before metadata is written — useful for PDFs from print workflows, which often carry CMYK images and/or JPX compression that some readers (notably Apple's PDF renderer on macOS/iOS) handle poorly, showing images as missing or wrong-colored. Indexed/palette images (diagrams, pixel art) are kept lossless rather than run through JPEG, which would blur their sharp edges. CMYK images without their own embedded color profile are re-tagged with a real CMYK ICC profile first (macOS only — falls back to a plain conversion elsewhere), and converted images get an explicit sRGB profile rather than bare `/DeviceRGB`, both aimed at avoiding the color casts a naive conversion produces in some readers. Runs before metadata is written, never after, so it can't disturb the Calibre-specific XMP structure the BookOrbit section above already went through the trouble of getting right. Off by default; ported from a separate tool ([mac-pdf-rgb-fix](https://github.com/apastuszak/mac-pdf-rgb-fix)) built specifically for this problem.
 
 #### `--convert-grayscale`
 
-Available on `tag`, `write-pdfs`, and `all` (and as a checkbox in the GUI's Tag/Write PDFs/All tabs). Converts the whole PDF to grayscale before metadata is written, using a vendored script (see `rpg_grayscale.py`/`convert_pdf_to_grayscale.py`, committed alongside this project). Also requires the real Ghostscript binary (`gs`) on PATH — a system package (`brew install ghostscript` on macOS), not something this project's own dependencies can provide. Off by default, and mutually exclusive with `--convert-images` — checking one unchecks the other in the GUI, and the CLI refuses both flags together.
+Available on `tag`, `write-pdfs`, and `all` (and as "Grayscale" in the GUI's "Convert images" dropdown on the Tag/Write PDFs/All tabs). Converts the whole PDF to grayscale before metadata is written, using a vendored script (see `rpg_grayscale.py`/`convert_pdf_to_grayscale.py`, committed alongside this project). Also requires the real Ghostscript binary (`gs`) on PATH — a system package (`brew install ghostscript` on macOS), not something this project's own dependencies can provide. Off by default, and mutually exclusive with `--convert-images` — the GUI's dropdown picks one, and the CLI refuses both flags together.
 
-#### `--hyperlink-gurps` / `--hyperlink-mongoose` / `--hyperlink-deltagreen`
+#### `--hyperlink RULES`
 
-These turn a book's own cross-references into clickable links, so tapping "see p. 208" in your PDF reader jumps straight to page 208. Use `--hyperlink-gurps` for GURPS books (Steve Jackson Games), `--hyperlink-mongoose` for Mongoose Publishing's Traveller line (1st and 2nd edition, and 2300AD), and `--hyperlink-deltagreen` for Delta Green books (Arc Dream Publishing). Each one is tuned to its publisher's own way of writing references, so only use it on that publisher's books.
+This turns a book's own cross-references into clickable links, so tapping "see p. 208" in your PDF reader jumps straight to page 208. `RULES` names the publisher's rule set:
 
-Available on `tag`, `write-pdfs`, and `all`, and as checkboxes in the GUI's Tag and Write PDFs tabs. All are off by default.
+| Rule set | For |
+|---|---|
+| `gurps` | GURPS books (Steve Jackson Games) |
+| `mongoose` | Mongoose Publishing's Traveller line (1st and 2nd edition) and 2300AD |
+| `deltagreen` | Delta Green books (Arc Dream Publishing) |
+| `shadowrun_sixth_world` | Shadowrun Sixth World books (Catalyst Game Labs) |
+
+For example, `./dtrpg-metadata-download.py tag --root ~/RPGs/GURPS --hyperlink gurps`. Each rule set is tuned to its publisher's own way of writing references, so only use it on that publisher's books. An unknown name gives an error listing the rule sets that are available.
+
+Available on `tag`, `write-pdfs`, and `all`, and as a "Hyperlink references" dropdown in the GUI's Tag and Write PDFs tabs. Off by default. The dropdown lists every rule set in `hyperlink_rules/`, so a rule set added there shows up in both the CLI and the GUI with nothing else to change. The older `--hyperlink-gurps`, `--hyperlink-mongoose` and `--hyperlink-deltagreen` options still work and mean the same as `--hyperlink gurps` and so on.
 
 **What gets linked:**
 
 - **Page references in the text**, like "p. 208" or "pp. 12–14". Delta Green books write "See COMBAT on page 48" or "pages 12–13", and those are linked too. A range links to its first page.
 - **The index.** Every page number in the index entries becomes a link, including ranges that wrap onto the next line. (The Delta Green option leaves an index alone if the publisher has already linked it.)
-- **Chapter references** (GURPS and Mongoose), like "Chapter 3" or "Chapters 2, 4, and 6", plus chapter names in italics that exactly match a chapter title in the table of contents.
+- **Chapter references** (GURPS and Mongoose), like "Chapter 3" or "Chapters 2, 4, and 6", linked to where that chapter starts according to the table of contents.
 - **The table of contents**, if it doesn't have links already. Most Delta Green PDFs come with a linked table of contents, so that's usually left as it is.
 
 **What's deliberately left alone:**
 
-- **References to other books.** For example "GURPS Magic, p. 23", GURPS's "p. B123" shorthand (page 123 of the *Basic Set*), an italicized title of a different book just before the page number, or Delta Green's "page 85 of the *Agent's Handbook*". Linking those would jump to the wrong page of *this* book.
+- **References to other books.** For example "GURPS Magic, p. 23", GURPS's "p. B123" shorthand (page 123 of the *Basic Set*), an italicized title of a different book just before the page number, Delta Green's "page 85 of the *Agent's Handbook*", or Shadowrun Sixth World's "(p. 94, SR6)" and "p. 129 of Sixth World Companion". Linking those would jump to the wrong page of *this* book.
 - **Page numbers outside the book's range.**
 - **Anything that's already a link.** Running it again on a book adds nothing new.
 
-**How it finds the right page:** it reads the page numbers printed in the footers, so "p. 208" goes to the page that actually says 208, even when covers and front matter throw off the count. If a book has no page numbers it can read (for example a scan), hyperlinking is skipped with a note in the log, and the rest of the tagging still happens.
+**How it finds the right page:** it reads the page numbers printed in the footers (or, for Shadowrun Sixth World, the headers), so "p. 208" goes to the page that actually says 208, even when covers and front matter throw off the count. If a book has no page numbers it can read (for example a scan), hyperlinking is skipped with a note in the log, and the rest of the tagging still happens.
 
 **The link report:** next to the PDF you'll find `<book name>_link_report.csv`, with one row for every reference found. Each row gives the PDF page, the text it matched, the page it points to, and whether it was linked or skipped (and why). It's the quickest way to check for a missed or wrong link. `--rename` renames it along with the book.
 
-Only clickable link areas are added; the text and layout of the pages don't change. This runs before the metadata is written, using the scripts bundled in this repo (see `rpg_hyperlink.py`: `hyperlink_pdf_universal.py` for GURPS, `hyperlink_pdf_mongoose.py` for Mongoose, and `hyperlink_pdf_deltagreen.py` for Delta Green).
+Only clickable link areas are added; the text and layout of the pages don't change. This runs before the metadata is written. Every rule set uses one hyperlinking engine (`hyperlink_engine.py`), with one file per publisher in `hyperlink_rules/` (`gurps.py`, `mongoose.py`, `deltagreen.py`, `shadowrun_sixth_world.py`). A rule set is mostly a list of settings: how the publisher prints page numbers, how it writes references, and how it names other books. Supporting another publisher means adding one file to that folder; it then appears in `--hyperlink` and the GUI dropdown.
+
+You can also run the engine on its own, without tagging anything: `python3 hyperlink_engine.py --rules gurps INPUT.pdf OUTPUT.pdf` writes a linked copy plus its link report, and `python3 hyperlink_engine.py --list` lists the rule sets it found.
+
+**Adding a publisher.** `hyperlink_survey.py` drafts a rule set from a folder of one publisher's PDFs:
+
+```bash
+python3 hyperlink_survey.py --name pelgrane --label "Pelgrane Press" ~/RPGs/Pelgrane/
+```
+
+It reads the books (it never changes them) and measures how they print page numbers, where the table of contents and index are and whether they're already linked, how references are written ("p. 12", "page 12", "pages 12, 14 and 16", "Chapter 3"), and what appears next to references that name other books. It writes two files into `hyperlink-survey-pelgrane/`:
+
+- `pelgrane.py`, the draft rule set, with a comment on every setting giving the evidence for it.
+- `pelgrane_survey.md`, a report with a table per book, sample sentences for every pattern that might mean "another book", and a trial run of the draft over copies of the same books showing what it linked and skipped.
+
+The draft is a starting point, not a finished rule set. Review its list of known titles and the sample sentences in the report. Some calls need a human: "page 177 in THE SENECA WHIRLWIND REPORT" names a section of this book, while "page 85 of the *Agent's Handbook*" names another book, and a handful of examples can't always tell the survey which convention a publisher follows. When you're happy with the draft, copy it into `hyperlink_rules/`, or run the survey with `--install` to have it copied there for you (it won't overwrite an existing rule set). Surveying takes a few minutes for a handful of books, and longer for large ones.
 
 #### `--background-layer` / `--remove-background`
 
-Available on `tag`, `write-pdfs`, and `all` (and as checkboxes in the GUI's Tag/Write PDFs tabs). Tags each page's full-page decorative background as a toggleable layer, or deletes it outright, before metadata is written, using a vendored script (see `rpg_background_layer.py`/`castles_and_crusades_background_layer.py`). For Troll Lord Games PDFs only (Castles & Crusades). Off by default, and mutually exclusive with each other (opposite operations on the same background) — checking one unchecks the other in the GUI, and the CLI refuses both flags together. A publisher-specific integration, not a general feature of this project.
+Available on `tag`, `write-pdfs`, and `all` (and as a "Page background" dropdown — Off, Layer or Remove — in the GUI's Tag/Write PDFs tabs). Tags each page's full-page decorative background as a toggleable layer, or deletes it outright, before metadata is written, using a vendored script (see `rpg_background_layer.py`/`castles_and_crusades_background_layer.py`). For Troll Lord Games PDFs only (Castles & Crusades). Off by default, and mutually exclusive with each other (opposite operations on the same background) — the GUI's dropdown picks one, and the CLI refuses both flags together. A publisher-specific integration, not a general feature of this project.
 
 #### `--back-cover-to-page-2` / `--back-cover-to-end`
 
-Available on `tag`, `write-pdfs`, and `all` (and as checkboxes in the GUI's Tag, Write PDFs, and All tabs). Moves the back cover to right after the front cover, or from there to the end of the book, so your whole library can follow one convention. Off by default, and mutually exclusive with each other.
+Available on `tag`, `write-pdfs`, and `all` (and as a "Move back cover" dropdown — Off, To page 2 or To the end — in the GUI's Tag, Write PDFs, and All tabs). Moves the back cover to right after the front cover, or from there to the end of the book, so your whole library can follow one convention. Off by default, and mutually exclusive with each other.
 
-The back cover is found by its retail barcode on PDF page 2 or the last page. A book with a single wraparound cover (Shadowrun) has no separate back cover and is left alone, with the reason logged, as is one whose back cover is already where you asked.
+The back cover is found by its retail barcode on PDF page 2 or the last page. A book with a single wraparound cover (Shadowrun Sixth World) has no separate back cover and is left alone, with the reason logged, as is one whose back cover is already where you asked.
 
 PDF-only releases usually have no barcode. For those, `tag` asks: it shows you the page that would be the back cover (the last page when moving to page 2, page 2 when moving to the end) and moves it only if you say yes. The GUI shows it next to the front cover. The terminal UI shows its text and has an "Open page" button that opens it in your PDF viewer. A blank page is never offered, so books that simply end on a blank page aren't asked about. `write-pdfs` and `all` can't ask, so there a book without a barcode is left alone, with a note that `tag` can handle it. Bookmarks, in-document links, and existing page labels all follow their pages. Runs first among the write steps, before any other conversion and before page labels are worked out.
 
@@ -204,7 +241,7 @@ Available on `tag`, `write-pdfs`, and `all` (and as a checkbox in the GUI's Tag,
 
 ### 3. `<name>.metadata.json` — Grimmory sidecar
 
-Grimmory's own flat JSON sidecar format (confirmed against its real Java DTO schema and writer source, `github.com/grimmory-tools/grimmory`) — `title`, `authors`, `publisher`, `description`, `isbn10`/`isbn13` (bucketed by digit count, since Grimmory's JSON has no auto-detection the way the OPF does), `categories`/`tags`, and `series: {name, number}`.
+Written with `--metadata grimmory` (the default). Grimmory's own flat JSON sidecar format (confirmed against its real Java DTO schema and writer source, `github.com/grimmory-tools/grimmory`) — `title`, `authors`, `publisher`, `description`, `isbn10`/`isbn13` (bucketed by digit count, since Grimmory's JSON has no auto-detection the way the OPF does), `categories`/`tags`, and `series: {name, number}`.
 
 Both sidecar-format choices are best-effort: a field with no data is simply omitted, matching how both apps' own writers behave.
 

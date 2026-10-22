@@ -44,27 +44,23 @@ pdf-xmp-reader.ts). This isn't redundant with the .opf sidecar below:
 BookOrbit's scanner defaults to trying embedded PDF metadata *first*, and
 only falls back to the .opf sidecar if the embedded extraction returns
 *nothing at all* — not per-field, the whole source either wins or doesn't
-(see scanner.service.ts: extractFirstAvailableMetadataSource). Since a
-Calibre-tagged PDF always has *some* embedded metadata (title, authors,
-etc.), that first source always "wins," and the .opf sidecar's series
-data becomes unreachable in practice. Writing BookOrbit's own series
+(see scanner.service.ts: extractFirstAvailableMetadataSource). Its PDF
+reader returns something for *every* PDF it can open — with no metadata,
+a title made from the filename and the page count (pdf-parser.ts:
+parsePdfBuffer has no "empty" case) — so with the default order the .opf
+sidecar is never read for a PDF at all. Writing BookOrbit's own series
 fields directly into the embedded PDF is the only way around that.
 
-``bookorbit_mode`` (write_metadata's second knob, off by default) takes
-the opposite approach instead of fighting BookOrbit's precedence: rather
-than duplicating series into the embedded PDF, it wipes *all* PDF-level
-metadata — the full XMP packet plus the classic Info dictionary, not
-just the fields this tool would otherwise write — so BookOrbit's
-embedded-metadata source finds nothing at all and is forced to fall
-through to the .opf sidecar, which is written in this mode instead of
-skipped. A surgical removal of only this tool's own fields wouldn't be
-enough: a PDF can already carry a publisher-set /Title or /Author before
-this tool ever touches it, and that alone is sufficient for BookOrbit's
-"first source that returns anything" check to short-circuit past the
-sidecar. When this mode is off (the default), the .opf sidecar is *not*
-written at all — with normal embedded metadata present, BookOrbit would
-never open it anyway (see above), so writing it unconditionally, as
-earlier versions of this module did, was dead weight.
+``metadata="bookorbit"`` (see METADATA_MODES) is for a BookOrbit library
+whose metadata precedence (a per-library setting) puts "OPF file" ahead
+of "Embedded" -- the only way BookOrbit reads the .opf for a PDF. It
+writes the .opf and wipes *all* PDF-level metadata (the full XMP packet
+plus the classic Info dictionary), so the PDF carries nothing that could
+disagree with it. The wipe was originally meant to make BookOrbit fall
+through to the .opf under the default order, but it can't (see above);
+that assumption was only ever reasoned out from the source, never tested
+in a real scan. In every other mode the .opf sidecar is *not* written at
+all — under the default order BookOrbit never opens it.
 
 Re-tagging a file (a supported, expected workflow) explicitly clears all
 four series-related properties before writing whatever the *current*
@@ -78,10 +74,11 @@ only written when it parses as a number, matching the validation
 pikepdf's docinfo sync (on by default) also mirrors title/author into the
 classic PDF Info dictionary for readers that only look there.
 
-Sidecar files (see sidecar_writer.py) are written alongside every PDF this
-writes to, targeting the two actual reader apps in use — BookOrbit's own
-OPF format and Grimmory's own JSON format, both determined by reading each
-app's real open-source parser/writer, not guessed from a generic schema.
+Sidecar files (see sidecar_writer.py) target the two actual reader apps in
+use — BookOrbit's own OPF format and Grimmory's own JSON format, both
+determined by reading each app's real open-source parser/writer, not
+guessed from a generic schema. Which ones get written is the `metadata`
+mode's choice (METADATA_MODES below).
 """
 
 from __future__ import annotations
@@ -103,15 +100,24 @@ from page_labels import PageLabelPlan, detect_page_labels, set_page_labels
 from review import ReviewRow
 from rpg_background_layer import apply_background_layer
 from rpg_grayscale import convert_pdf_grayscale
-from rpg_hyperlink import (
-    DELTAGREEN_HYPERLINK_SCRIPT,
-    GURPS_HYPERLINK_SCRIPT,
-    MONGOOSE_HYPERLINK_SCRIPT,
-    run_hyperlink_script,
-)
+from rpg_hyperlink import rule_set_label, run_hyperlink
 from sidecar_writer import _split_isbn, write_bookorbit_opf, write_grimmory_sidecar
 
 logger = logging.getLogger("pdf_writer")
+
+# What write_metadata() writes, as `metadata=` (--metadata on the CLI, the
+# "Metadata tagging" dropdown in the GUI):
+#   off       -- no metadata at all; the other steps (image conversion,
+#                hyperlinking, page labels, ...) still run if asked for
+#   calibre   -- Calibre XMP embedded in the PDF, no sidecars
+#   grimmory  -- Calibre XMP plus the Grimmory .metadata.json sidecar
+#   bookorbit -- all PDF-level metadata wiped, BookOrbit .opf sidecar only
+# Each mode except off also removes the sidecar(s) it doesn't write, so a
+# stale one from an earlier run in another mode can't disagree with the
+# PDF. "grimmory" is the default because it's what this tool always wrote
+# before the choice existed.
+METADATA_MODES = ("off", "calibre", "grimmory", "bookorbit")
+DEFAULT_METADATA = "grimmory"
 
 CALIBRE_NS = "http://calibre-ebook.com/xmp-namespace"
 CALIBRE_PREFIX = "calibre"
@@ -275,43 +281,39 @@ def write_page_labels_only(path: Path, dry_run: bool = False) -> PageLabelResult
     return PageLabelResult("labeled", reason, plan)
 
 
-def _run_hyperlink_step(
-    path: Path, system_label: str, script_path: str | Path, log: Callable[[str], None] | None
-) -> None:
-    """Shared by both --hyperlink-gurps and --hyperlink-mongoose below --
-    same script interface (see rpg_hyperlink.py), same logging shape,
-    only the script path and a human-readable label differ."""
-    logger.info("Hyperlinking %s (%s)...", path.name, system_label)
+def _run_hyperlink_step(path: Path, rules: str, log: Callable[[str], None] | None) -> None:
+    """--hyperlink RULES: the engine (see rpg_hyperlink.py) with rule set
+    `rules`, logged under that rule set's label."""
+    system_label = rule_set_label(rules)
+    logger.info("Hyperlinking %s with the %s rules...", path.name, system_label)
     if log is not None:
-        log(f"Hyperlinking {path.name} ({system_label})...")
-    result = run_hyperlink_script(path, script_path, log=log)
+        log(f"Hyperlinking {path.name} with the {system_label} rules...")
+    result = run_hyperlink(path, rules, log=log)
     if not result.success:
-        logger.warning("Hyperlinking failed for %s (%s): %s", path.name, system_label, result.message)
+        logger.warning("Hyperlinking failed for %s: %s", path.name, result.message)
         if log is not None:
-            log(f"Hyperlinking failed for {path.name} ({system_label}): {result.message}")
+            log(f"Hyperlinking failed for {path.name}: {result.message}")
     else:
         logger.info(
-            "Added %d page-reference/%d chapter/%d TOC link(s) in %s (%s)",
-            result.added, result.chapter_added, result.toc_added, path.name, system_label,
+            "Added %d page-reference/%d chapter/%d TOC link(s) in %s",
+            result.added, result.chapter_added, result.toc_added, path.name,
         )
         if log is not None:
             log(
                 f"Added {result.added} page-reference, {result.chapter_added} chapter, "
-                f"{result.toc_added} TOC link(s) in {path.name} ({system_label})"
+                f"{result.toc_added} TOC link(s) in {path.name}"
             )
 
 
 def write_metadata(
     path: Path,
     row: ReviewRow,
-    bookorbit_mode: bool = False,
+    metadata: str = DEFAULT_METADATA,
     convert_images: bool = False,
     convert_grayscale: bool = False,
     background_layer: bool = False,
     remove_background: bool = False,
-    hyperlink_gurps: bool = False,
-    hyperlink_mongoose: bool = False,
-    hyperlink_deltagreen: bool = False,
+    hyperlink: str | None = None,
     page_labels: bool = False,
     back_cover_to_page_2: bool = False,
     back_cover_to_end: bool = False,
@@ -325,9 +327,8 @@ def write_metadata(
     TUI's or GUI's own visible log/notification surfaces, which have no
     connection to Python's logging module at all. Without an explicit
     "starting" message here, --convert-images/--convert-grayscale/
-    --background-layer/--remove-background/--hyperlink-gurps/
-    --hyperlink-mongoose on a PDF with many images/pages can run for a
-    while with nothing visible happening in either UI, which looks
+    --background-layer/--remove-background/--hyperlink on a PDF with
+    many images/pages can run for a while with nothing visible happening in either UI, which looks
     indistinguishable from a hang.
 
     `convert_images`/`convert_grayscale` are opposite operations on the
@@ -335,9 +336,19 @@ def write_metadata(
     operations on the same background -- both pairs' mutual exclusivity
     is enforced up at the CLI (argparse mutually-exclusive group) and GUI
     (checking one un-checks the other) layers, not here; this function
-    just runs whichever step(s) it's told to, in the order given below."""
+    just runs whichever step(s) it's told to, in the order given below.
+
+    `metadata` is one of METADATA_MODES. With "off" and no other step
+    asked for, the file isn't touched at all (not even backed up)."""
+    if metadata not in METADATA_MODES:
+        raise ValueError(f"unknown metadata mode {metadata!r} (expected one of {', '.join(METADATA_MODES)})")
     if not path.exists():
         return WriteResult(path.name, False, "file not found")
+    if metadata == "off" and not (
+        back_cover_to_page_2 or back_cover_to_end or background_layer or remove_background
+        or convert_images or convert_grayscale or hyperlink or page_labels
+    ):
+        return WriteResult(path.name, True, "nothing to write (metadata off)")
 
     try:
         backup(path)
@@ -425,23 +436,16 @@ def write_metadata(
     # --convert-images above -- verified directly (not just reasoned
     # through) that a link annotation added via PyMuPDF's saveIncr()
     # survives a subsequent pikepdf metadata rewrite, so this ordering is
-    # safe; see rpg_hyperlink.py's module docstring. Best-effort, same as
-    # --convert-images: a missing/misconfigured script or a book the
-    # detector can't make sense of must not fail a write that could
-    # otherwise succeed. Mutually independent -- a file could in
-    # principle have both flags set, though in practice a given book is
-    # only ever one publisher's, so at most one will actually find
-    # anything to link.
-    if hyperlink_gurps:
-        _run_hyperlink_step(path, "GURPS", GURPS_HYPERLINK_SCRIPT, log)
-    if hyperlink_mongoose:
-        _run_hyperlink_step(path, "Mongoose", MONGOOSE_HYPERLINK_SCRIPT, log)
-    if hyperlink_deltagreen:
-        _run_hyperlink_step(path, "Delta Green", DELTAGREEN_HYPERLINK_SCRIPT, log)
+    # safe. Best-effort, same as --convert-images: a book the detector
+    # can't make sense of (or an unknown rule set) must not fail a write
+    # that could otherwise succeed. One rule set per run: a book is only
+    # ever one publisher's.
+    if hyperlink:
+        _run_hyperlink_step(path, hyperlink, log)
 
     # Read after every step above (they rewrite the file) and written in
     # the same pikepdf save as the metadata below -- labels live in the
-    # document catalog, not the metadata, so --bookorbit-mode's wipe
+    # document catalog, not the metadata, so --metadata bookorbit's wipe
     # doesn't touch them. Best-effort, like every other optional step.
     label_plan: PageLabelPlan | None = None
     label_reason = ""
@@ -458,11 +462,18 @@ def write_metadata(
                     _log_both(log, logging.INFO, f"Page labels set for {path.name} ({label_reason})")
                 except ValueError as exc:
                     _log_both(log, logging.WARNING, f"Page labels left unchanged for {path.name}: {exc}")
-            if bookorbit_mode:
+            if metadata == "off":
+                # Only the page labels, if any. Like
+                # write_page_labels_only(): don't let pikepdf re-serialize
+                # an existing XMP packet this mode promises not to touch.
+                if label_plan is not None:
+                    pdf.save(path, fix_metadata_version=False)
+            elif metadata == "bookorbit":
                 # See module docstring: wipe everything, not just this
-                # tool's own fields, so BookOrbit's embedded-metadata
-                # source is guaranteed to return nothing and fall
-                # through to the .opf sidecar written below.
+                # tool's own fields, so the PDF has nothing that could
+                # disagree with the .opf sidecar written below (which
+                # BookOrbit only reads with "OPF file" ahead of
+                # "Embedded" in the library's metadata precedence).
                 with pdf.open_metadata(set_pikepdf_as_editor=False) as meta:
                     meta.clear()
                 for key in list(pdf.docinfo.keys()):
@@ -473,32 +484,31 @@ def write_metadata(
     except (pikepdf.PdfError, OSError) as exc:
         return WriteResult(path.name, False, f"write failed: {exc}")
 
+    if metadata == "off":
+        return WriteResult(path.name, True, "ok (metadata off)")
+
     # Sidecar generation is always best-effort: the embedded PDF write above
     # already succeeded, so a sidecar failure (of any kind, not just OSError
-    # — e.g. an encoding issue) must not blow up the whole write.
-    try:
-        write_grimmory_sidecar(path, row)
-    except Exception:
-        logger.exception("Failed to write Grimmory .metadata.json sidecar for %s", path.name)
-
-    if bookorbit_mode:
-        # Off by default -- see module docstring for why writing this
-        # unconditionally (as earlier versions did) was dead weight.
-        try:
-            write_bookorbit_opf(path, row)
-        except Exception:
-            logger.exception("Failed to write BookOrbit .opf sidecar for %s", path.name)
-    else:
-        # A prior write may have been --bookorbit-mode and left an .opf
-        # behind with that match's data -- must not silently survive a
-        # later non-bookorbit-mode re-tag to a different match, same
-        # principle as the series-clearing logic above.
-        opf_path = path.with_suffix(".opf")
-        if opf_path.exists():
+    # — e.g. an encoding issue) must not blow up the whole write. A sidecar
+    # this mode doesn't write is removed instead: a prior write in another
+    # mode may have left one behind with that match's data, and it must not
+    # silently survive a re-tag, same principle as the series-clearing
+    # logic in _write_embedded_metadata().
+    sidecars = (
+        ("grimmory", path.parent / f"{path.stem}.metadata.json", write_grimmory_sidecar, "Grimmory .metadata.json"),
+        ("bookorbit", path.with_suffix(".opf"), write_bookorbit_opf, "BookOrbit .opf"),
+    )
+    for mode, sidecar_path, write_sidecar, what in sidecars:
+        if metadata == mode:
             try:
-                opf_path.unlink()
+                write_sidecar(path, row)
+            except Exception:
+                logger.exception("Failed to write %s sidecar for %s", what, path.name)
+        elif sidecar_path.exists():
+            try:
+                sidecar_path.unlink()
             except OSError:
-                logger.exception("Failed to remove stale BookOrbit .opf sidecar for %s", path.name)
+                logger.exception("Failed to remove stale %s sidecar for %s", what, path.name)
 
     return WriteResult(path.name, True, "ok")
 
@@ -608,14 +618,12 @@ def _write_embedded_metadata(pdf: pikepdf.Pdf, path: Path, row: ReviewRow) -> No
 def write_approved(
     rows: list[ReviewRow],
     root: str | Path,
-    bookorbit_mode: bool = False,
+    metadata: str = DEFAULT_METADATA,
     convert_images: bool = False,
     convert_grayscale: bool = False,
     background_layer: bool = False,
     remove_background: bool = False,
-    hyperlink_gurps: bool = False,
-    hyperlink_mongoose: bool = False,
-    hyperlink_deltagreen: bool = False,
+    hyperlink: str | None = None,
     page_labels: bool = False,
     back_cover_to_page_2: bool = False,
     back_cover_to_end: bool = False,
@@ -655,11 +663,10 @@ def write_approved(
         try:
             results.append(
                 write_metadata(
-                    match, row, bookorbit_mode=bookorbit_mode, convert_images=convert_images,
+                    match, row, metadata=metadata, convert_images=convert_images,
                     convert_grayscale=convert_grayscale,
                     background_layer=background_layer, remove_background=remove_background,
-                    hyperlink_gurps=hyperlink_gurps, hyperlink_mongoose=hyperlink_mongoose,
-                    hyperlink_deltagreen=hyperlink_deltagreen, page_labels=page_labels, back_cover_to_page_2=back_cover_to_page_2,
+                    hyperlink=hyperlink, page_labels=page_labels, back_cover_to_page_2=back_cover_to_page_2,
                     back_cover_to_end=back_cover_to_end, log=log,
                 )
             )

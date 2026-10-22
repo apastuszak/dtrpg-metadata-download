@@ -12,3 +12,6 @@ data/debug/
 data/library_cache.json
 data/catalog_cache.json
 data/preferences.yaml
+
+# hyperlink_survey.py drafts and reports (default output folder)
+hyperlink-survey-*/

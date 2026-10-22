@@ -91,7 +91,7 @@ def _drive_controller(pdfs, client, responses: dict, **controller_kwargs) -> Tag
     request_queue: queue.Queue = queue.Queue()
     kwargs = {
         "manual_overrides": {}, "known_urls": {}, "thresholds": {},
-        "bookorbit_mode": False, "rename": False, "root_mode": False,
+        "metadata": "grimmory", "rename": False, "root_mode": False,
     }
     kwargs.update(controller_kwargs)
     controller = TagFlowController(
@@ -688,7 +688,7 @@ def test_tag_worker_signal_round_trip(app: QApplication) -> None:
         with patch("gui_tag_flow.find_candidates", return_value=[(meta, 95.0)]):
             worker = TagWorker(
                 pdfs=[pdf], client=client, manual_overrides={}, known_urls={}, thresholds={},
-                bookorbit_mode=False, rename=False, root_mode=False, stop_event=threading.Event(),
+                metadata="grimmory", rename=False, root_mode=False, stop_event=threading.Event(),
             )
             thread = __import__("PyQt6.QtCore", fromlist=["QThread"]).QThread()
             worker.moveToThread(thread)
@@ -742,7 +742,7 @@ def test_tag_worker_run_catches_exception(app: QApplication) -> None:
 
         worker = TagWorker(
             pdfs=[pdf], client=client, manual_overrides={}, known_urls={}, thresholds={},
-            bookorbit_mode=False, rename=False, root_mode=False, stop_event=threading.Event(),
+            metadata="grimmory", rename=False, root_mode=False, stop_event=threading.Event(),
         )
         thread = QThread()
         worker.moveToThread(thread)
@@ -766,43 +766,132 @@ def test_tag_worker_run_catches_exception(app: QApplication) -> None:
     print("PASS: tag_worker_run_catches_exception")
 
 
-def test_page_labels_tab_dry_run_then_write(app: QApplication) -> None:
-    """Dry run must show the plan and leave the file (and its absence of a
-    .bak) untouched; a real run writes the labels and makes the backup."""
-    from gui_app import PageLabelsTab
+def test_controller_metadata_off_dry_run_then_write():
+    """With metadata tagging off, Tag replaces the old Rename and Page
+    Labels tabs: no matching (no client, no dialogs), a dry run that shows
+    the plan and leaves the file untouched (no .bak either), then a real run
+    that sets the labels and renames from the metadata already on disk."""
+    from sidecar_writer import write_grimmory_sidecar
 
-    def run_and_wait(tab: PageLabelsTab) -> None:
-        QTest.mouseClick(tab.run_button, Qt.MouseButton.LeftButton)
-        deadline = __import__("time").time() + 20
-        while not tab.run_button.isEnabled() and __import__("time").time() < deadline:
-            app.processEvents()
-        assert tab.run_button.isEnabled(), "page-labels run never finished"
+    def no_dialogs(payload):
+        raise AssertionError("metadata off must not ask anything")
 
+    responses = {kind: no_dialogs for kind in ("batch_series", "candidate", "confirm", "series", "manual_entry")}
     with tempfile.TemporaryDirectory() as tmp:
         pdf = Path(tmp) / "Book.pdf"
         expected = _numbered_book(pdf)
+        write_grimmory_sidecar(pdf, ReviewRow(filename="Book.pdf", matched_title="Title", series="Series"))
         original = pdf.read_bytes()
-        tab = PageLabelsTab({})
-        tab.file_radio.setChecked(True)
-        tab.path_edit.setText(str(pdf))
+        options = dict(metadata="off", page_labels=True, rename=True, root_mode=True)
 
-        tab.dry_run_check.setChecked(True)
-        run_and_wait(tab)
-        log = tab.log.toPlainText()
+        controller = _drive_controller([pdf], None, responses, dry_run=True, **options)
+        log = "\n".join(controller.history)
         assert "Would label: Book.pdf" in log and "PDF pages 3-7: 1 to 5" in log, log
+        assert "Would rename: Book.pdf -> Series - Title.pdf" in log, log
         assert pdf.read_bytes() == original, "dry run modified the PDF"
         assert not pdf.with_suffix(".pdf.bak").exists(), "dry run made a backup"
 
-        tab.dry_run_check.setChecked(False)
-        run_and_wait(tab)
-        assert _labels(pdf) == expected, _labels(pdf)
-        assert pdf.with_suffix(".pdf.bak").read_bytes() == original
-    print("PASS: page_labels_tab_dry_run_then_write")
+        controller = _drive_controller([pdf], None, responses, **options)
+        renamed = pdf.with_name("Series - Title.pdf")
+        assert renamed.exists(), (list(Path(tmp).iterdir()), controller.history)
+        assert _labels(renamed) == expected, _labels(renamed)
+        assert renamed.with_suffix(".pdf.bak").read_bytes() == original
+        assert renamed.with_name("Series - Title.metadata.json").exists(), "metadata off must keep the sidecar"
+    print("PASS: controller_metadata_off_dry_run_then_write")
+
+
+def test_hyperlink_picker_lists_rule_sets_and_passes_choice(app: QApplication) -> None:
+    """Both tabs' --hyperlink dropdown must offer "Off" plus every rule set
+    in hyperlink_rules/, and Write PDFs must pass the chosen rule set's
+    *name* (not its label) through to write_approved()."""
+    from gui_app import WritePdfsTab
+    from gui_tag_flow import TagTab
+    from rpg_hyperlink import rule_sets
+
+    expected = [None] + [r.name for r in rule_sets()]
+    assert {"gurps", "mongoose", "deltagreen"} <= set(expected), expected
+
+    with tempfile.TemporaryDirectory() as tmp:
+        review_csv = Path(tmp) / "review.csv"
+        save_review(review_csv, [ReviewRow(
+            filename="Book.pdf", status=Status.APPROVED.value, matched_title="Book",
+        )])
+        tag_tab = TagTab({})
+        write_tab = WritePdfsTab({"review_csv": str(review_csv)})
+        for combo in (tag_tab.hyperlink_combo, write_tab.hyperlink_combo):
+            assert [combo.itemData(i) for i in range(combo.count())] == expected
+            assert combo.currentData() is None, "hyperlinking must default to off"
+
+        combo = write_tab.hyperlink_combo
+        combo.setCurrentIndex(combo.findData("mongoose"))
+        write_tab.root_edit.setText(tmp)
+        with patch("gui_app.write_approved", return_value=[]) as write_approved:
+            QTest.mouseClick(write_tab.run_button, Qt.MouseButton.LeftButton)
+            deadline = __import__("time").time() + 20
+            while not write_tab.run_button.isEnabled() and __import__("time").time() < deadline:
+                app.processEvents()
+        assert write_approved.called, "write_approved() was never called"
+        assert write_approved.call_args.kwargs["hyperlink"] == "mongoose", write_approved.call_args
+    print("PASS: hyperlink_picker_lists_rule_sets_and_passes_choice")
+
+
+def test_convert_images_picker_passes_choice(app: QApplication) -> None:
+    """The Tag, Write PDFs and All tabs' "Convert images" dropdown must
+    offer Off/RGB/Grayscale, default to off, and Write PDFs must turn
+    "Grayscale" into convert_grayscale=True (and not convert_images).
+    Their "Metadata tagging" dropdown must offer the four modes, start on
+    the default, and pass the chosen mode's name through. The Tag and
+    Write PDFs tabs' page-background dropdown must offer Off/Layer/Remove,
+    default to off, and turn "Remove" into remove_background=True. All
+    three tabs' back-cover dropdown must offer Off/Page 2/End, default to
+    off, and turn "End" into back_cover_to_end=True."""
+    from gui_app import AllTab, WritePdfsTab
+    from gui_tag_flow import TagTab
+
+    with tempfile.TemporaryDirectory() as tmp:
+        review_csv = Path(tmp) / "review.csv"
+        save_review(review_csv, [ReviewRow(
+            filename="Book.pdf", status=Status.APPROVED.value, matched_title="Book",
+        )])
+        write_tab = WritePdfsTab({"review_csv": str(review_csv)})
+        for tab in (TagTab({}), write_tab, AllTab({})):
+            combo = tab.convert_combo
+            assert [combo.itemData(i) for i in range(combo.count())] == [None, "rgb", "grayscale"]
+            assert combo.currentData() is None, "image conversion must default to off"
+            combo = tab.metadata_combo
+            assert [combo.itemData(i) for i in range(combo.count())] == ["off", "calibre", "grimmory", "bookorbit"]
+            assert combo.currentData() == "grimmory", "metadata tagging must start on the default"
+            combo = tab.back_cover_combo
+            assert [combo.itemData(i) for i in range(combo.count())] == [None, "page-2", "end"]
+            assert combo.currentData() is None, "back-cover moves must default to off"
+
+        write_tab.convert_combo.setCurrentIndex(write_tab.convert_combo.findData("grayscale"))
+        write_tab.metadata_combo.setCurrentIndex(write_tab.metadata_combo.findData("calibre"))
+        for tab in (TagTab({}), write_tab):
+            combo = tab.background_combo
+            assert [combo.itemData(i) for i in range(combo.count())] == [None, "layer", "remove"]
+            assert combo.currentData() is None, "background handling must default to off"
+        write_tab.background_combo.setCurrentIndex(write_tab.background_combo.findData("remove"))
+        write_tab.back_cover_combo.setCurrentIndex(write_tab.back_cover_combo.findData("end"))
+        write_tab.root_edit.setText(tmp)
+        with patch("gui_app.write_approved", return_value=[]) as write_approved:
+            QTest.mouseClick(write_tab.run_button, Qt.MouseButton.LeftButton)
+            deadline = __import__("time").time() + 20
+            while not write_tab.run_button.isEnabled() and __import__("time").time() < deadline:
+                app.processEvents()
+        assert write_approved.called, "write_approved() was never called"
+        kwargs = write_approved.call_args.kwargs
+        assert kwargs["convert_grayscale"] is True and kwargs["convert_images"] is False, kwargs
+        assert kwargs["metadata"] == "calibre", kwargs
+        assert kwargs["remove_background"] is True and kwargs["background_layer"] is False, kwargs
+        assert kwargs["back_cover_to_end"] is True and kwargs["back_cover_to_page_2"] is False, kwargs
+    print("PASS: convert_images_picker_passes_choice")
 
 
 NO_APP_TESTS = [
     test_controller_candidate_pick_write,
     test_controller_page_labels_written,
+    test_controller_metadata_off_dry_run_then_write,
     test_controller_back_cover_to_page_2,
     test_controller_back_cover_without_barcode_asks,
     test_controller_watermark_detected_removed,
@@ -830,7 +919,8 @@ NO_ARG_APP_TESTS = [
 APP_ARG_TESTS = [
     test_tag_worker_signal_round_trip,
     test_tag_worker_run_catches_exception,
-    test_page_labels_tab_dry_run_then_write,
+    test_hyperlink_picker_lists_rule_sets_and_passes_choice,
+    test_convert_images_picker_passes_choice,
 ]
 
 

@@ -80,7 +80,7 @@ def apply_background_layer(
         # degrade instead of crashing.
         return BackgroundLayerResult(success=False, message=f"expected vendored script missing: {BACKGROUND_LAYER_SCRIPT}")
 
-    # Hidden prefix -- see rpg_hyperlink.py's run_hyperlink_script() for
+    # Hidden prefix -- see rpg_hyperlink.py's run_hyperlink() for
     # why (a force-killed run must not leave a "book" scan_pdfs() would
     # later try to match).
     tmp_fd, tmp_out_str = tempfile.mkstemp(suffix=".pdf", prefix=".dtrpg-tmp-", dir=str(path.parent))
