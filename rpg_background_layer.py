@@ -35,7 +35,7 @@ BACKGROUND_LAYER_SCRIPT = Path(__file__).parent / "castles_and_crusades_backgrou
 # Unlike every other step in this family (importlib-loaded functions
 # running in this same process), this one is a real subprocess -- with no
 # timeout, a genuinely hung child process (rather than one that just
-# fails/exits) would block this call, and therefore a `tag`/`write-pdfs`
+# fails/exits) would block this call, and therefore a `tag`
 # run, forever with no way out short of killing the whole thing. 5 minutes
 # is generous for a single PDF, even an image-heavy one.
 SUBPROCESS_TIMEOUT_SECONDS = 300

@@ -93,9 +93,7 @@ import pikepdf
 from lxml import etree
 from lxml.etree import QName
 
-from back_cover import move_back_cover
 from image_converter import convert_images_to_rgb
-from matcher import scan_pdfs
 from page_labels import PageLabelPlan, detect_page_labels, set_page_labels
 from review import ReviewRow
 from rpg_background_layer import apply_background_layer
@@ -315,8 +313,6 @@ def write_metadata(
     remove_background: bool = False,
     hyperlink: str | None = None,
     page_labels: bool = False,
-    back_cover_to_page_2: bool = False,
-    back_cover_to_end: bool = False,
     log: Callable[[str], None] | None = None,
 ) -> WriteResult:
     """`log`, if given, is called with human-readable progress lines for
@@ -345,8 +341,7 @@ def write_metadata(
     if not path.exists():
         return WriteResult(path.name, False, "file not found")
     if metadata == "off" and not (
-        back_cover_to_page_2 or back_cover_to_end or background_layer or remove_background
-        or convert_images or convert_grayscale or hyperlink or page_labels
+        background_layer or remove_background or convert_images or convert_grayscale or hyperlink or page_labels
     ):
         return WriteResult(path.name, True, "nothing to write (metadata off)")
 
@@ -354,18 +349,6 @@ def write_metadata(
         backup(path)
     except OSError as exc:
         return WriteResult(path.name, False, f"backup failed: {exc}")
-
-    if back_cover_to_page_2 or back_cover_to_end:
-        # First, so every later step (and page-label detection) sees the
-        # final page order. Only moves on positive evidence -- see
-        # back_cover.py -- and a book with no separate back cover is just
-        # logged and left alone.
-        move = move_back_cover(path, "page-2" if back_cover_to_page_2 else "end")
-        if move.moved:
-            _log_both(log, logging.INFO, f"{path.name}: {move.message}")
-        else:
-            hint = " -- tag can ask about a back cover without a barcode" if "no barcode" in move.message else ""
-            _log_both(log, logging.INFO, f"Back cover not moved for {path.name}: {move.message}{hint}")
 
     if background_layer or remove_background:
         # Runs first among the optional pre-pikepdf steps -- if the
@@ -613,80 +596,3 @@ def _write_embedded_metadata(pdf: pikepdf.Pdf, path: Path, row: ReviewRow) -> No
                     del meta[key]
 
     pdf.save(path)
-
-
-def write_approved(
-    rows: list[ReviewRow],
-    root: str | Path,
-    metadata: str = DEFAULT_METADATA,
-    convert_images: bool = False,
-    convert_grayscale: bool = False,
-    background_layer: bool = False,
-    remove_background: bool = False,
-    hyperlink: str | None = None,
-    page_labels: bool = False,
-    back_cover_to_page_2: bool = False,
-    back_cover_to_end: bool = False,
-    log: Callable[[str], None] | None = None,
-) -> list[WriteResult]:
-    root = Path(root)
-    # Built once as a plain name lookup rather than calling
-    # root.rglob(row.filename) per row -- that treated the filename as a
-    # glob *pattern*, not a literal name: a real filename containing
-    # glob-special characters (verified: "Sword Worlds [OCR].pdf" matched
-    # nothing at all, since "[OCR]" is a character class to rglob) was
-    # silently reported as "file not found under root" even though the
-    # file was right there. `*`/`?` in a filename could also silently
-    # match the *wrong* file instead of erroring. Duplicate filenames
-    # under different subfolders are warned about once here (the same
-    # "first match wins" behavior rglob() already had, just now
-    # unambiguous about when it's happening) rather than silently picking
-    # whichever one os.walk() happens to see first.
-    pdfs_by_name: dict[str, Path] = {}
-    duplicate_names: set[str] = set()
-    for p in scan_pdfs(root):
-        if p.name in pdfs_by_name:
-            duplicate_names.add(p.name)
-        else:
-            pdfs_by_name[p.name] = p
-    for name in sorted(duplicate_names):
-        logger.warning("Multiple files named %r found under %s; using %s", name, root, pdfs_by_name[name])
-
-    results: list[WriteResult] = []
-    for row in rows:
-        if not row.is_approved():
-            continue
-        match = pdfs_by_name.get(row.filename)
-        if match is None:
-            results.append(WriteResult(row.filename, False, "file not found under root"))
-            continue
-        try:
-            results.append(
-                write_metadata(
-                    match, row, metadata=metadata, convert_images=convert_images,
-                    convert_grayscale=convert_grayscale,
-                    background_layer=background_layer, remove_background=remove_background,
-                    hyperlink=hyperlink, page_labels=page_labels, back_cover_to_page_2=back_cover_to_page_2,
-                    back_cover_to_end=back_cover_to_end, log=log,
-                )
-            )
-        except Exception as exc:
-            # write_metadata() already catches (pikepdf.PdfError, OSError)
-            # around its own pikepdf.open() block, and every optional
-            # pre-write step (image conversion, hyperlinking, grayscale,
-            # background-layer) is documented never to raise at all -- but
-            # anything else escaping from in between (a malformed
-            # ReviewRow field hitting an edge case in a library this
-            # doesn't specifically guard, etc.) used to propagate straight
-            # out of this function, aborting every remaining approved file
-            # in the batch over one bad one. One bad file must not be able
-            # to do that to the rest of a `write-pdfs`/`all` run.
-            logger.exception("Unexpected error writing %s", match.name)
-            results.append(WriteResult(row.filename, False, f"unexpected error: {exc}"))
-
-    succeeded = sum(1 for r in results if r.success)
-    logger.info("Wrote metadata to %d/%d approved files", succeeded, len(results))
-    for r in results:
-        if not r.success:
-            logger.warning("Failed: %s (%s)", r.filename, r.message)
-    return results

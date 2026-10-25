@@ -15,27 +15,12 @@
 # ///
 """CLI entry point for the RPG PDF metadata pipeline.
 
-    scan --root PATH [--refresh-library] [--apply-review]
-        Build/update data/review.csv by matching PDFs under --root
-        against manual_overrides.yaml, then <root>/dtrpg_urls.csv, then
-        DriveThruRPG's library, then its public catalog.
-
-    review-status
-        Print match counts by status from data/review.csv.
-
-    write-pdfs --root PATH [--metadata MODE]
-        Write metadata for every "approved"/"auto-accepted" row in
-        data/review.csv into the corresponding PDF (in place, with a
-        one-time .bak backup per file).
-
-    all --root PATH [--refresh-library] [--apply-review] [--metadata MODE]
-        Run scan, then write-pdfs. Still gated by review.csv status —
-        rows left at needs-review/no-match are not written.
-
-    tag PDF_PATH | tag --root PATH [--metadata MODE] [--rename]
-        Match PDF(s) by filename and write the one you pick straight
-        into it, via a full-screen terminal UI (see tag_tui.py) — no
-        review.csv. A single file and --root both use this UI; --root
+    tag PDF_PATH | tag --root PATH [--metadata MODE] [--rename] [--refresh-library]
+        Match PDF(s) by filename -- against manual_overrides.yaml, then
+        <root>/dtrpg_urls.csv, then DriveThruRPG's library, then its
+        public catalog -- and write the one you pick straight into it
+        (in place, with a one-time .bak backup per file), via a
+        full-screen terminal UI (see tag_tui.py). A single file and --root both use this UI; --root
         works through the directory one PDF at a time and asks once up
         front whether every book in the batch shares one series (if so,
         applied to all of them with no further per-book prompt).
@@ -66,7 +51,11 @@
         from the metadata already in it -- e.g. `tag --root DIR
         --metadata off --page-labels --rename`.
 
-    --metadata MODE (on write-pdfs/all/tag): what metadata to write.
+        --refresh-library re-downloads your DriveThruRPG library listing
+        first. It's cached in data/ and otherwise never refreshed, so use
+        this after buying new books.
+
+    --metadata MODE (on tag): what metadata to write.
         off       -- none; the other options (image conversion,
                      hyperlinking, page labels, ...) still run.
         calibre   -- Calibre metadata embedded in the PDF, no sidecars.
@@ -83,23 +72,22 @@
         run left one. --bookorbit-mode still works and means
         --metadata bookorbit.
 
-    --convert-images (on write-pdfs/all/tag): converts every CMYK/
+    --convert-images (on tag): converts every CMYK/
         grayscale/JPEG2000 image in the PDF to RGB JPEG before metadata
         is written (see image_converter.py). Off by default. Runs before
         the embedded-metadata write, never after, so PyMuPDF's save
         (a different library from pikepdf) can't disturb the Calibre XMP
         pikepdf writes.
 
-    --convert-grayscale (on write-pdfs/all/tag): converts the whole PDF
+    --convert-grayscale (on tag): converts the whole PDF
         to grayscale before metadata is written, via a vendored script
         (see rpg_grayscale.py/convert_pdf_to_grayscale.py). Requires the
         real Ghostscript binary ('gs') on PATH -- a system package, not
         something PEP 723/uv/pip can install. Off by default, and
         mutually exclusive with --convert-images (the opposite operation
-        on the same images) -- the GUI enforces this by unchecking one
-        when the other is checked.
+        on the same images) -- the GUI offers the two as one dropdown.
 
-    --hyperlink RULES (on write-pdfs/all/tag): auto-hyperlinks in-text
+    --hyperlink RULES (on tag): auto-hyperlinks in-text
         page/chapter references, the Table of Contents and the Index, via
         hyperlink_engine.py (see rpg_hyperlink.py). RULES is a publisher
         rule set -- a module name in hyperlink_rules/ (gurps, mongoose,
@@ -110,7 +98,7 @@
         --convert-images. --hyperlink-gurps / --hyperlink-mongoose /
         --hyperlink-deltagreen still work, as hidden aliases.
 
-    --background-layer / --remove-background (on write-pdfs/all/tag):
+    --background-layer / --remove-background (on tag):
         tags each page's full-page decorative background as a toggleable
         Optional Content Group layer, or deletes it outright, via a
         vendored script (see rpg_background_layer.py/
@@ -121,7 +109,7 @@
         --convert-images/--convert-grayscale/hyperlinking, all of which
         still run before the final embedded-metadata write either way.
 
-    --page-labels (on write-pdfs/all/tag): sets the page labels a PDF
+    --page-labels (on tag): sets the page labels a PDF
         viewer shows (see page_labels.py) -- "Cover" for the front and back
         cover, lowercase roman numerals before printed page 1, and the
         printed page number everywhere else, read automatically from page
@@ -129,13 +117,14 @@
         (scans, boxed sets, merged volumes) keep their existing labels.
         Written in the same final save as the metadata.
 
-    --back-cover-to-page-2 / --back-cover-to-end (on write-pdfs/all/tag):
+    --back-cover-to-page-2 / --back-cover-to-end (on tag):
         moves the back cover right after the front cover, or to the end
         of the book (see back_cover.py). Mutually exclusive. The back
         cover is found by its retail barcode on PDF page 2 or the last
         page; a book with a wraparound cover (Shadowrun) or no back cover
-        at all is left alone, with the reason logged. Runs first among
-        the pre-write steps; bookmarks, links and existing page labels
+        at all is left alone, with the reason logged; with no barcode,
+        tag shows you the likely page and asks. Runs first among the
+        pre-write steps; bookmarks, links and existing page labels
         follow their pages.
 
     page-labels PDF_PATH | page-labels --root PATH [--dry-run]
@@ -147,8 +136,8 @@
         Rename a single already-tagged PDF, or every one under --root
         (plus its .bak/.opf/.metadata.json/_link_report.csv companions), to
         "<series> - <title>.pdf" (or just "<title>.pdf" with no series),
-        read from each file's .metadata.json sidecar. Untagged files (no
-        sidecar/no title) and files already named correctly are skipped;
+        read from each file's .metadata.json or .opf sidecar, or else its
+        embedded metadata. Untagged files (no title anywhere) and files already named correctly are skipped;
         a computed name that collides with an existing file is skipped
         with a warning rather than overwritten. --dry-run previews
         without renaming anything.
@@ -169,7 +158,7 @@
         DTRPG_API_KEY environment variable always takes priority over
         what's saved here.
 
-Config defaults (root, thresholds, cache locations) come from
+Config defaults (root, cache locations) come from
 config.yaml; CLI flags override them. The DriveThruRPG API key comes
 from DTRPG_API_KEY in the environment, or from `preferences` (above) if
 that's not set.
@@ -181,32 +170,29 @@ import argparse
 import logging
 import os
 import sys
-from collections import Counter
 from pathlib import Path
 
 import yaml
 from textual.logging import TextualHandler
 
 from dtrpg_client import DtrpgClient
-from matcher import load_known_urls, load_manual_overrides, run_scan_batch, scan_pdfs
-from pdf_writer import DEFAULT_METADATA, METADATA_MODES, write_approved, write_page_labels_only
+from matcher import load_known_urls, load_manual_overrides, scan_pdfs
+from pdf_writer import DEFAULT_METADATA, METADATA_MODES, write_page_labels_only
 from preferences import DEFAULT_PREFERENCES_PATH, load_preferences, resolve_api_key
 from renamer import apply_rename, plan_rename
-from review import load_review, save_review
 from tag_tui import TagApp
 
 logger = logging.getLogger("dtrpg-metadata-download")
 
 DEFAULT_CONFIG_PATH = Path(__file__).parent / "config.yaml"
 
-# config.yaml's own relative paths (its shipped "data/review.csv" etc.)
+# config.yaml's own relative paths (its shipped "data/manual_overrides.yaml" etc.)
 # are documented/intended relative to config.yaml's own location, not to
 # whatever directory the tool happens to be invoked from -- deliberately
 # excludes "root", which behaves like a CLI argument (relative to the
 # caller's own cwd), not an internal data file.
 _CONFIG_RELATIVE_PATH_KEYS = (
     "data_dir",
-    "review_csv",
     "manual_overrides",
     "preferences",
 )
@@ -245,83 +231,6 @@ def build_client(config: dict) -> DtrpgClient:
         cache_dir=config.get("data_dir", "data"),
         catalog_rate_limit_seconds=config.get("dtrpg", {}).get("catalog_rate_limit_seconds", 1.0),
     )
-
-
-def cmd_scan(args: argparse.Namespace, config: dict) -> None:
-    root = args.root or config.get("root")
-    if not root:
-        sys.exit("No --root given and no 'root' set in config.yaml")
-
-    review_csv = Path(args.review_csv or config.get("review_csv", "data/review.csv"))
-    manual_overrides_path = Path(config.get("manual_overrides", "data/manual_overrides.yaml"))
-    thresholds = config.get("matching", {})
-
-    client = build_client(config)
-    if args.refresh_library:
-        client.pull_library(refresh=True)
-
-    manual_overrides = load_manual_overrides(manual_overrides_path)
-    known_urls = load_known_urls(root)
-    existing_rows = load_review(review_csv)
-
-    if args.apply_review:
-        logger.info("--apply-review: matching only new file(s) not already in review.csv")
-
-    merged = run_scan_batch(
-        root, client, manual_overrides, known_urls, existing_rows, thresholds,
-        apply_review=args.apply_review,
-        progress=lambda i, total, name: logger.info("[%d/%d] Matching %s", i, total, name),
-    )
-    save_review(review_csv, merged)
-
-    counts = Counter(row.status for row in merged)
-    print(f"Wrote {review_csv} ({len(merged)} rows)")
-    for status, count in sorted(counts.items()):
-        print(f"  {status}: {count}")
-
-
-def cmd_review_status(args: argparse.Namespace, config: dict) -> None:
-    review_csv = Path(args.review_csv or config.get("review_csv", "data/review.csv"))
-    rows = load_review(review_csv)
-    if not rows:
-        print(f"No rows in {review_csv} (run 'scan' first)")
-        return
-    counts = Counter(row.status for row in rows)
-    print(f"{review_csv}: {len(rows)} rows")
-    for status, count in sorted(counts.items()):
-        print(f"  {status}: {count}")
-
-
-def cmd_write_pdfs(args: argparse.Namespace, config: dict) -> None:
-    root = args.root or config.get("root")
-    if not root:
-        sys.exit("No --root given and no 'root' set in config.yaml")
-
-    review_csv = Path(args.review_csv or config.get("review_csv", "data/review.csv"))
-    rows = load_review(review_csv)
-    approved = [r for r in rows if r.is_approved()]
-    if not approved:
-        print("No approved/auto-accepted rows to write.")
-        return
-
-    results = write_approved(
-        rows, root, metadata=args.metadata, convert_images=args.convert_images,
-        convert_grayscale=args.convert_grayscale,
-        background_layer=args.background_layer, remove_background=args.remove_background,
-        hyperlink=args.hyperlink,
-        page_labels=args.page_labels,
-        back_cover_to_page_2=args.back_cover_to_page_2, back_cover_to_end=args.back_cover_to_end,
-    )
-    succeeded = sum(1 for r in results if r.success)
-    print(f"Wrote metadata to {succeeded}/{len(results)} approved files")
-    for r in results:
-        if not r.success:
-            print(f"  FAILED: {r.filename}: {r.message}")
-
-
-def cmd_all(args: argparse.Namespace, config: dict) -> None:
-    cmd_scan(args, config)
-    cmd_write_pdfs(args, config)
 
 
 def _rename_one(pdf_path: Path, dry_run: bool) -> str:
@@ -420,7 +329,7 @@ def cmd_tag(args: argparse.Namespace, config: dict) -> None:
     """Thin dispatch into tag_tui.TagApp -- the actual interactive flow
     (candidate list, manual entry, confirm-then-write, --rename) lives
     there now. Everything below (guard clauses, loading overrides/known
-    URLs/thresholds, resolving the PDF list, building the DtrpgClient) is
+    URLs, resolving the PDF list, building the DtrpgClient) is
     unchanged from before the TUI rewrite -- a missing DTRPG_API_KEY
     still sys.exit()s here, on a normal terminal, before the TUI ever
     starts. With --metadata off nothing is matched, so no client (or API
@@ -428,7 +337,6 @@ def cmd_tag(args: argparse.Namespace, config: dict) -> None:
     needs_client = args.metadata != "off"
     manual_overrides_path = Path(config.get("manual_overrides", "data/manual_overrides.yaml"))
     manual_overrides = load_manual_overrides(manual_overrides_path)
-    thresholds = config.get("matching", {})
 
     if args.root:
         root = Path(args.root)
@@ -453,7 +361,6 @@ def cmd_tag(args: argparse.Namespace, config: dict) -> None:
         client=client,
         manual_overrides=manual_overrides,
         known_urls=known_urls,
-        thresholds=thresholds,
         metadata=args.metadata,
         convert_images=args.convert_images,
         convert_grayscale=args.convert_grayscale,
@@ -463,6 +370,7 @@ def cmd_tag(args: argparse.Namespace, config: dict) -> None:
         page_labels=args.page_labels,
         back_cover_to_page_2=args.back_cover_to_page_2,
         back_cover_to_end=args.back_cover_to_end,
+        refresh_library=args.refresh_library,
         rename=args.rename,
         root_mode=bool(args.root),
     ).run()
@@ -510,17 +418,6 @@ def main() -> None:
     parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH), help="Path to config.yaml")
     parser.add_argument("-v", "--verbose", action="store_true")
     subparsers = parser.add_subparsers(dest="command", required=True)
-
-    scan_parser = subparsers.add_parser("scan", help="Match PDFs and build/update review.csv")
-    scan_parser.add_argument("--root", help="Root folder of RPG PDFs (overrides config.yaml)")
-    scan_parser.add_argument("--review-csv", help="Path to review.csv (overrides config.yaml)")
-    scan_parser.add_argument("--refresh-library", action="store_true", help="Re-pull the DriveThruRPG library instead of using the cache")
-    scan_parser.add_argument("--apply-review", action="store_true", help="Only match files not already present in review.csv")
-    scan_parser.set_defaults(func=cmd_scan)
-
-    status_parser = subparsers.add_parser("review-status", help="Print review.csv counts by status")
-    status_parser.add_argument("--review-csv", help="Path to review.csv (overrides config.yaml)")
-    status_parser.set_defaults(func=cmd_review_status)
 
     metadata_help = (
         "What metadata to write: off (none; other options still run), calibre (embedded in the PDF), "
@@ -588,12 +485,14 @@ def main() -> None:
     )
 
     back_cover_to_page_2_help = (
-        "Move the back cover (found by its barcode) to right after the front cover. Books with a "
-        "wraparound cover or no back cover are left alone. Mutually exclusive with --back-cover-to-end."
+        "For a back cover that's currently the last page: move it to right after the front cover. "
+        "Doesn't search the book -- only the last page is considered, confirmed by a barcode or by "
+        "asking you. Wraparound covers are left alone. Mutually exclusive with --back-cover-to-end."
     )
     back_cover_to_end_help = (
-        "Move a back cover that sits right after the front cover (found by its barcode) to the end of "
-        "the book. Mutually exclusive with --back-cover-to-page-2."
+        "For a back cover that's currently PDF page 2: move it to the end of the book. Doesn't search "
+        "the book -- only page 2 is considered, confirmed by a barcode or by asking you. Mutually "
+        "exclusive with --back-cover-to-page-2."
     )
 
     def add_back_cover_options(subparser: argparse.ArgumentParser) -> None:
@@ -601,39 +500,7 @@ def main() -> None:
         group.add_argument("--back-cover-to-page-2", action="store_true", help=back_cover_to_page_2_help)
         group.add_argument("--back-cover-to-end", action="store_true", help=back_cover_to_end_help)
 
-    write_parser = subparsers.add_parser("write-pdfs", help="Write approved metadata into PDFs")
-    write_parser.add_argument("--root", help="Root folder of RPG PDFs (overrides config.yaml)")
-    write_parser.add_argument("--review-csv", help="Path to review.csv (overrides config.yaml)")
-    add_metadata_options(write_parser)
-    write_color_group = write_parser.add_mutually_exclusive_group()
-    write_color_group.add_argument("--convert-images", action="store_true", help=convert_images_help)
-    write_color_group.add_argument("--convert-grayscale", action="store_true", help=convert_grayscale_help)
-    add_hyperlink_options(write_parser)
-    write_bg_group = write_parser.add_mutually_exclusive_group()
-    write_bg_group.add_argument("--background-layer", action="store_true", help=background_layer_help)
-    write_bg_group.add_argument("--remove-background", action="store_true", help=remove_background_help)
-    write_parser.add_argument("--page-labels", action="store_true", help=page_labels_help)
-    add_back_cover_options(write_parser)
-    write_parser.set_defaults(func=cmd_write_pdfs)
-
-    all_parser = subparsers.add_parser("all", help="Run scan, then write-pdfs")
-    all_parser.add_argument("--root", help="Root folder of RPG PDFs (overrides config.yaml)")
-    all_parser.add_argument("--review-csv", help="Path to review.csv (overrides config.yaml)")
-    all_parser.add_argument("--refresh-library", action="store_true")
-    all_parser.add_argument("--apply-review", action="store_true")
-    add_metadata_options(all_parser)
-    add_hyperlink_options(all_parser)
-    all_color_group = all_parser.add_mutually_exclusive_group()
-    all_color_group.add_argument("--convert-images", action="store_true", help=convert_images_help)
-    all_color_group.add_argument("--convert-grayscale", action="store_true", help=convert_grayscale_help)
-    all_bg_group = all_parser.add_mutually_exclusive_group()
-    all_bg_group.add_argument("--background-layer", action="store_true", help=background_layer_help)
-    all_bg_group.add_argument("--remove-background", action="store_true", help=remove_background_help)
-    all_parser.add_argument("--page-labels", action="store_true", help=page_labels_help)
-    add_back_cover_options(all_parser)
-    all_parser.set_defaults(func=cmd_all)
-
-    tag_parser = subparsers.add_parser("tag", help="Match and tag PDF(s) interactively, no review.csv")
+    tag_parser = subparsers.add_parser("tag", help="Match and tag PDF(s) interactively")
     tag_group = tag_parser.add_mutually_exclusive_group(required=True)
     tag_group.add_argument("pdf", nargs="?", help="Path to a single PDF file to match and tag")
     tag_group.add_argument("--root", help="Process every PDF under this directory instead of a single file")
@@ -650,6 +517,10 @@ def main() -> None:
     tag_parser.add_argument(
         "--rename", action="store_true",
         help="Also rename the file (and its sidecars) to 'Series - Title' immediately after a successful write",
+    )
+    tag_parser.add_argument(
+        "--refresh-library", action="store_true",
+        help="Re-download your DriveThruRPG library listing first (it's cached and otherwise never refreshed)",
     )
     tag_parser.set_defaults(func=cmd_tag)
 

@@ -57,7 +57,6 @@ from PyQt6.QtCore import QObject, Qt, QThread, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QKeySequence, QPixmap, QShortcut
 from PyQt6.QtWidgets import (
     QButtonGroup,
-    QCheckBox,
     QDialog,
     QFileDialog,
     QFormLayout,
@@ -93,13 +92,14 @@ from tag_tui import (
 from gui_app import (
     PAGE_LABELS_HINT,
     DRY_RUN_HINT,
+    REFRESH_LIBRARY_HINT,
     RENAME_HINT,
     _add_background_picker,
+    _add_check,
     _add_convert_images_picker,
     _add_metadata_picker,
     _add_hyperlink_picker,
     _make_description_label,
-    _make_hint_label,
     _make_log_widget,
     _StyledTextEdit,
     _add_back_cover_picker,
@@ -129,7 +129,6 @@ class TagFlowController:
         client,
         manual_overrides: dict,
         known_urls: dict[str, str],
-        thresholds: dict,
         metadata: str,
         rename: bool,
         root_mode: bool,
@@ -145,13 +144,14 @@ class TagFlowController:
         back_cover_to_page_2: bool = False,
         back_cover_to_end: bool = False,
         dry_run: bool = False,
+        refresh_library: bool = False,
     ):
         self.pdfs = pdfs
+        self.refresh_library = refresh_library
         self.dry_run = dry_run
         self.client = client
         self.manual_overrides = manual_overrides
         self.known_urls = known_urls
-        self.thresholds = thresholds
         self.metadata = metadata
         self.convert_images = convert_images
         self.convert_grayscale = convert_grayscale
@@ -198,6 +198,11 @@ class TagFlowController:
         if self.dry_run and not (self.rename or self.page_labels):
             self._log("Dry run: nothing to preview -- turn on Set page labels and/or Rename.")
             return
+        if self.refresh_library and self.client is not None:
+            # Port of TagApp's: the library listing is cached with no
+            # expiry, so this is the only way to see newly bought books.
+            self._log_cb("Refreshing your DriveThruRPG library...")
+            self.client.pull_library(refresh=True)
         default_series: str | None = None
         if self.root_mode and len(self.pdfs) > 1 and self.metadata != "off" and not self.dry_run:
             default_series = self._ask("batch_series", {})
@@ -305,9 +310,8 @@ class TagFlowController:
                 return False
             score = 100.0
 
-        status = Status.AUTO_ACCEPTED if score >= self.thresholds.get("high_confidence_threshold", 90.0) else Status.APPROVED
         return self._confirm_and_write(
-            path, progress, meta, header=f"About to write: {meta.title}", score=score, status=status,
+            path, progress, meta, header=f"About to write: {meta.title}", score=score,
             default_series=default_series,
         )
 
@@ -430,24 +434,25 @@ class TagWorker(QObject):
     finished = pyqtSignal()
 
     def __init__(
-        self, pdfs, client, manual_overrides, known_urls, thresholds,
+        self, pdfs, client, manual_overrides, known_urls,
         metadata, rename, root_mode, stop_event, convert_images=False,
         convert_grayscale=False,
         background_layer=False, remove_background=False,
         hyperlink=None, page_labels=False,
         back_cover_to_page_2=False, back_cover_to_end=False, dry_run=False,
+        refresh_library=False,
     ):
         super().__init__()
         self.controller = TagFlowController(
             pdfs=pdfs, client=client, manual_overrides=manual_overrides, known_urls=known_urls,
-            thresholds=thresholds, metadata=metadata, rename=rename, root_mode=root_mode,
+            metadata=metadata, rename=rename, root_mode=root_mode,
             notify=self._notify, log=self._log, stop_event=stop_event, convert_images=convert_images,
             convert_grayscale=convert_grayscale,
             background_layer=background_layer, remove_background=remove_background,
             hyperlink=hyperlink,
             page_labels=page_labels,
             back_cover_to_page_2=back_cover_to_page_2, back_cover_to_end=back_cover_to_end,
-            dry_run=dry_run,
+            dry_run=dry_run, refresh_library=refresh_library,
         )
 
     def _notify(self, kind: str, payload: dict, response_q: "queue.Queue") -> None:
@@ -962,7 +967,7 @@ class TagTab(QWidget):
         layout.addWidget(_make_description_label(
             "Match and tag PDF(s) interactively -- choose a book from the list provided, enter "
             "metadata by hand, or paste a known URL, then confirm each one before it's written. "
-            "Works on a single file or every PDF in a folder; no review.csv involved. With "
+            "Works on a single file or every PDF in a folder. With "
             "Metadata tagging off, nothing is matched: only the options you pick run -- e.g. just "
             "Rename or Set page labels on files that are already tagged."
         ))
@@ -997,17 +1002,10 @@ class TagTab(QWidget):
 
         self.back_cover_combo = _add_back_cover_picker(layout)
 
-        self.page_labels_check = QCheckBox("Set page labels (--page-labels)")
-        layout.addWidget(self.page_labels_check)
-        layout.addWidget(_make_hint_label(PAGE_LABELS_HINT))
-
-        self.rename_check = QCheckBox("Rename (--rename)")
-        layout.addWidget(self.rename_check)
-        layout.addWidget(_make_hint_label(RENAME_HINT))
-
-        self.dry_run_check = QCheckBox("Dry run")
-        layout.addWidget(self.dry_run_check)
-        layout.addWidget(_make_hint_label(DRY_RUN_HINT))
+        self.page_labels_check = _add_check(layout, "Set page labels (--page-labels)", PAGE_LABELS_HINT)
+        self.rename_check = _add_check(layout, "Rename (--rename)", RENAME_HINT)
+        self.refresh_check = _add_check(layout, "Refresh library (--refresh-library)", REFRESH_LIBRARY_HINT)
+        self.dry_run_check = _add_check(layout, "Dry run", DRY_RUN_HINT)
 
         self.start_button = QPushButton("Start")
         self.start_button.clicked.connect(self._start)
@@ -1070,13 +1068,13 @@ class TagTab(QWidget):
 
         manual_overrides_path = Path(self.config_.get("manual_overrides", "data/manual_overrides.yaml"))
         manual_overrides = load_manual_overrides(manual_overrides_path)
-        thresholds = self.config_.get("matching", {})
 
         self.stop_event = threading.Event()
         self._thread = QThread()
         self._worker = TagWorker(
             pdfs=pdfs, client=client, manual_overrides=manual_overrides, known_urls=known_urls,
-            thresholds=thresholds, metadata=metadata, dry_run=dry_run,
+            metadata=metadata, dry_run=dry_run,
+            refresh_library=self.refresh_check.isChecked(),
             rename=self.rename_check.isChecked(), root_mode=root_mode, stop_event=self.stop_event,
             convert_images=self.convert_combo.currentData() == "rgb",
             convert_grayscale=self.convert_combo.currentData() == "grayscale",

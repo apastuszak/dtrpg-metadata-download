@@ -37,6 +37,7 @@ that's a documented workaround, not something this script auto-detects).
 
 from __future__ import annotations
 
+import html
 import queue
 import sys
 import tempfile
@@ -57,8 +58,8 @@ except ModuleNotFoundError as exc:
     print(f"SKIPPED: PyQt6 not available ({exc})")
     sys.exit(0)
 
-from provenance import ProductMetadata, Source, Status  # noqa: E402
-from review import ReviewRow, load_review, merge_by_filename, save_review  # noqa: E402
+from provenance import ProductMetadata, Source  # noqa: E402
+from review import ReviewRow  # noqa: E402
 from tag_tui import CandidateResult, ConfirmResult, ManualEntryResult, build_manual_metadata  # noqa: E402
 from gui_tag_flow import (  # noqa: E402
     CandidateDialog,
@@ -67,7 +68,6 @@ from gui_tag_flow import (  # noqa: E402
     TagFlowController,
     WatermarkDialog,
 )
-from gui_app import ReviewTab  # noqa: E402
 from watermark_removal import WatermarkDetection, WatermarkRemovalResult  # noqa: E402
 
 
@@ -90,7 +90,7 @@ def _drive_controller(pdfs, client, responses: dict, **controller_kwargs) -> Tag
     directly instead of going through TagWorker/Qt signals)."""
     request_queue: queue.Queue = queue.Queue()
     kwargs = {
-        "manual_overrides": {}, "known_urls": {}, "thresholds": {},
+        "manual_overrides": {}, "known_urls": {},
         "metadata": "grimmory", "rename": False, "root_mode": False,
     }
     kwargs.update(controller_kwargs)
@@ -528,152 +528,6 @@ def test_candidate_dialog_escape_skips_not_quits() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_review_tab_status_edit_persists() -> None:
-    # The original Tkinter version of this test guarded a real bug
-    # specific to that toolkit (Treeview.identify_column() disagreeing
-    # with .bbox() about column boundaries on one build, misrouting
-    # clicks to the wrong column). That hit-testing no longer exists
-    # under Qt -- QStyledItemDelegate placement is entirely Qt-internal --
-    # so this is now a plain smoke test that an edit actually persists
-    # through the real commit path (_on_item_changed -> save_review()).
-    with tempfile.TemporaryDirectory() as tmp:
-        review_csv = Path(tmp) / "review.csv"
-        row = ReviewRow(filename="Book.pdf", matched_title="Title", status=Status.NEEDS_REVIEW.value)
-        save_review(review_csv, [row])
-
-        tab = ReviewTab({"review_csv": str(review_csv)})
-        try:
-            status_col = tab.GRID_COLUMNS.index("status")
-            tab.table.item(0, status_col).setText(Status.APPROVED.value)
-
-            assert tab.rows_by_filename["Book.pdf"].status == Status.APPROVED.value
-            assert tab.table.item(0, status_col).text() == Status.APPROVED.value
-
-            # save_review() directly, not tab.save() -- the latter also
-            # pops a QMessageBox.information() confirmation, which blocks
-            # on .exec() waiting for a click that will never come
-            # headlessly. That confirmation is Qt UI chrome, not the
-            # persistence contract this test actually cares about.
-            save_review(review_csv, list(tab.rows_by_filename.values()))
-            reloaded = load_review(review_csv)
-            assert reloaded[0].status == Status.APPROVED.value
-        finally:
-            tab.deleteLater()
-    print("PASS: review_tab_status_edit_persists")
-
-
-def test_review_tab_edit_survives_rescan() -> None:
-    """merge_by_filename() used to only protect a row flipped to
-    `approved` -- editing an auto-accepted row's series in the Review tab
-    without also flipping status was silently overwritten by the next
-    scan. Guards the fix: a real inline edit through the actual widget
-    (not just calling ReviewRow.mark_edited() on a plain object) must set
-    `edited`, and merge_by_filename() must then preserve that row over a
-    fresh, differently-matched row for the same filename."""
-    with tempfile.TemporaryDirectory() as tmp:
-        review_csv = Path(tmp) / "review.csv"
-        row = ReviewRow(filename="Book.pdf", matched_title="Title", series="", status=Status.AUTO_ACCEPTED.value)
-        save_review(review_csv, [row])
-
-        tab = ReviewTab({"review_csv": str(review_csv)})
-        try:
-            series_col = tab.GRID_COLUMNS.index("series")
-            tab.table.item(0, series_col).setText("Hand-Typed Series")
-
-            edited_row = tab.rows_by_filename["Book.pdf"]
-            assert edited_row.series == "Hand-Typed Series"
-            assert edited_row.edited, "a real inline edit did not set ReviewRow.edited"
-            assert edited_row.status == Status.AUTO_ACCEPTED.value, "editing series should not touch status"
-
-            # save_review() directly -- tab.save() also pops a blocking
-            # QMessageBox.information() with nothing headless to click it.
-            save_review(review_csv, list(tab.rows_by_filename.values()))
-        finally:
-            tab.deleteLater()
-
-        # Simulate a later re-scan matching this same file to something
-        # else entirely -- merge_by_filename() must keep the hand-typed
-        # series, not the fresh match, even though status was never
-        # flipped to approved.
-        existing = load_review(review_csv)
-        fresh = [ReviewRow(filename="Book.pdf", matched_title="Re-matched Title", series="", status=Status.AUTO_ACCEPTED.value)]
-        merged = merge_by_filename(existing, fresh)
-        merged_row = next(r for r in merged if r.filename == "Book.pdf")
-        assert merged_row.series == "Hand-Typed Series", "a hand edit was clobbered by a re-scan"
-    print("PASS: review_tab_edit_survives_rescan")
-
-
-def test_review_tab_no_change_does_not_mark_edited() -> None:
-    """`_commit_detail_field()`/`_commit_description()` are wired to
-    `editingFinished`/`focus_lost`, which fire whenever focus leaves the
-    widget -- whether or not its value actually changed (e.g. clicking
-    into a field just to read it, then tabbing away). An earlier version
-    called `row.mark_edited()` unconditionally on every such commit,
-    which permanently exempted that row from ever being refreshed by a
-    later re-scan for no real reason. Guards the fix: only a genuine
-    value change should set `ReviewRow.edited`."""
-    with tempfile.TemporaryDirectory() as tmp:
-        review_csv = Path(tmp) / "review.csv"
-        row = ReviewRow(filename="Book.pdf", matched_title="Title", publisher="Pub", status=Status.AUTO_ACCEPTED.value)
-        save_review(review_csv, [row])
-
-        tab = ReviewTab({"review_csv": str(review_csv)})
-        try:
-            tab.table.setCurrentCell(0, 0)  # selects the row, populates the detail form
-            assert tab.rows_by_filename["Book.pdf"].edited == ""
-
-            # Focus-out with no actual change to the text.
-            tab.detail_edits["publisher"].editingFinished.emit()
-            tab._commit_description()
-            assert tab.rows_by_filename["Book.pdf"].edited == "", (
-                "a no-op focus change incorrectly marked the row edited"
-            )
-
-            # A real change must still mark it.
-            tab.detail_edits["publisher"].setText("New Publisher")
-            tab.detail_edits["publisher"].editingFinished.emit()
-            assert tab.rows_by_filename["Book.pdf"].edited == "1", "a real edit did not mark the row edited"
-            assert tab.rows_by_filename["Book.pdf"].publisher == "New Publisher"
-        finally:
-            tab.deleteLater()
-    print("PASS: review_tab_no_change_does_not_mark_edited")
-
-
-def test_review_tab_no_save_during_population() -> None:
-    # A real Qt-specific gotcha with no Tkinter analog: QTableWidget's
-    # itemChanged fires for setItem() during bulk population just as it
-    # does for a real user edit -- ReviewTab._populate_table() guards
-    # this with table.blockSignals(True). This test would fail (the
-    # commit count would be > 0 after reload()) if that guard were ever
-    # removed.
-    with tempfile.TemporaryDirectory() as tmp:
-        review_csv = Path(tmp) / "review.csv"
-        rows = [ReviewRow(filename=f"Book{i}.pdf", matched_title=f"Title {i}") for i in range(5)]
-        save_review(review_csv, rows)
-
-        tab = ReviewTab({"review_csv": str(review_csv)})
-        try:
-            commits = []
-            tab.table.itemChanged.connect(lambda item: commits.append(item))
-            tab.reload()
-            assert commits == [], f"itemChanged fired {len(commits)} time(s) during population"
-
-            status_col = tab.GRID_COLUMNS.index("status")
-            tab.table.item(0, status_col).setText(Status.APPROVED.value)
-            assert len(commits) == 1, "a real edit should still fire itemChanged exactly once"
-        finally:
-            tab.deleteLater()
-    print("PASS: review_tab_no_save_during_population")
-
-
-# ---------------------------------------------------------------------------
-# TagWorker end-to-end: a real QThread, a real signal-based _ask() round
-# trip, no fake-thread harness -- the single highest-novelty piece of the
-# Tk->Qt migration (see gui_tag_flow.py's module docstring), so it gets
-# its own direct coverage beyond the _drive_controller() group above.
-# ---------------------------------------------------------------------------
-
-
 def test_tag_worker_signal_round_trip(app: QApplication) -> None:
     from gui_tag_flow import TagWorker
 
@@ -687,7 +541,7 @@ def test_tag_worker_signal_round_trip(app: QApplication) -> None:
 
         with patch("gui_tag_flow.find_candidates", return_value=[(meta, 95.0)]):
             worker = TagWorker(
-                pdfs=[pdf], client=client, manual_overrides={}, known_urls={}, thresholds={},
+                pdfs=[pdf], client=client, manual_overrides={}, known_urls={}, 
                 metadata="grimmory", rename=False, root_mode=False, stop_event=threading.Event(),
             )
             thread = __import__("PyQt6.QtCore", fromlist=["QThread"]).QThread()
@@ -741,7 +595,7 @@ def test_tag_worker_run_catches_exception(app: QApplication) -> None:
         client = _client()
 
         worker = TagWorker(
-            pdfs=[pdf], client=client, manual_overrides={}, known_urls={}, thresholds={},
+            pdfs=[pdf], client=client, manual_overrides={}, known_urls={}, 
             metadata="grimmory", rename=False, root_mode=False, stop_event=threading.Event(),
         )
         thread = QThread()
@@ -800,92 +654,65 @@ def test_controller_metadata_off_dry_run_then_write():
     print("PASS: controller_metadata_off_dry_run_then_write")
 
 
-def test_hyperlink_picker_lists_rule_sets_and_passes_choice(app: QApplication) -> None:
-    """Both tabs' --hyperlink dropdown must offer "Off" plus every rule set
-    in hyperlink_rules/, and Write PDFs must pass the chosen rule set's
-    *name* (not its label) through to write_approved()."""
-    from gui_app import WritePdfsTab
+def test_tag_tab_dropdowns_pass_choices(app: QApplication) -> None:
+    """Every Tag tab dropdown must offer its choices, start on its default,
+    and pass the chosen value (the rule set's *name*, not its label, for
+    --hyperlink) to the worker Start launches. TagWorker and QThread are
+    replaced, so nothing actually runs -- this only checks the wiring.
+    Metadata off, so no API key or client is needed."""
     from gui_tag_flow import TagTab
     from rpg_hyperlink import rule_sets
 
-    expected = [None] + [r.name for r in rule_sets()]
-    assert {"gurps", "mongoose", "deltagreen"} <= set(expected), expected
+    rule_set_names = [r.name for r in rule_sets()]
+    assert {"gurps", "mongoose", "deltagreen"} <= set(rule_set_names), rule_set_names
+    expected = {
+        "metadata_combo": (["off", "calibre", "grimmory", "bookorbit"], "grimmory"),
+        "convert_combo": ([None, "rgb", "grayscale"], None),
+        "hyperlink_combo": ([None, *rule_set_names], None),
+        "background_combo": ([None, "layer", "remove"], None),
+        "back_cover_combo": ([None, "page-2", "end"], None),
+    }
+    tab = TagTab({})
+    for name, (choices, default) in expected.items():
+        combo = getattr(tab, name)
+        assert [combo.itemData(i) for i in range(combo.count())] == choices, (name, choices)
+        assert combo.currentData() == default, f"{name} must start on {default!r}"
+        assert all(combo.itemData(i, Qt.ItemDataRole.ToolTipRole) for i in range(combo.count())), \
+            f"every {name} option needs its own tooltip"
+
+    # Tooltips replace the old hint labels: the selected option's text
+    # follows the selection, and a rule set's description is escaped.
+    combo = tab.hyperlink_combo
+    info = next(r for r in rule_sets() if r.name == "deltagreen")
+    combo.setCurrentIndex(combo.findData("deltagreen"))
+    assert html.escape(info.description) in combo.toolTip(), combo.toolTip()
+    assert tab.page_labels_check.toolTip(), "checkboxes need a tooltip too"
+    from gui_app import HelpIcon
+    icons = tab.findChildren(HelpIcon)
+    assert len(icons) == 9 and all(icon.toolTip() for icon in icons), [icon.toolTip() for icon in icons]
+    assert any(html.escape(info.description) in icon.toolTip() for icon in icons), \
+        "the hyperlink help icon must follow the selected rule set"
 
     with tempfile.TemporaryDirectory() as tmp:
-        review_csv = Path(tmp) / "review.csv"
-        save_review(review_csv, [ReviewRow(
-            filename="Book.pdf", status=Status.APPROVED.value, matched_title="Book",
-        )])
-        tag_tab = TagTab({})
-        write_tab = WritePdfsTab({"review_csv": str(review_csv)})
-        for combo in (tag_tab.hyperlink_combo, write_tab.hyperlink_combo):
-            assert [combo.itemData(i) for i in range(combo.count())] == expected
-            assert combo.currentData() is None, "hyperlinking must default to off"
-
-        combo = write_tab.hyperlink_combo
-        combo.setCurrentIndex(combo.findData("mongoose"))
-        write_tab.root_edit.setText(tmp)
-        with patch("gui_app.write_approved", return_value=[]) as write_approved:
-            QTest.mouseClick(write_tab.run_button, Qt.MouseButton.LeftButton)
-            deadline = __import__("time").time() + 20
-            while not write_tab.run_button.isEnabled() and __import__("time").time() < deadline:
-                app.processEvents()
-        assert write_approved.called, "write_approved() was never called"
-        assert write_approved.call_args.kwargs["hyperlink"] == "mongoose", write_approved.call_args
-    print("PASS: hyperlink_picker_lists_rule_sets_and_passes_choice")
-
-
-def test_convert_images_picker_passes_choice(app: QApplication) -> None:
-    """The Tag, Write PDFs and All tabs' "Convert images" dropdown must
-    offer Off/RGB/Grayscale, default to off, and Write PDFs must turn
-    "Grayscale" into convert_grayscale=True (and not convert_images).
-    Their "Metadata tagging" dropdown must offer the four modes, start on
-    the default, and pass the chosen mode's name through. The Tag and
-    Write PDFs tabs' page-background dropdown must offer Off/Layer/Remove,
-    default to off, and turn "Remove" into remove_background=True. All
-    three tabs' back-cover dropdown must offer Off/Page 2/End, default to
-    off, and turn "End" into back_cover_to_end=True."""
-    from gui_app import AllTab, WritePdfsTab
-    from gui_tag_flow import TagTab
-
-    with tempfile.TemporaryDirectory() as tmp:
-        review_csv = Path(tmp) / "review.csv"
-        save_review(review_csv, [ReviewRow(
-            filename="Book.pdf", status=Status.APPROVED.value, matched_title="Book",
-        )])
-        write_tab = WritePdfsTab({"review_csv": str(review_csv)})
-        for tab in (TagTab({}), write_tab, AllTab({})):
-            combo = tab.convert_combo
-            assert [combo.itemData(i) for i in range(combo.count())] == [None, "rgb", "grayscale"]
-            assert combo.currentData() is None, "image conversion must default to off"
-            combo = tab.metadata_combo
-            assert [combo.itemData(i) for i in range(combo.count())] == ["off", "calibre", "grimmory", "bookorbit"]
-            assert combo.currentData() == "grimmory", "metadata tagging must start on the default"
-            combo = tab.back_cover_combo
-            assert [combo.itemData(i) for i in range(combo.count())] == [None, "page-2", "end"]
-            assert combo.currentData() is None, "back-cover moves must default to off"
-
-        write_tab.convert_combo.setCurrentIndex(write_tab.convert_combo.findData("grayscale"))
-        write_tab.metadata_combo.setCurrentIndex(write_tab.metadata_combo.findData("calibre"))
-        for tab in (TagTab({}), write_tab):
-            combo = tab.background_combo
-            assert [combo.itemData(i) for i in range(combo.count())] == [None, "layer", "remove"]
-            assert combo.currentData() is None, "background handling must default to off"
-        write_tab.background_combo.setCurrentIndex(write_tab.background_combo.findData("remove"))
-        write_tab.back_cover_combo.setCurrentIndex(write_tab.back_cover_combo.findData("end"))
-        write_tab.root_edit.setText(tmp)
-        with patch("gui_app.write_approved", return_value=[]) as write_approved:
-            QTest.mouseClick(write_tab.run_button, Qt.MouseButton.LeftButton)
-            deadline = __import__("time").time() + 20
-            while not write_tab.run_button.isEnabled() and __import__("time").time() < deadline:
-                app.processEvents()
-        assert write_approved.called, "write_approved() was never called"
-        kwargs = write_approved.call_args.kwargs
+        pdf = Path(tmp) / "Book.pdf"
+        pikepdf.new().save(pdf)
+        tab.file_radio.setChecked(True)
+        tab.path_edit.setText(str(pdf))
+        for name, value in (("metadata_combo", "off"), ("convert_combo", "grayscale"),
+                            ("hyperlink_combo", "mongoose"), ("background_combo", "remove"),
+                            ("back_cover_combo", "end")):
+            combo = getattr(tab, name)
+            combo.setCurrentIndex(combo.findData(value))
+        with patch("gui_tag_flow.TagWorker") as worker, patch("gui_tag_flow.QThread"):
+            QTest.mouseClick(tab.start_button, Qt.MouseButton.LeftButton)
+        assert worker.called, "Start never launched a TagWorker"
+        kwargs = worker.call_args.kwargs
+        assert kwargs["metadata"] == "off" and kwargs["client"] is None, kwargs
         assert kwargs["convert_grayscale"] is True and kwargs["convert_images"] is False, kwargs
-        assert kwargs["metadata"] == "calibre", kwargs
+        assert kwargs["hyperlink"] == "mongoose", kwargs
         assert kwargs["remove_background"] is True and kwargs["background_layer"] is False, kwargs
         assert kwargs["back_cover_to_end"] is True and kwargs["back_cover_to_page_2"] is False, kwargs
-    print("PASS: convert_images_picker_passes_choice")
+    print("PASS: tag_tab_dropdowns_pass_choices")
 
 
 NO_APP_TESTS = [
@@ -910,17 +737,12 @@ NO_ARG_APP_TESTS = [
     test_show_candidate_dialog_pick,
     test_show_candidate_dialog_use_url_button,
     test_candidate_dialog_escape_skips_not_quits,
-    test_review_tab_status_edit_persists,
-    test_review_tab_edit_survives_rescan,
-    test_review_tab_no_change_does_not_mark_edited,
-    test_review_tab_no_save_during_population,
 ]
 
 APP_ARG_TESTS = [
     test_tag_worker_signal_round_trip,
     test_tag_worker_run_catches_exception,
-    test_hyperlink_picker_lists_rule_sets_and_passes_choice,
-    test_convert_images_picker_passes_choice,
+    test_tag_tab_dropdowns_pass_choices,
 ]
 
 

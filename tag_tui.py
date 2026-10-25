@@ -9,8 +9,8 @@ renaming pipeline is untouched: this module only calls into
 matcher.find_candidates()/row_from_match()/extract_product_id(),
 pdf_writer.write_metadata(), and renamer.plan_rename()/apply_rename() --
 the exact same functions the old code called, with the exact same
-ProductMetadata/ReviewRow objects. scan/write-pdfs/all/rename are not
-interactive today and have no TUI involvement at all.
+ProductMetadata/ReviewRow objects. rename/page-labels are not
+interactive and have no TUI involvement at all.
 
 Screens replace print()/input() calls one for one:
     BatchSeriesModal  <- cmd_tag()'s "same series for the whole batch?"
@@ -679,7 +679,6 @@ class TagApp(App[None]):
         client: DtrpgClient,
         manual_overrides: dict,
         known_urls: dict[str, str],
-        thresholds: dict,
         metadata: str,
         rename: bool,
         root_mode: bool,
@@ -691,13 +690,14 @@ class TagApp(App[None]):
         page_labels: bool = False,
         back_cover_to_page_2: bool = False,
         back_cover_to_end: bool = False,
+        refresh_library: bool = False,
     ):
         super().__init__()
+        self.refresh_library = refresh_library
         self.pdfs = pdfs
         self.client = client
         self.manual_overrides = manual_overrides
         self.known_urls = known_urls
-        self.thresholds = thresholds
         self.metadata = metadata
         self.convert_images = convert_images
         self.convert_grayscale = convert_grayscale
@@ -724,6 +724,11 @@ class TagApp(App[None]):
 
     @work
     async def run_flow(self) -> None:
+        if self.refresh_library and self.client is not None:
+            # The library listing is cached with no expiry; this is the
+            # only way to pick up books bought since it was last pulled.
+            self.notify("Refreshing your DriveThruRPG library...", timeout=10)
+            await self._call(self.client.pull_library, refresh=True)
         default_series: str | None = None
         if self.root_mode and len(self.pdfs) > 1 and self.metadata != "off":
             default_series = await self.push_screen_wait(BatchSeriesModal())
@@ -841,9 +846,8 @@ class TagApp(App[None]):
                 return False
             score = 100.0
 
-        status = Status.AUTO_ACCEPTED if score >= self.thresholds.get("high_confidence_threshold", 90.0) else Status.APPROVED
         return await self._confirm_and_write(
-            path, progress, meta, header=f"About to write: {meta.title}", score=score, status=status, default_series=default_series,
+            path, progress, meta, header=f"About to write: {meta.title}", score=score, default_series=default_series,
         )
 
     async def _manual_entry(self, path: Path, progress: str, default_series: str | None) -> bool:

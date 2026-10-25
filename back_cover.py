@@ -19,8 +19,9 @@ page is much worse than moving nothing:
   one, locate_back_cover() also names the page that *would* be the back
   cover for the requested move (the last page for "page-2", page 2 for
   "end"), and tag -- which can ask -- shows it to the user and passes
-  their answer back as move_back_cover(..., index=...). write-pdfs/all
-  can't ask, so they only move on a barcode.
+  their answer back as move_back_cover(..., index=...). (The batch
+  write-pdfs/all commands, which couldn't ask and so only moved on a
+  barcode, were removed with the review.csv workflow.)
 
 The move keeps every page object, so bookmarks and in-document links
 still point at the same pages (verified on a hyperlinked book: 24

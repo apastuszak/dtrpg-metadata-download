@@ -606,9 +606,8 @@ class DtrpgClient:
     @staticmethod
     def _save_json(path: Path, data: Any) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        # Same atomic temp-file-then-os.replace() reasoning as
-        # review.save_review() -- a crash/kill partway through a direct
-        # write here would leave a truncated, unparseable cache file.
+        # Written atomically (temp file, then os.replace()) -- a
+        # crash/kill partway through a direct write here would leave a truncated, unparseable cache file.
         # _load_json() above already tolerates that (falls back to
         # "no cache", not a crash), but that means silently re-paying for
         # a full library re-pull or burning rate-limited catalog calls
@@ -618,8 +617,7 @@ class DtrpgClient:
             # mkstemp() always creates its file 0600, and os.replace()
             # preserves that mode on POSIX -- without this, every save
             # silently tightened the cache file's permissions from its
-            # normal 644 down to 600. See review.save_review()'s matching
-            # fix for the same regression.
+            # normal 644 down to 600.
             if path.exists():
                 mode = stat.S_IMODE(path.stat().st_mode)
             else:

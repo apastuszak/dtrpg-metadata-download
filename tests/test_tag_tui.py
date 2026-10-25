@@ -76,7 +76,7 @@ async def test_candidate_pick_write():
             ],
         )
         app = TagApp(pdfs=[pdf], client=client, manual_overrides={}, known_urls={},
-                     thresholds={}, metadata="grimmory", rename=False, root_mode=False)
+                     metadata="grimmory", rename=False, root_mode=False)
         async with app.run_test() as pilot:
             await pilot.pause()
             await pilot.press("enter")  # select the (highlighted) first candidate
@@ -159,7 +159,7 @@ async def test_back_cover_to_end_flag():
             ],
         )
         app = TagApp(pdfs=[pdf], client=client, manual_overrides={}, known_urls={},
-                     thresholds={}, metadata="grimmory", rename=False, root_mode=False,
+                     metadata="grimmory", rename=False, root_mode=False,
                      back_cover_to_end=True)
         async with app.run_test() as pilot:
             await pilot.pause(delay=0.3)
@@ -194,7 +194,7 @@ async def test_back_cover_without_barcode_asks():
                 ProductMetadata(title="T", series="S", description="d", source=Source.DTRPG_LIBRARY, product_id="1")
             ])
             app = TagApp(pdfs=[pdf], client=client, manual_overrides={}, known_urls={},
-                         thresholds={}, metadata="grimmory", rename=False, root_mode=False,
+                         metadata="grimmory", rename=False, root_mode=False,
                          back_cover_to_page_2=True)
             async with app.run_test() as pilot:
                 await pilot.pause(delay=0.3)
@@ -228,7 +228,7 @@ async def test_page_labels_flag():
             ],
         )
         app = TagApp(pdfs=[pdf], client=client, manual_overrides={}, known_urls={},
-                     thresholds={}, metadata="grimmory", rename=False, root_mode=False,
+                     metadata="grimmory", rename=False, root_mode=False,
                      page_labels=True)
         async with app.run_test() as pilot:
             await pilot.pause(delay=0.3)
@@ -253,7 +253,7 @@ async def test_manual_override_confirm():
         pikepdf.new().save(pdf)
         override = ProductMetadata(title="Override Title", series="Override Series", source=Source.MANUAL)
         app = TagApp(pdfs=[pdf], client=_client(), manual_overrides={pdf.name: override}, known_urls={},
-                     thresholds={}, metadata="grimmory", rename=False, root_mode=False)
+                     metadata="grimmory", rename=False, root_mode=False)
         async with app.run_test() as pilot:
             await pilot.pause()
             await pilot.press("enter")  # confirm (default-focused button; override's series is pre-filled)
@@ -275,7 +275,7 @@ async def test_confirm_screen_edit_before_write():
             source=Source.DTRPG_LIBRARY, product_id="1",
         )])
         app = TagApp(pdfs=[pdf], client=client, manual_overrides={}, known_urls={},
-                     thresholds={}, metadata="grimmory", rename=False, root_mode=False)
+                     metadata="grimmory", rename=False, root_mode=False)
         async with app.run_test() as pilot:
             await pilot.pause()
             await pilot.press("enter")  # pick the candidate
@@ -309,7 +309,7 @@ async def test_series_dialog_when_blank():
             title="Standalone Book", description="d", source=Source.DTRPG_LIBRARY, product_id="1",
         )])
         app = TagApp(pdfs=[pdf], client=client, manual_overrides={}, known_urls={},
-                     thresholds={}, metadata="grimmory", rename=False, root_mode=False)
+                     metadata="grimmory", rename=False, root_mode=False)
         async with app.run_test() as pilot:
             await pilot.pause()
             await pilot.press("enter")  # pick the only candidate
@@ -338,7 +338,7 @@ async def test_known_url_auto_write_no_screen():
         pikepdf.new().save(pdf)
         client = _client(get_product=ProductMetadata(title="URL Title", source=Source.DTRPG_CATALOG, product_id="9"))
         app = TagApp(pdfs=[pdf], client=client, manual_overrides={}, known_urls={pdf.name: "9"},
-                     thresholds={}, metadata="grimmory", rename=False, root_mode=False)
+                     metadata="grimmory", rename=False, root_mode=False)
         async with app.run_test() as pilot:
             # No key presses at all -- a known_urls match must write with
             # zero interaction, exactly like the old code's "deliberately
@@ -356,7 +356,7 @@ async def test_manual_entry_multiline_description():
         pdf = Path(tmp) / "Manual.pdf"
         pikepdf.new().save(pdf)
         app = TagApp(pdfs=[pdf], client=_client(), manual_overrides={}, known_urls={},
-                     thresholds={}, metadata="grimmory", rename=False, root_mode=False)
+                     metadata="grimmory", rename=False, root_mode=False)
         multiline = "First paragraph.\n\nSecond paragraph, with more detail."
         async with app.run_test() as pilot:
             await pilot.pause()  # empty candidate screen (no candidates)
@@ -392,7 +392,7 @@ async def test_empty_state_url_paste():
         pikepdf.new().save(pdf)
         client = _client(get_product=ProductMetadata(title="Via URL", source=Source.DTRPG_CATALOG, product_id="42"))
         app = TagApp(pdfs=[pdf], client=client, manual_overrides={}, known_urls={},
-                     thresholds={}, metadata="grimmory", rename=False, root_mode=False)
+                     metadata="grimmory", rename=False, root_mode=False)
         async with app.run_test() as pilot:
             await pilot.pause()
             await pilot.click("#url")
@@ -422,7 +422,7 @@ async def test_use_url_button_with_candidates_present():
             get_product=ProductMetadata(title="Via URL Button", source=Source.DTRPG_CATALOG, product_id="42"),
         )
         app = TagApp(pdfs=[pdf], client=client, manual_overrides={}, known_urls={},
-                     thresholds={}, metadata="grimmory", rename=False, root_mode=False)
+                     metadata="grimmory", rename=False, root_mode=False)
         async with app.run_test() as pilot:
             await pilot.pause()
             await pilot.click("#url")
@@ -446,7 +446,7 @@ async def test_skip():
         pikepdf.new().save(pdf)
         client = _client(search_library=[ProductMetadata(title="X", description="d", source=Source.DTRPG_LIBRARY, product_id="1")])
         app = TagApp(pdfs=[pdf], client=client, manual_overrides={}, known_urls={},
-                     thresholds={}, metadata="grimmory", rename=False, root_mode=False)
+                     metadata="grimmory", rename=False, root_mode=False)
         async with app.run_test() as pilot:
             await pilot.pause()
             await pilot.press("escape")  # skip at the candidate screen
@@ -467,7 +467,7 @@ async def test_quit_mid_batch_second_file_untouched():
         pikepdf.new().save(pdf2)
         client = _client(search_library=[ProductMetadata(title="X", description="d", source=Source.DTRPG_LIBRARY, product_id="1")])
         app = TagApp(pdfs=[pdf1, pdf2], client=client, manual_overrides={}, known_urls={},
-                     thresholds={}, metadata="grimmory", rename=False, root_mode=True)
+                     metadata="grimmory", rename=False, root_mode=True)
         async with app.run_test() as pilot:
             await pilot.pause()
             await pilot.click("#continue")  # blank batch series -> ask per book
@@ -494,7 +494,7 @@ async def test_rename_flag():
             source=Source.DTRPG_LIBRARY, product_id="1",
         )])
         app = TagApp(pdfs=[pdf], client=client, manual_overrides={}, known_urls={},
-                     thresholds={}, metadata="grimmory", rename=True, root_mode=False)
+                     metadata="grimmory", rename=True, root_mode=False)
         async with app.run_test() as pilot:
             await pilot.pause()
             await pilot.press("enter")
@@ -516,7 +516,7 @@ async def test_bookorbit_mode():
             title="Combo Title", description="d", source=Source.DTRPG_LIBRARY, product_id="1",
         )])
         app = TagApp(pdfs=[pdf], client=client, manual_overrides={}, known_urls={},
-                     thresholds={}, metadata="bookorbit", rename=False, root_mode=False)
+                     metadata="bookorbit", rename=False, root_mode=False)
         async with app.run_test() as pilot:
             await pilot.pause()
             await pilot.press("enter")  # pick candidate
@@ -546,7 +546,7 @@ async def test_metadata_off_still_renames():
         pikepdf.new().save(pdf)
         write_grimmory_sidecar(pdf, ReviewRow(filename=pdf.name, matched_title="Off Title", series="Off Series"))
         app = TagApp(pdfs=[pdf], client=None, manual_overrides={}, known_urls={},
-                     thresholds={}, metadata="off", rename=True, root_mode=False)
+                     metadata="off", rename=True, root_mode=False)
         async with app.run_test() as pilot:
             await pilot.pause(delay=0.5)
 
@@ -570,7 +570,7 @@ async def test_batch_default_series_prefilled():
         pikepdf.new().save(pdf2)
         client = _client(search_library=[ProductMetadata(title="X", description="d", source=Source.DTRPG_LIBRARY, product_id="1")])
         app = TagApp(pdfs=[pdf1, pdf2], client=client, manual_overrides={}, known_urls={},
-                     thresholds={}, metadata="grimmory", rename=False, root_mode=True)
+                     metadata="grimmory", rename=False, root_mode=True)
         async with app.run_test() as pilot:
             await pilot.pause()
             await pilot.click("#series")
@@ -617,7 +617,7 @@ async def test_watermark_detected_and_removed():
         detection = WatermarkDetection(text="www.drivethrurpg.com", page_count=10, total_pages=10)
         client = _client(search_library=[ProductMetadata(title="X", description="d", source=Source.DTRPG_LIBRARY, product_id="1")])
         app = TagApp(pdfs=[pdf], client=client, manual_overrides={}, known_urls={},
-                     thresholds={}, metadata="grimmory", rename=False, root_mode=False)
+                     metadata="grimmory", rename=False, root_mode=False)
         with (
             patch("tag_tui.detect_watermark", return_value=detection) as mock_detect,
             patch("tag_tui.remove_watermark", return_value=WatermarkRemovalResult(success=True, removed=10)) as mock_remove,
@@ -669,7 +669,7 @@ async def test_watermark_removal_backs_up_original_first():
             return WatermarkRemovalResult(success=True, removed=1)
 
         app = TagApp(pdfs=[pdf], client=client, manual_overrides={}, known_urls={},
-                     thresholds={}, metadata="grimmory", rename=False, root_mode=False)
+                     metadata="grimmory", rename=False, root_mode=False)
         with (
             patch("tag_tui.detect_watermark", return_value=detection),
             patch("tag_tui.remove_watermark", side_effect=fake_remove_watermark) as mock_remove,
@@ -692,7 +692,7 @@ async def test_watermark_declined_no_removal():
         detection = WatermarkDetection(text="www.drivethrurpg.com", page_count=5, total_pages=5)
         client = _client(search_library=[ProductMetadata(title="X", description="d", source=Source.DTRPG_LIBRARY, product_id="1")])
         app = TagApp(pdfs=[pdf], client=client, manual_overrides={}, known_urls={},
-                     thresholds={}, metadata="grimmory", rename=False, root_mode=False)
+                     metadata="grimmory", rename=False, root_mode=False)
         with (
             patch("tag_tui.detect_watermark", return_value=detection),
             patch("tag_tui.remove_watermark") as mock_remove,
@@ -720,7 +720,7 @@ async def test_no_watermark_modal_when_none_detected():
         pikepdf.new().save(pdf)
         client = _client(search_library=[ProductMetadata(title="X", description="d", source=Source.DTRPG_LIBRARY, product_id="1")])
         app = TagApp(pdfs=[pdf], client=client, manual_overrides={}, known_urls={},
-                     thresholds={}, metadata="grimmory", rename=False, root_mode=False)
+                     metadata="grimmory", rename=False, root_mode=False)
         async with app.run_test() as pilot:
             await pilot.pause()
             assert "WatermarkModal" not in type(pilot.app.screen).__name__

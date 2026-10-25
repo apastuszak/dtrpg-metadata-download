@@ -6,14 +6,13 @@ import csv
 import logging
 import re
 from pathlib import Path
-from typing import Callable
 
 import yaml
 from rapidfuzz import fuzz
 
 from dtrpg_client import DtrpgClient
 from provenance import ProductMetadata, Source, Status
-from review import ReviewRow, merge_by_filename
+from review import ReviewRow
 
 logger = logging.getLogger("matcher")
 
@@ -196,110 +195,6 @@ def load_manual_overrides(path: str | Path) -> dict[str, ProductMetadata]:
     return overrides
 
 
-def match_file(
-    path: Path,
-    client: DtrpgClient,
-    manual_overrides: dict[str, ProductMetadata],
-    known_urls: dict[str, str] | None = None,
-    high_confidence: float = 90.0,
-    review_floor: float = 70.0,
-) -> ReviewRow:
-    filename = path.name
-
-    if filename in manual_overrides:
-        meta = manual_overrides[filename]
-        return row_from_match(filename, meta, 100.0, Status.APPROVED)
-
-    if known_urls and filename in known_urls:
-        product_id = known_urls[filename]
-        meta = client.get_product(product_id)
-        if meta is not None:
-            return row_from_match(filename, meta, 100.0, Status.APPROVED)
-        logger.warning(
-            "Known URL for %r (product_id=%s) could not be fetched; falling back to search",
-            filename, product_id,
-        )
-
-    query, noise_tokens = derive_query(filename)
-
-    try:
-        library_candidates = client.search_library(query)
-    except Exception:
-        logger.exception("Library search failed for %r", filename)
-        library_candidates = []
-
-    best = _best_candidate(query, noise_tokens, library_candidates)
-    if best is not None and best[1] >= high_confidence:
-        meta = _maybe_enrich(client, best[0])
-        return row_from_match(filename, meta, best[1], Status.AUTO_ACCEPTED)
-
-    try:
-        catalog_candidates = client.search_catalog(query)
-    except Exception:
-        logger.exception("Catalog search failed for %r", filename)
-        catalog_candidates = []
-
-    catalog_best = _best_candidate(query, noise_tokens, catalog_candidates)
-    if catalog_best is not None and (best is None or catalog_best[1] > best[1]):
-        best = catalog_best
-
-    if best is None:
-        return ReviewRow(filename=filename, status=Status.NO_MATCH.value)
-
-    meta, score = best
-    if score >= high_confidence:
-        meta = _maybe_enrich(client, meta)
-        return row_from_match(filename, meta, score, Status.AUTO_ACCEPTED)
-    if score >= review_floor:
-        meta = _maybe_enrich(client, meta)
-        return row_from_match(filename, meta, score, Status.NEEDS_REVIEW)
-    return ReviewRow(filename=filename, status=Status.NO_MATCH.value)
-
-
-def run_scan_batch(
-    root: str | Path,
-    client: DtrpgClient,
-    manual_overrides: dict[str, ProductMetadata],
-    known_urls: dict[str, str],
-    existing_rows: list[ReviewRow],
-    thresholds: dict,
-    *,
-    apply_review: bool = False,
-    progress: Callable[[int, int, str], None] | None = None,
-) -> list[ReviewRow]:
-    """Match every PDF under `root` and merge the results into
-    `existing_rows` -- factored out of cmd_scan()'s own inline loop (in
-    dtrpg-metadata-download.py) so both the CLI and the GUI's Scan tab
-    share one copy instead of two slowly drifting apart. Caller still owns
-    save_review() -- this only returns the merged rows.
-
-    `progress`, if given, is called as progress(i, total, pdf_path.name)
-    before each file is matched (1-indexed i), the same information
-    cmd_scan's own logger.info() call already reports today.
-    """
-    pdfs = scan_pdfs(root)
-    if apply_review:
-        existing_filenames = {row.filename for row in existing_rows}
-        pdfs = [p for p in pdfs if p.name not in existing_filenames]
-
-    fresh_rows = []
-    for i, pdf_path in enumerate(pdfs, 1):
-        if progress is not None:
-            progress(i, len(pdfs), pdf_path.name)
-        fresh_rows.append(
-            match_file(
-                pdf_path,
-                client,
-                manual_overrides,
-                known_urls,
-                high_confidence=thresholds.get("high_confidence_threshold", 90.0),
-                review_floor=thresholds.get("review_floor_threshold", 70.0),
-            )
-        )
-
-    return merge_by_filename(existing_rows, fresh_rows)
-
-
 def _maybe_enrich(client: DtrpgClient, meta: ProductMetadata) -> ProductMetadata:
     """Backfill description/authors/tags for a library-sourced match (see
     DtrpgClient.enrich) before it's kept — a no-op for catalog matches,
@@ -317,10 +212,8 @@ def find_candidates(
     path: Path, client: DtrpgClient, limit: int = 5
 ) -> list[tuple[ProductMetadata, float]]:
     """Search both the library and the catalog for a single file and return
-    up to `limit` scored candidates, best first. Unlike `match_file`, this
-    always queries both sources (no early-exit on a high-confidence library
-    hit) since it's meant for one-off interactive lookups, not a bulk scan
-    that needs to conserve rate-limited catalog calls."""
+    up to `limit` scored candidates, best first. Always queries both
+    sources, since the user picks from the list."""
     filename = path.name
     query, noise_tokens = derive_query(filename)
 
@@ -337,16 +230,6 @@ def find_candidates(
     scored = [(c, _score(query, noise_tokens, c)) for c in candidates]
     scored.sort(key=lambda pair: pair[1], reverse=True)
     return scored[:limit]
-
-
-def _best_candidate(
-    query: str, noise_tokens: list[str], candidates: list[ProductMetadata]
-) -> tuple[ProductMetadata, float] | None:
-    if not candidates:
-        return None
-    scored = [(c, _score(query, noise_tokens, c)) for c in candidates]
-    scored.sort(key=lambda pair: pair[1], reverse=True)
-    return scored[0]
 
 
 def row_from_match(filename: str, meta: ProductMetadata, score: float, status: Status) -> ReviewRow:
