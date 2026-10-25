@@ -1,7 +1,8 @@
 # Hand-filled metadata for titles with no DriveThruRPG listing at all
 # (or that you've already identified elsewhere, e.g. a publisher's own
-# site). Keyed by exact PDF filename. Anything listed here is applied
-# with status "approved" and skips the DriveThruRPG lookup entirely.
+# site). Keyed by exact PDF filename. A book listed here skips the
+# DriveThruRPG lookup and goes straight to tag's confirm screen, where it
+# can still be edited. Any field can be left out; isbn is also accepted.
 #
 # Example:
 #
