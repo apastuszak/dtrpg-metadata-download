@@ -202,7 +202,11 @@ class TagFlowController:
             # Port of TagApp's: the library listing is cached with no
             # expiry, so this is the only way to see newly bought books.
             self._log_cb("Refreshing your DriveThruRPG library...")
-            self.client.pull_library(refresh=True)
+            try:
+                self.client.pull_library(refresh=True)
+            except Exception as exc:
+                # Port of TagApp's: carry on with the cached listing.
+                self._log(f"Couldn't refresh your library ({exc}); using the cached copy.")
         default_series: str | None = None
         if self.root_mode and len(self.pdfs) > 1 and self.metadata != "off" and not self.dry_run:
             default_series = self._ask("batch_series", {})

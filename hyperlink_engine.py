@@ -102,6 +102,34 @@ class Ref:
     is_index: bool = False
 
 
+def page_words(page):
+    """page.get_text("words"), extracted once per page and cached on the
+    page's own document (so the cache goes away with the document, and a
+    survey that opens one book after another can't mix them up). Building
+    MuPDF's text page is the expensive part, and setup used to do it up to
+    five times per page: numbering, TOC and Index detection, then linking.
+    Returns a copy, so a caller sorting or filtering can't change the
+    cache. Links added later don't change a page's words."""
+    cache = getattr(page.parent, "_hyperlink_words", None)
+    if cache is None:
+        cache = page.parent._hyperlink_words = {}
+    if page.number not in cache:
+        cache[page.number] = page.get_text("words")
+    return list(cache[page.number])
+
+
+def page_search(page, text):
+    """page.search_for(text), cached the same way: the same probe ("p. 34")
+    is searched for again for every reference on a page."""
+    cache = getattr(page.parent, "_hyperlink_searches", None)
+    if cache is None:
+        cache = page.parent._hyperlink_searches = {}
+    key = (page.number, text)
+    if key not in cache:
+        cache[key] = page.search_for(text)
+    return cache[key]
+
+
 class PageText:
     """One page's words and existing link rects, plus italic spans on
     demand (building them means a full "dict" extraction, so it's done only
@@ -110,7 +138,7 @@ class PageText:
     def __init__(self, page):
         self.page = page
         self.number = page.number
-        self.words = page.get_text("words")
+        self.words = page_words(page)
         self.existing = [l["from"] for l in page.get_links()]
         self._italic_spans = None
 
@@ -173,7 +201,7 @@ class PageMap:
 
 def bottom_words(page, band=FOOTER_BAND_POINTS):
     h = page.rect.height
-    return [w for w in page.get_text("words") if w[3] > h - band]
+    return [w for w in page_words(page) if w[3] > h - band]
 
 
 def footer_observations(doc):
@@ -183,7 +211,7 @@ def footer_observations(doc):
     for i in range(doc.page_count):
         for w in bottom_words(doc[i]):
             t = w[4].strip(".,")
-            if t.isdigit():
+            if t.isdecimal():  # not isdigit(): "²" passes that, then int() fails
                 obs.append((i, int(t)))
     return obs
 
@@ -208,7 +236,7 @@ def footer_vote(doc, use_labels=False):
         label_to_index = {}
         for i in range(doc.page_count):
             lab = doc[i].get_label()
-            if lab and lab.isdigit():
+            if lab and lab.isdecimal():
                 label_to_index.setdefault(int(lab), i)
         agree = sum(1 for i, n in obs if label_to_index.get(n) == i)
         if (len(label_to_index) >= max(10, doc.page_count // 2)
@@ -246,7 +274,7 @@ def band_vote(doc, fraction=0.10):
         for clip in (fitz.Rect(r.x0, r.y0, r.x1, r.y0 + band), fitz.Rect(r.x0, r.y1 - band, r.x1, r.y1)):
             for w in page.get_text("words", clip=clip):
                 tok = w[4].strip(".,:;|()[]")
-                if tok.isdigit() and 1 <= int(tok) <= 999:
+                if tok.isdecimal() and 1 <= int(tok) <= 999:
                     votes[i - int(tok)].add(i)
     if not votes:
         raise ValueError("Couldn't detect any page numbers in headers/footers")
@@ -291,7 +319,7 @@ def page_has_heading(page, keyword):
           heading at body size (Aliens of Charted Space vol. 2's 14.7pt
           "CONTENTS"). Body text is never printed twice in the same place."""
     h = page.rect.height
-    matches = [w for w in page.get_text("words") if w[4].strip(".,:").lower() == keyword]
+    matches = [w for w in page_words(page) if w[4].strip(".,:").lower() == keyword]
     for w in matches:
         height = w[3] - w[1]
         if height > 50:
@@ -323,7 +351,7 @@ def trailing_number_entries(page):
     line's last word, if it's a bare page number. Returns (rect, number,
     text) with the rect over just the number. Skips the page's own footer
     band -- a running footer page number can otherwise pass for an entry."""
-    words = page.get_text("words")
+    words = page_words(page)
     h = page.rect.height
     lines = defaultdict(list)
     for w in words:
@@ -334,7 +362,7 @@ def trailing_number_entries(page):
     for key in sorted(lines.keys()):
         last_w = max(lines[key], key=lambda w: w[0])
         num_str = last_w[4].strip(".,")
-        if num_str.isdigit():
+        if num_str.isdecimal():
             results.append((word_rect(last_w), int(num_str), last_w[4]))
     return results
 
@@ -360,7 +388,7 @@ INDEX_MIN_NUMBERS = 20
 
 def _line_groups(page):
     lines = defaultdict(list)
-    for w in page.get_text("words"):
+    for w in page_words(page):
         lines[(w[5], w[6])].append(w)
     return [sorted(ws, key=lambda w: w[7]) for ws in lines.values()]
 
@@ -420,7 +448,7 @@ def page_numbers_on(page, own_number=None, band_fraction=0.10):
     number is skipped there, not every number in the band."""
     h = page.rect.height
     out = []
-    for w in page.get_text("words"):
+    for w in page_words(page):
         m = LIST_NUMBER.match(w[4])
         if not m:
             continue
@@ -607,8 +635,9 @@ def page_word_list_refs(words, reference_words=("page", "pages", "p.", "pp."), s
     i = 0
     while i < len(words):
         word = words[i][4]
-        if not page_word.match(word) or (skip_capitalized and word[0].isupper()
-                                         and word.lower().startswith("page")):
+        bare = word.lstrip("(")  # "(Page 3 of 5)" is capitalized too
+        if not page_word.match(word) or (skip_capitalized and bare[:1].isupper()
+                                         and bare.lower().startswith("page")):
             i += 1
             continue
         nums = []
@@ -657,14 +686,14 @@ def extract_chapters(doc, toc_pages, target):
     chapters = []
     for i in sorted(toc_pages):
         lines = defaultdict(list)
-        for w in doc[i].get_text("words"):
+        for w in page_words(doc[i]):
             lines[(w[5], w[6])].append(w)
         line_words = [sorted(lines[k], key=lambda w: w[0]) for k in sorted(lines)]
 
         def strip_trailing_number(tw):
             while tw and re.match(r'^\.+$', tw[-1]):
                 tw = tw[:-1]
-            if tw and tw[-1].strip(".,").isdigit():
+            if tw and tw[-1].strip(".,").isdecimal():
                 return tw[:-1], tw[-1].strip(".,")
             return tw, None
 
@@ -795,7 +824,7 @@ def same_book_vocabulary(doc, toc_pages, index_pages):
     vocab = set()
     for i in toc_pages:
         lines = defaultdict(list)
-        for w in doc[i].get_text("words"):
+        for w in page_words(doc[i]):
             lines[(w[5], w[6])].append(w)
         for key in sorted(lines):
             ws = sorted(lines[key], key=lambda w: w[0])
@@ -811,10 +840,6 @@ def same_book_vocabulary(doc, toc_pages, index_pages):
                     vocab.add(norm)
     return vocab
 
-
-# ---------------------------------------------------------------------------
-# Rule sets
-# ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
 # Rule sets
@@ -1027,7 +1052,7 @@ def refine_rect(page, rect, probes):
     "p. 34" also matches the start of "p. 348" further along, and the old
     scripts linked that one to page 34 (seen in the combined Basic Set)."""
     for probe in probes:
-        near = [r for r in page.search_for(probe) if abs(r.y0 - rect.y0) < 2 and r.intersects(rect)]
+        near = [r for r in page_search(page, probe) if abs(r.y0 - rect.y0) < 2 and r.intersects(rect)]
         if near:
             return near[0]
     return rect
@@ -1047,6 +1072,7 @@ class Book:
         self.report = []
         self.trigger = None
         self.own_title_key = ""
+        self.own_known_title_key = ""
         self.known_titles_norm = frozenset(normalize_title(t) for t in rules.known_titles)
         self.known_title_keys = frozenset(title_key(t) for t in rules.known_titles)
         self._vocab = None
@@ -1069,6 +1095,20 @@ class Book:
 
     def target(self, n):
         return self.pages.target(n)
+
+    def _own_known_title(self):
+        """The longest of the rule set's `known_titles` this book's own title
+        contains, compared without the line's name (own_title_key has it
+        stripped): "Shadowrun, Sixth World" for the core rulebook, but
+        "Sixth World Companion" -- the longer match -- for the Companion,
+        whose title contains "Sixth World" too. Empty if none."""
+        line = title_key(self.rules.line_name)
+
+        def bare(key):
+            return (key.replace(line, "") or key) if line else key
+
+        found = [k for k in self.known_title_keys if bare(k) and bare(k) in self.own_title_key]
+        return max(found, key=lambda k: len(bare(k)), default="")
 
     def skip(self, pt, text, num, counter, reason):
         self.counts[counter] += 1
@@ -1113,6 +1153,7 @@ class Book:
             self.trigger = detect_trigger_word(doc, **rules.trigger_word)
             log(f"Other-book trigger word: {self.trigger!r}")
         self.own_title_key = self._own_title()
+        self.own_known_title_key = self._own_known_title()
 
         if self.toc_pages and rules.toc_already_linked(self, self.toc_pages):
             log("  Table of Contents already has links -- leaving it alone")
@@ -1155,9 +1196,9 @@ class Book:
         }
 
     def _link_ref(self, pt, ref):
-        if all(any(rects_meaningfully_overlap(rect, r) for r in pt.existing) for rect, _ in ref.links):
-            self.counts["skipped_existing"] += len(ref.links)
-            return
+        # Already-linked references are left to link(), which checks overlap
+        # on the trimmed rect and writes a report row. (An earlier check here
+        # used the untrimmed rect and counted the skip without a report row.)
         reason = self.rules.cross_book(self, pt, ref)
         if reason:
             for _, num in ref.links:
@@ -1204,7 +1245,7 @@ class Book:
                     probes += [f"{base} {n1}-{n2}", f"{base} {n1}–{n2}", f"{base} {n1} and {n2}"]
                 probes.append(f"{base} {valid_nums[0]}")
                 for probe in probes:
-                    hits = [r for r in page.search_for(probe)
+                    hits = [r for r in page_search(page, probe)
                             if any(abs(r.y0 - g.y0) < 2 and r.intersects(g) for g in rects)]
                     if hits:
                         rects = hits

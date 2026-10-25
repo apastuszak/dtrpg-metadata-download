@@ -504,8 +504,7 @@ def _add_hyperlink_picker(layout: QVBoxLayout) -> QComboBox:
 
 
 # ---------------------------------------------------------------------------
-# Shared rename/page-label logic for the Tag tab's dry run (the same
-# reasoning that moved cmd_scan's loop into matcher.run_scan_batch()).
+# Shared rename/page-label logic for the Tag tab's dry run.
 # None of these functions touch Qt (or touched tkinter before them) --
 # they take a plain `log` callable, so the Tk->Qt port needed no changes
 # to their bodies at all, only to their callers.

@@ -728,7 +728,12 @@ class TagApp(App[None]):
             # The library listing is cached with no expiry; this is the
             # only way to pick up books bought since it was last pulled.
             self.notify("Refreshing your DriveThruRPG library...", timeout=10)
-            await self._call(self.client.pull_library, refresh=True)
+            try:
+                await self._call(self.client.pull_library, refresh=True)
+            except Exception as exc:
+                # Offline, an expired key...: carry on with the cached
+                # listing rather than end the run before the first book.
+                self._log(f"Couldn't refresh your library ({exc}); using the cached copy.")
         default_series: str | None = None
         if self.root_mode and len(self.pdfs) > 1 and self.metadata != "off":
             default_series = await self.push_screen_wait(BatchSeriesModal())

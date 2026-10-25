@@ -301,6 +301,8 @@ def _run_hyperlink_step(path: Path, rules: str, log: Callable[[str], None] | Non
                 f"Added {result.added} page-reference, {result.chapter_added} chapter, "
                 f"{result.toc_added} TOC link(s) in {path.name}"
             )
+        if result.message:  # e.g. the link report couldn't be kept
+            _log_both(log, logging.WARNING, f"{path.name}: {result.message}")
 
 
 def write_metadata(

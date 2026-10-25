@@ -255,7 +255,7 @@ def mixed_case_title_after(max_words=6):
         if not following or following[0][0].lower().strip("(") not in ("of", "in"):
             return None
         rest = following[1:]
-        if rest and rest[0][0].isdigit():
+        if rest and rest[0][0].strip(".,;:)").isdecimal():  # "page 2 of 4." / "of 5)"
             return "other book: in-document page count (\"page N of M\")"
         if rest and rest[0][0].lower() == "the":
             rest = rest[1:]
@@ -342,13 +342,23 @@ def name_after_comma(words, end, max_words=6):
     return " ".join(phrase).split(",")[0].rstrip(").;:").strip() or None
 
 
+def is_own_title(book, key):
+    """Whether known-title `key` names this book. A key inside the book's
+    own title counts ("bodyshop" in Body Shop), and so does the book's own
+    known title (`Book.own_known_title_key`) when the line's name splits
+    them: own_title_key has "Shadowrun" stripped, so on the Sixth World core
+    rulebook "Shadowrun, Sixth World" was never found in it, and the book's
+    citations of itself were skipped as another book's."""
+    return bool(book.own_title_key) and key in book.own_title_key or key == book.own_known_title_key
+
+
 def known_title_prefix(book, words):
     """The longest start of `words` that is one of the rule set's
     `known_titles`, other than this book's own title -- or None."""
     for n in range(len(words), 0, -1):
         part = " ".join(words[:n])
         key = title_key(part)
-        if key and key in book.known_title_keys and not (book.own_title_key and key in book.own_title_key):
+        if key and key in book.known_title_keys and not is_own_title(book, key):
             return part.rstrip(".,;:)")
     return None
 

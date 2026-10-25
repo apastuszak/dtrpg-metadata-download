@@ -109,16 +109,23 @@ def run_hyperlink(
         os.replace(tmp_out_path, path)
         tmp_out_path = None  # already moved -- don't clean it up in finally
 
+        # The book is linked from here on, so a failure to keep the report
+        # is only a warning -- it must not report the whole step as failed.
         report_dest = path.with_name(f"{path.stem}_link_report.csv")
+        message = ""
         if tmp_report_path.exists():
-            os.replace(tmp_report_path, report_dest)
-            tmp_report_path = None
+            try:
+                os.replace(tmp_report_path, report_dest)
+                tmp_report_path = None
+            except OSError as exc:
+                message = f"links added, but the link report couldn't be saved as {report_dest.name}: {exc}"
 
         return HyperlinkResult(
             success=True,
             added=counts.get("added", 0),
             chapter_added=counts.get("chapter_added", 0),
             toc_added=counts.get("toc_added", 0),
+            message=message,
         )
     except Exception as exc:
         return HyperlinkResult(success=False, message=f"hyperlinking failed: {exc}")
