@@ -810,6 +810,7 @@ class TagApp(App[None]):
                 progress,
                 self.manual_overrides[path.name],
                 header=f"Manual override found for {path.name}:",
+                default_series=default_series,
             )
 
         if path.name in self.known_urls:
@@ -930,13 +931,13 @@ class TagApp(App[None]):
 
         # Moved here rather than by write_metadata()'s own back-cover step,
         # because only tag can ask about a back cover with no barcode.
-        await self._maybe_move_back_cover(path)
+        back_cover_second = await self._maybe_move_back_cover(path)
         result = await self._call(
             write_metadata, path, row, metadata=self.metadata, convert_images=self.convert_images,
             convert_grayscale=self.convert_grayscale,
             background_layer=self.background_layer, remove_background=self.remove_background,
             hyperlink=self.hyperlink,
-            page_labels=self.page_labels, log=log_line,
+            page_labels=self.page_labels, back_cover_second=back_cover_second, log=log_line,
         )
         self._log(describe_write(path, result, self.metadata))
         if result.success and self.rename:
@@ -944,14 +945,14 @@ class TagApp(App[None]):
             if outcome:
                 self._log(outcome)
 
-    async def _maybe_move_back_cover(self, path: Path) -> None:
+    async def _maybe_move_back_cover(self, path: Path) -> bool:
         """--back-cover-to-page-2/--back-cover-to-end for one file: a
         barcode locates the back cover automatically; with no barcode, ask
         about the candidate page (PDF-only releases usually have none).
         Backs up first, same as watermark removal, since this runs before
         write_metadata() makes its own backup."""
         if not (self.back_cover_to_page_2 or self.back_cover_to_end):
-            return
+            return False
         to = "page-2" if self.back_cover_to_page_2 else "end"
         self.notify(f"Looking for the back cover of {path.name}...", timeout=6, markup=False)
         location = await self._call(locate_back_cover, path, to)
@@ -964,17 +965,20 @@ class TagApp(App[None]):
                 index, reason = question.page_index, "confirmed by you"
             else:
                 self._log(f"Back cover not moved for {path.name} (PDF page {question.page_index + 1} isn't the back cover)")
-                return
+                return False
         if index is None:
             self._log(f"Back cover not moved for {path.name}: {reason}")
-            return
+            return False
         try:
             await self._call(backup, path)
         except OSError as exc:
             self._log(f"Back cover not moved for {path.name}: backup failed: {exc}")
-            return
+            return False
         result = await self._call(move_back_cover, path, to, index, reason)
         self._log(f"{path.name}: {result.message}" if result.moved else f"Back cover not moved for {path.name}: {result.message}")
+        # Page labels need to know: a cover with no barcode, confirmed by
+        # hand, is invisible to their own barcode check.
+        return to == "page-2" and (result.moved or index == 1)
 
     async def _call(self, fn, *args, **kwargs):
         """Run a blocking call (pikepdf/requests I/O) off the event loop

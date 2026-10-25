@@ -456,9 +456,14 @@ class DtrpgClient:
             product_ids = product_ids[:limit]
 
         results = [self._fetch_product_detail(pid) for pid in product_ids]
+        complete = all(r is not None for r in results)
         results = [r for r in results if r is not None]
 
-        if use_cache:
+        # Cached only when every product lookup succeeded: the cache never
+        # expires, so a lookup that failed once (an HTTP 503, a timeout)
+        # used to drop that book from this search's results for good, and
+        # the next run never asked again.
+        if use_cache and complete:
             self._catalog_cache[cache_key] = [
                 {
                     "title": r.title,

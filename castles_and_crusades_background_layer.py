@@ -30,7 +30,7 @@ illustrations, back-cover art) are correctly left untouched.
 import sys
 import argparse
 import pikepdf
-from pikepdf import Name, Dictionary, String
+from pikepdf import Array, Name, Dictionary, String
 
 
 # ---------------------------------------------------------------------------
@@ -207,6 +207,54 @@ def find_removal_span(instrs, do_index):
     return None
 
 
+def add_background_layer(pdf):
+    """The "Background" optional-content group, added to the PDF's existing
+    /OCProperties rather than replacing them: replacing the whole dictionary
+    dropped every other layer and its default visibility (a hidden layer
+    became visible). A "Background" layer from an earlier run is reused,
+    so running this twice doesn't list the layer twice."""
+    props = pdf.Root.get("/OCProperties")
+    if props is not None:
+        for existing in props.get("/OCGs", []):
+            if str(existing.get("/Name", "")) == "Background":
+                return existing
+    ocg = pdf.make_indirect(
+        Dictionary(
+            Type=Name.OCG,
+            Name=String("Background"),
+            Usage=Dictionary(
+                View=Dictionary(ViewState=Name.ON),
+                Print=Dictionary(PrintState=Name.ON),
+            ),
+        )
+    )
+    if props is None:
+        pdf.Root.OCProperties = Dictionary(
+            OCGs=[ocg],
+            D=Dictionary(
+                Name=String("Default"),
+                ON=[ocg],
+                OFF=[],
+                Order=[ocg],
+                BaseState=Name.ON,
+            ),
+        )
+        return ocg
+    if "/OCGs" not in props:
+        props.OCGs = Array()
+    props.OCGs.append(ocg)
+    if "/D" not in props:
+        props.D = Dictionary(BaseState=Name.ON)
+    config = props.D
+    # On by default, whatever the existing BaseState says.
+    if "/ON" not in config:
+        config.ON = Array()
+    config.ON.append(ocg)
+    if "/Order" in config:
+        config.Order.append(ocg)
+    return ocg
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Tag or remove the full-page background on each page of a PDF."
@@ -245,26 +293,7 @@ def main():
     # Pass 3: classify and act.
     ocg = None
     if not args.remove:
-        ocg = pdf.make_indirect(
-            Dictionary(
-                Type=Name.OCG,
-                Name=String("Background"),
-                Usage=Dictionary(
-                    View=Dictionary(ViewState=Name.ON),
-                    Print=Dictionary(PrintState=Name.ON),
-                ),
-            )
-        )
-        pdf.Root.OCProperties = Dictionary(
-            OCGs=[ocg],
-            D=Dictionary(
-                Name=String("Default"),
-                ON=[ocg],
-                OFF=[],
-                Order=[ocg],
-                BaseState=Name.ON,
-            ),
-        )
+        ocg = add_background_layer(pdf)
 
     changed = 0
     skipped = 0

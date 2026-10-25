@@ -628,12 +628,12 @@ class GuiApp(QWidget):
         layout.addWidget(tabs)
 
     def closeEvent(self, event) -> None:  # noqa: N802
-        # Unblocks the Tag tab's worker thread if it's mid-run waiting on
-        # a dialog answer that will now never come -- see TagTab.stop()'s
-        # own docstring for why this is a best-effort courtesy, not a
-        # correctness requirement.
-        self._tag_tab.stop()
-        super().closeEvent(event)
+        # During a run the window stays open until the current book is
+        # finished, then closes itself -- see TagTab.stop().
+        if self._tag_tab.stop():
+            super().closeEvent(event)
+        else:
+            event.ignore()
 
 
 def _log_uncaught_exception(exc_type, exc_value, tb) -> None:

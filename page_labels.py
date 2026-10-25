@@ -241,9 +241,12 @@ def plan_page_labels(
     return plan, summary
 
 
-def detect_page_labels(path: Path) -> tuple[PageLabelPlan | None, str]:
+def detect_page_labels(path: Path, back_cover_second: bool = False) -> tuple[PageLabelPlan | None, str]:
     """Read-only. Never raises -- an unreadable PDF is just one more reason
-    to leave its labels alone."""
+    to leave its labels alone. `back_cover_second` says the back cover is
+    known to be PDF page 2 -- tag just moved it there, possibly a cover
+    with no barcode that the user confirmed, which the barcode check below
+    can't see."""
     try:
         doc = fitz.open(path)
         try:
@@ -255,6 +258,9 @@ def detect_page_labels(path: Path) -> tuple[PageLabelPlan | None, str]:
             doc.close()
     except Exception as exc:
         return None, f"couldn't read the PDF: {exc}"
+    if back_cover_second:
+        plan, reason = plan_page_labels(numbers, back_cover_second=True)
+        return plan, reason
     last_blank = len(numbers) > 1 and page_is_blank(path, len(numbers) - 1)
     if wraparound or last_blank:
         plan, reason = plan_page_labels(numbers, no_back_cover=True)

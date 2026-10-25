@@ -132,6 +132,21 @@ def _score(query: str, noise_tokens: list[str], candidate: ProductMetadata) -> f
     return min(100.0, base + bonus)
 
 
+def _text(value) -> str:
+    """A manual_overrides.yaml value as text. YAML reads an unquoted
+    `isbn: 9781234567897`, `title: 1984` or `series: 1776` as a number,
+    and every consumer (the confirm screen's fields, the writers) expects
+    str -- an int ISBN made building the confirm dialog raise TypeError."""
+    return "" if value is None else str(value).strip()
+
+
+def _text_list(value) -> list[str]:
+    """A list field (authors, tags) as text; a single value written without
+    list syntax (`tags: Fantasy`) is one item, not split into letters."""
+    items = value if isinstance(value, (list, tuple)) else [value]
+    return [_text(v) for v in items if v is not None and _text(v)]
+
+
 def load_manual_overrides(path: str | Path) -> dict[str, ProductMetadata]:
     path = Path(path)
     if not path.exists():
@@ -168,7 +183,7 @@ def load_manual_overrides(path: str | Path) -> dict[str, ProductMetadata]:
                 filename, source_value,
             )
             source = Source.MANUAL
-        product_url = meta.get("product_url") or ""
+        product_url = _text(meta.get("product_url"))
         # A manual override previously had no way to carry a product_id at
         # all -- an explicit `product_id:` key wins if given; otherwise
         # derive one from `product_url` the same way a pasted URL/id: is
@@ -176,21 +191,21 @@ def load_manual_overrides(path: str | Path) -> dict[str, ProductMetadata]:
         # reused rather than reimplemented). Without this, a manually
         # overridden book's dc:identifier is always empty, even when the
         # override entry links straight to the real DriveThruRPG listing.
-        product_id = str(meta.get("product_id") or "").strip()
+        product_id = _text(meta.get("product_id"))
         if not product_id and product_url:
             product_id = extract_product_id(product_url) or ""
         overrides[filename] = ProductMetadata(
-            title=meta.get("title") or "",
-            series=meta.get("series") or "",
-            series_index=str(meta.get("series_index") or ""),
-            publisher=meta.get("publisher") or "",
-            authors=list(meta.get("authors") or []),
-            tags=list(meta.get("tags") or []),
-            description=meta.get("description") or "",
+            title=_text(meta.get("title")),
+            series=_text(meta.get("series")),
+            series_index=_text(meta.get("series_index")),
+            publisher=_text(meta.get("publisher")),
+            authors=_text_list(meta.get("authors")),
+            tags=_text_list(meta.get("tags")),
+            description=_text(meta.get("description")),
             product_url=product_url,
             source=source,
             product_id=product_id,
-            isbn=meta.get("isbn") or "",
+            isbn=_text(meta.get("isbn")),
         )
     return overrides
 
@@ -227,9 +242,32 @@ def find_candidates(
     except Exception:
         logger.exception("Catalog search failed for %r", filename)
 
-    scored = [(c, _score(query, noise_tokens, c)) for c in candidates]
+    # The same product often comes back from both the library and the
+    # catalog; without merging, duplicates took up places in the top
+    # `limit` and crowded distinct books out. One entry per product ID,
+    # keeping the copy with more metadata (usually the catalog's) and the
+    # better of the two scores.
+    best: dict[str, tuple[ProductMetadata, float]] = {}
+    unidentified = []
+    for c in candidates:
+        score = _score(query, noise_tokens, c)
+        if not c.product_id:
+            unidentified.append((c, score))
+            continue
+        kept = best.get(c.product_id)
+        if kept is None:
+            best[c.product_id] = (c, score)
+        else:
+            meta = c if _richness(c) > _richness(kept[0]) else kept[0]
+            best[c.product_id] = (meta, max(score, kept[1]))
+    scored = list(best.values()) + unidentified
     scored.sort(key=lambda pair: pair[1], reverse=True)
     return scored[:limit]
+
+
+def _richness(meta: ProductMetadata) -> int:
+    """How many of the optional fields a match has filled in."""
+    return sum(bool(v) for v in (meta.description, meta.tags, meta.authors, meta.isbn, meta.publisher, meta.series))
 
 
 def row_from_match(filename: str, meta: ProductMetadata, score: float, status: Status) -> ReviewRow:

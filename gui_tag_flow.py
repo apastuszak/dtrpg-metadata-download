@@ -213,6 +213,9 @@ class TagFlowController:
 
         stopped = False
         for i, path in enumerate(self.pdfs, 1):
+            if self.stop_event.is_set():  # the window is closing: no next book
+                stopped = True
+                break
             if self._process_one(path, self._progress(i), default_series):
                 stopped = True
                 break
@@ -271,6 +274,7 @@ class TagFlowController:
             return self._confirm_and_write(
                 path, progress, self.manual_overrides[path.name],
                 header=f"Manual override found for {path.name}:",
+                default_series=default_series,
             )
 
         if path.name in self.known_urls:
@@ -372,11 +376,11 @@ class TagFlowController:
         series = self._ask("series", {"book_title": meta.title})
         return replace(meta, series=series) if series else meta
 
-    def _maybe_move_back_cover(self, path: Path) -> None:
+    def _maybe_move_back_cover(self, path: Path) -> bool:
         """Port of TagApp._maybe_move_back_cover() -- see it for why this
         lives in tag rather than write_metadata()."""
         if not (self.back_cover_to_page_2 or self.back_cover_to_end):
-            return
+            return False
         to = "page-2" if self.back_cover_to_page_2 else "end"
         self._log_cb(f"Looking for the back cover of {path.name}...")
         location = locate_back_cover(path, to)
@@ -387,18 +391,21 @@ class TagFlowController:
                 confirmed = self._ask("back_cover", {"book_title": path.name, "question": question})
             if not confirmed:
                 self._log(f"Back cover not moved for {path.name} (PDF page {question.page_index + 1} isn't the back cover)")
-                return
+                return False
             index, reason = question.page_index, "confirmed by you"
         if index is None:
             self._log(f"Back cover not moved for {path.name}: {reason}")
-            return
+            return False
         try:
             backup(path)
         except OSError as exc:
             self._log(f"Back cover not moved for {path.name}: backup failed: {exc}")
-            return
+            return False
         result = move_back_cover(path, to, index, reason)
         self._log(f"{path.name}: {result.message}" if result.moved else f"Back cover not moved for {path.name}: {result.message}")
+        # Page labels need to know: a cover with no barcode, confirmed by
+        # hand, is invisible to their own barcode check.
+        return to == "page-2" and (result.moved or index == 1)
 
     def _write_and_maybe_rename(self, path: Path, row: ReviewRow) -> None:
         # This controller already runs entirely on its own single worker
@@ -407,13 +414,13 @@ class TagFlowController:
         # callback (TagWorker._log, which just emits a Qt signal -- safe
         # from any thread) -- safe to call directly here with no
         # marshaling back to the GUI thread.
-        self._maybe_move_back_cover(path)
+        back_cover_second = self._maybe_move_back_cover(path)
         result = write_metadata(
             path, row, metadata=self.metadata, convert_images=self.convert_images,
             convert_grayscale=self.convert_grayscale,
             background_layer=self.background_layer, remove_background=self.remove_background,
             hyperlink=self.hyperlink,
-            page_labels=self.page_labels, log=self._log,
+            page_labels=self.page_labels, back_cover_second=back_cover_second, log=self._log,
         )
         self._log(describe_write(path, result, self.metadata))
         if result.success and self.rename:
@@ -1019,6 +1026,7 @@ class TagTab(QWidget):
         layout.addWidget(self.log_widget, 1)
 
         self.stop_event = threading.Event()
+        self.close_when_done = False
         self._thread: QThread | None = None
         self._worker: TagWorker | None = None
 
@@ -1111,22 +1119,23 @@ class TagTab(QWidget):
         self._thread = None
         self._worker = None
         self.start_button.setEnabled(True)
+        if self.close_when_done:
+            self.window().close()
 
-    def stop(self) -> None:
-        """Called when the whole GUI window is closing. Setting
-        stop_event ensures the worker's *next* TagFlowController._ask()
-        call returns a quit result immediately rather than emitting a
-        fresh dialog request. Unlike the Tkinter version, there's no
-        separate pending-request backlog to drain here:
-        `_on_dialog_requested` runs `.exec()` synchronously on the GUI
-        thread, so by the time this method can even run, no dialog
-        request is left unanswered -- a modal dialog blocks the entire
-        GUI event loop while it's up, so the window can't be in the
-        process of closing at the same time one is open. The remaining
-        case (the worker still blocked on in-flight network/pikepdf I/O,
-        with no `_ask()` call pending yet) is simply abandoned, the same
-        as the Tkinter version's daemon thread was."""
+    def stop(self) -> bool:
+        """Called when the whole GUI window is closing. Returns True if it
+        can close now, or False while a run is still going -- the caller
+        must then keep the window open: destroying a QThread whose worker
+        is still in run() aborts the whole process, and the worker can't be
+        interrupted mid-call (network or pikepdf I/O, where a cut-off
+        metadata save could also damage the book). Instead stop_event is
+        set, so the worker answers any next dialog with "quit" and doesn't
+        start another book, and the window closes itself when the current
+        book is done (`close_when_done`, see _on_run_finished)."""
         self.stop_event.set()
-        if self._thread is not None and self._thread.isRunning():
-            self._thread.quit()
-            self._thread.wait(200)
+        if self._thread is None or not self._thread.isRunning():
+            return True
+        if not self.close_when_done:
+            self.close_when_done = True
+            self._log_line("Closing: finishing the current book first...")
+        return False

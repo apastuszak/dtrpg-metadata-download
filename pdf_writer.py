@@ -84,7 +84,9 @@ mode's choice (METADATA_MODES below).
 from __future__ import annotations
 
 import logging
+import os
 import shutil
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -236,7 +238,20 @@ def backup(path: Path) -> Path:
     instead of the true original."""
     backup_path = path.with_suffix(path.suffix + ".bak")
     if not backup_path.exists():
-        shutil.copy2(path, backup_path)
+        # Copied to a hidden temp file first and moved into place only once
+        # complete: a copy cut short (disk full, a killed run) used to leave
+        # a partial .bak that every later run trusted, because it exists.
+        tmp_fd, tmp_name = tempfile.mkstemp(suffix=".bak", prefix=".dtrpg-tmp-", dir=str(path.parent))
+        os.close(tmp_fd)
+        try:
+            shutil.copy2(path, tmp_name)
+            os.replace(tmp_name, backup_path)
+        except BaseException:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+            raise
     else:
         logger.debug("Backup already exists for %s, leaving it as-is", path.name)
     return backup_path
@@ -315,6 +330,7 @@ def write_metadata(
     remove_background: bool = False,
     hyperlink: str | None = None,
     page_labels: bool = False,
+    back_cover_second: bool = False,
     log: Callable[[str], None] | None = None,
 ) -> WriteResult:
     """`log`, if given, is called with human-readable progress lines for
@@ -335,6 +351,9 @@ def write_metadata(
     is enforced up at the CLI (argparse mutually-exclusive group) and GUI
     (checking one un-checks the other) layers, not here; this function
     just runs whichever step(s) it's told to, in the order given below.
+
+    `back_cover_second` tells page-label detection the back cover is PDF
+    page 2 (tag moved it there; see detect_page_labels()).
 
     `metadata` is one of METADATA_MODES. With "off" and no other step
     asked for, the file isn't touched at all (not even backed up)."""
@@ -435,7 +454,7 @@ def write_metadata(
     label_plan: PageLabelPlan | None = None
     label_reason = ""
     if page_labels:
-        label_plan, label_reason = detect_page_labels(path)
+        label_plan, label_reason = detect_page_labels(path, back_cover_second=back_cover_second)
         if label_plan is None:
             _log_both(log, logging.WARNING, f"Page labels left unchanged for {path.name}: {label_reason}")
 

@@ -192,11 +192,12 @@ def plan_rename(pdf_path: Path, title: str | None = None, series: str | None = N
     return RenamePlan(pdf_path, new_stem)
 
 
-def _companion_pairs(pdf_path: Path, new_pdf_path: Path) -> list[tuple[Path, Path]]:
+def _companion_pairs(pdf_path: Path, new_pdf_path: Path, existing_only: bool = True) -> list[tuple[Path, Path]]:
     """(old, new) path pairs for the PDF plus every sidecar/backup that
     shares its stem — mirrors the exact naming logic pdf_writer.py and
     sidecar_writer.py use to derive those paths in the first place — for
-    whichever of those actually exist on disk."""
+    whichever of those actually exist on disk (or all of them, with
+    `existing_only=False`)."""
     pairs = [
         (pdf_path, new_pdf_path),
         (pdf_path.with_suffix(pdf_path.suffix + ".bak"), new_pdf_path.with_suffix(new_pdf_path.suffix + ".bak")),
@@ -205,7 +206,7 @@ def _companion_pairs(pdf_path: Path, new_pdf_path: Path) -> list[tuple[Path, Pat
         # Written by --hyperlink-gurps/--hyperlink-mongoose (rpg_hyperlink.py).
         (pdf_path.parent / f"{pdf_path.stem}_link_report.csv", new_pdf_path.parent / f"{new_pdf_path.stem}_link_report.csv"),
     ]
-    return [(old, new) for old, new in pairs if old.exists()]
+    return [(old, new) for old, new in pairs if old.exists() or not existing_only]
 
 
 @dataclass
@@ -223,7 +224,11 @@ def apply_rename(plan: RenamePlan, dry_run: bool = False) -> RenameResult:
     new_pdf_path = plan.pdf_path.with_name(plan.new_stem + plan.pdf_path.suffix)
     pairs = _companion_pairs(plan.pdf_path, new_pdf_path)
 
-    for old, new in pairs:
+    # Every companion name is checked, not just the ones this book has: an
+    # unrelated "<new name>.metadata.json" left at the target would
+    # otherwise become this book's sidecar after the rename, and the next
+    # read_title_and_series() would return that other book's title.
+    for old, new in _companion_pairs(plan.pdf_path, new_pdf_path, existing_only=False):
         # On a case-insensitive filesystem (the default on macOS/Windows),
         # a case-only rename like "sword worlds.pdf" -> "Sword Worlds.pdf"
         # has new.exists() true for the very file being renamed -- verified
@@ -231,7 +236,7 @@ def apply_rename(plan: RenamePlan, dry_run: bool = False) -> RenameResult:
         # already exists" even though nothing would actually collide.
         # samefile() distinguishes that from a real different file already
         # sitting at the target name.
-        if new.exists() and not new.samefile(old):
+        if new.exists() and not (old.exists() and new.samefile(old)):
             return RenameResult(plan.pdf_path, new_pdf_path, False, f"target already exists: {new.name}")
 
     if dry_run:

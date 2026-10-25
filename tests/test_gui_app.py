@@ -620,6 +620,52 @@ def test_tag_worker_run_catches_exception(app: QApplication) -> None:
     print("PASS: tag_worker_run_catches_exception")
 
 
+def test_close_during_run_waits_for_current_book(app: QApplication) -> None:
+    """Closing the window mid-run used to quit() the thread and wait 200 ms,
+    then destroy a QThread whose worker was still busy -- which aborts the
+    whole process ("QThread: Destroyed while thread is still running").
+    The window must stay open, finish the current book, skip the next one,
+    then close itself."""
+    import time
+    from gui_app import GuiApp
+    from pdf_writer import WriteResult
+
+    written = []
+
+    def slow_write(path, row, **kwargs):
+        time.sleep(0.6)  # long enough that the close lands mid-write
+        written.append(path.name)
+        return WriteResult(path.name, True, "ok")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        for name in ("A.pdf", "B.pdf"):
+            pikepdf.new().save(Path(tmp) / name)
+        window = GuiApp({})
+        tab = window._tag_tab
+        tab.root_radio.setChecked(True)
+        tab.path_edit.setText(tmp)
+        tab.metadata_combo.setCurrentIndex(tab.metadata_combo.findData("off"))
+        tab.page_labels_check.setChecked(True)  # something to do, so write_metadata() runs
+        window.show()
+        with (patch("gui_tag_flow.write_metadata", side_effect=slow_write),
+              patch("gui_tag_flow.detect_watermark", return_value=None)):
+            QTest.mouseClick(tab.start_button, Qt.MouseButton.LeftButton)
+            deadline = time.time() + 2
+            while tab._thread is None and time.time() < deadline:
+                app.processEvents()
+            time.sleep(0.2)
+            assert not window.close(), "the window closed while the worker was still running"
+            assert window.isVisible()
+            assert "finishing the current book" in tab.log_widget.toPlainText()
+            deadline = time.time() + 10
+            while window.isVisible() and time.time() < deadline:
+                app.processEvents()
+        assert not window.isVisible(), "the window never closed after the run finished"
+        assert tab._thread is None
+        assert written == ["A.pdf"], f"closing must stop before the next book: {written}"
+    print("PASS: close_during_run_waits_for_current_book")
+
+
 def test_controller_metadata_off_dry_run_then_write():
     """With metadata tagging off, Tag replaces the old Rename and Page
     Labels tabs: no matching (no client, no dialogs), a dry run that shows
@@ -742,6 +788,7 @@ NO_ARG_APP_TESTS = [
 APP_ARG_TESTS = [
     test_tag_worker_signal_round_trip,
     test_tag_worker_run_catches_exception,
+    test_close_during_run_waits_for_current_book,
     test_tag_tab_dropdowns_pass_choices,
 ]
 

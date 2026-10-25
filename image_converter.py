@@ -85,6 +85,10 @@ _ICC_RGB_PROFILE_PATHS = [
 _srgb_icc_bytes = None
 _srgb_icc_load_attempted = False
 
+# Image dictionary keys that describe the image's role rather than its
+# pixels, kept when an image is re-encoded (see convert_images_to_rgb()).
+KEEP_IMAGE_KEYS = ("OC", "Intent", "Interpolate", "Metadata", "StructParent", "Name", "ID")
+
 
 def _load_first_readable_file(paths: list[str]) -> bytes | None:
     """Return the raw bytes of the first path in `paths` that exists and can
@@ -318,6 +322,20 @@ def convert_images_to_rgb(path: Path, jpeg_quality: int = DEFAULT_QUALITY) -> Im
             else:
                 smask_entry = ""
 
+            # The new dictionary below replaces the old one outright, so
+            # keys that aren't about the image's encoding are carried over
+            # -- above all /OC, the image's optional-content layer:
+            # dropping it made a background tagged as a hidden layer
+            # (--background-layer) visible again.
+            kept_keys = {}
+            for key in KEEP_IMAGE_KEYS:
+                try:
+                    kind, value = doc.xref_get_key(xref, key)
+                except Exception:
+                    continue
+                if kind != "null":
+                    kept_keys[key] = value
+
             if use_lossless:
                 # Omit /Filter here -- update_stream(compress=True) adds
                 # /Filter /FlateDecode and /Length automatically.
@@ -347,6 +365,8 @@ def convert_images_to_rgb(path: Path, jpeg_quality: int = DEFAULT_QUALITY) -> Im
                 doc.update_object(xref, new_obj_def)
                 doc.update_stream(xref, jpeg_bytes, compress=False)
                 doc.xref_set_key(xref, "Filter", "/DCTDecode")
+            for key, value in kept_keys.items():
+                doc.xref_set_key(xref, key, value)
 
             total_converted += 1
 

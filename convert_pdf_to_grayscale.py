@@ -36,6 +36,7 @@ import argparse
 import subprocess
 import sys
 import tempfile
+import zlib
 from pathlib import Path
 
 import pikepdf
@@ -140,7 +141,11 @@ def strip_residual_jpx(pdf_path: Path, pdf: pikepdf.Pdf) -> int:
             gray = fitz.Pixmap(fitz.csGRAY, pix)
 
             obj = pdf.get_object((objnum, 0))
-            obj.write(gray.samples, filter=pikepdf.Name("/FlateEncode"))
+            # write(data, filter=F) stores `data` as already encoded with F,
+            # so the samples are compressed here. (This used to pass the raw
+            # samples with "/FlateEncode" -- not a PDF filter -- which
+            # Ghostscript rendered blank and pikepdf couldn't read.)
+            obj.write(zlib.compress(gray.samples), filter=pikepdf.Name("/FlateDecode"))
             obj.ColorSpace = pikepdf.Name("/DeviceGray")
             obj.BitsPerComponent = 8
             if "/DecodeParms" in obj:
@@ -152,6 +157,21 @@ def strip_residual_jpx(pdf_path: Path, pdf: pikepdf.Pdf) -> int:
     return len(targets)
 
 
+def copy_across(src: pikepdf.Pdf, out: pikepdf.Pdf, value):
+    """`value` from `src`, usable in `out`. An indirect object (a /Title
+    stored as its own object) has to go through copy_foreign() -- assigning
+    it raises ForeignObjectError -- but copy_foreign() refuses a direct one,
+    and a direct dictionary or array (a /PageLabels dict written inline, as
+    PyMuPDF's set_page_labels() does) can still hold indirect references.
+    So a direct container is made indirect in `src` first (only in memory;
+    `src` is never saved), and plain values are assigned as they are."""
+    if value.is_indirect:
+        return out.copy_foreign(value)
+    if isinstance(value, (pikepdf.Dictionary, pikepdf.Array)):
+        return out.copy_foreign(src.make_indirect(value))
+    return value
+
+
 def restore_metadata_and_labels(original: Path, converted: Path, final: Path,
                                  keep_producer: bool,
                                  keep_color_pages: "set[int]" = frozenset()) -> None:
@@ -159,19 +179,25 @@ def restore_metadata_and_labels(original: Path, converted: Path, final: Path,
     then swap back in any pages (0-indexed) that should stay in their
     original color instead of the grayscale-converted version."""
     with pikepdf.open(original) as src, pikepdf.open(converted) as out:
-        # Restore XMP + DocInfo metadata
-        with src.open_metadata() as src_meta, out.open_metadata() as out_meta:
-            out_meta.load_from_docinfo(src.docinfo)
-            out_meta.update(src_meta)
-            if not keep_producer:
+        # Restore XMP + DocInfo metadata. The XMP packet is copied as the
+        # original stream, byte for byte -- going through pikepdf's
+        # metadata API (open_metadata().update()) flattened structured
+        # properties: a Calibre-tagged book's calibre:series ("My Series #2"
+        # in Calibre) came out with no series at all.
+        if "/Metadata" in src.Root:
+            out.Root.Metadata = out.copy_foreign(src.Root.Metadata)
+        elif "/Metadata" in out.Root:
+            del out.Root.Metadata  # Ghostscript's own packet; the original had none
+        for key, value in src.docinfo.items():
+            if key == "/Producer" and not keep_producer:
                 # Let Ghostscript's Producer stand, showing the file was
-                # regenerated — comment out this branch to fully spoof
-                # the original Producer string instead.
-                pass
+                # regenerated.
+                continue
+            out.docinfo[key] = copy_across(src, out, value)
 
         # Restore page labels (e.g. roman numerals for front matter)
         if "/PageLabels" in src.Root:
-            out.Root.PageLabels = out.copy_foreign(src.Root.PageLabels)
+            out.Root.PageLabels = copy_across(src, out, src.Root.PageLabels)
 
         jpx_fixed = strip_residual_jpx(converted, out)
         if jpx_fixed:
@@ -187,7 +213,9 @@ def restore_metadata_and_labels(original: Path, converted: Path, final: Path,
             for idx in keep_color_pages:
                 out.pages[idx] = src.pages[idx]
 
-        out.save(final)
+        # fix_metadata_version=False: pikepdf's default rewrites the XMP
+        # packet on save, which is exactly what was just avoided above.
+        out.save(final, fix_metadata_version=False)
 
 
 def default_output_path(input_path: Path) -> Path:
