@@ -205,11 +205,23 @@ class DtrpgClient:
         # is deliberately kept from ever surfacing that URL (dump or
         # exception message); see _dump_debug's redaction for the same
         # reasoning applied generically.
-        resp = self.session.post(
-            f"{API_BASE}/auth_key",
-            params={"applicationKey": self.api_key},
-            timeout=self.timeout,
-        )
+        failure = None
+        try:
+            resp = self.session.post(
+                f"{API_BASE}/auth_key",
+                params={"applicationKey": self.api_key},
+                timeout=self.timeout,
+            )
+        except requests.exceptions.RequestException as exc:
+            # A connection error or timeout's message names the full
+            # request URL -- key included ("Max retries exceeded with url:
+            # /api/vivid/auth_key?applicationKey=..."), and callers log or
+            # show it. Only the exception's type is kept, and the new error
+            # is raised outside this block so it doesn't even carry the
+            # original as its __context__.
+            failure = f"auth_key request failed ({type(exc).__name__}: couldn't reach DriveThruRPG)"
+        if failure:
+            raise DtrpgApiError(failure)
         if resp.status_code == 401:
             raise DtrpgApiError(
                 "DriveThruRPG rejected the application key (401). Generate a new "
@@ -521,7 +533,13 @@ class DtrpgClient:
             logger.warning("Product detail lookup failed for id=%s (HTTP %d)", product_id, resp.status_code)
             self._dump_debug(f"product_detail_{product_id}", resp)
             return None
-        data = self._parse_json(resp, context=f"product detail {product_id}")
+        try:
+            data = self._parse_json(resp, context=f"product detail {product_id}")
+        except DtrpgApiError as exc:
+            # HTTP 200 with a body that isn't JSON: same "return None,
+            # never raise" contract as every other failure here.
+            logger.warning("%s", exc)
+            return None
         try:
             return self._parse_product_detail(data, product_id)
         except (KeyError, TypeError) as exc:
