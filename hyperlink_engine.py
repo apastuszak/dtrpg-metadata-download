@@ -56,7 +56,7 @@ import pymupdf as fitz  # PyMuPDF -- `import fitz` is the deprecated alias
 
 import hyperlink_checks as checks  # noqa: F401 -- re-exported for rule sets
 from hyperlink_checks import normalize_title, title_key
-from provenance import is_filename_title
+from provenance import derive_query, is_filename_title
 
 NBSP = " "
 OTHER_SPACES = "   "  # regular space, nbsp, punctuation space
@@ -352,16 +352,11 @@ def trailing_number_entries(page):
     line's last word, if it's a bare page number. Returns (rect, number,
     text) with the rect over just the number. Skips the page's own footer
     band -- a running footer page number can otherwise pass for an entry."""
-    words = page_words(page)
     h = page.rect.height
-    lines = defaultdict(list)
-    for w in words:
-        if w[3] > h - FOOTER_BAND_POINTS:
-            continue
-        lines[(w[5], w[6])].append(w)
+    words = [w for w in page_words(page) if w[3] <= h - FOOTER_BAND_POINTS]
     results = []
-    for key in sorted(lines.keys()):
-        last_w = max(lines[key], key=lambda w: w[0])
+    for ws in _line_groups(words, _by_x):
+        last_w = ws[-1]
         num_str = last_w[4].strip(".,")
         if num_str.isdecimal():
             results.append((word_rect(last_w), int(num_str), last_w[4]))
@@ -387,11 +382,17 @@ TOC_MIN_ENTRIES = 5
 INDEX_MIN_NUMBERS = 20
 
 
-def _line_groups(page):
+def _line_groups(words, order=lambda w: w[7]):
+    """`words` grouped into visual lines (block, line), in reading order,
+    each line's words sorted by `order` (word number, or x position)."""
     lines = defaultdict(list)
-    for w in page_words(page):
+    for w in words:
         lines[(w[5], w[6])].append(w)
-    return [sorted(ws, key=lambda w: w[7]) for ws in lines.values()]
+    return [sorted(lines[k], key=order) for k in sorted(lines)]
+
+
+def _by_x(w):
+    return w[0]
 
 
 def dot_leader_entries(page, last_printed):
@@ -399,7 +400,7 @@ def dot_leader_entries(page, last_printed):
     printed number, report text). Handles the entry, leader and number
     coming out as one word ("Recovery..........75")."""
     entries = []
-    for ws in _line_groups(page):
+    for ws in _line_groups(page_words(page)):
         if len(ws) == 1:
             m = re.match(r"^(.*?[^.…\s])[.…]{2,}(\d{1,3})$", ws[0][4])
             if m and int(m.group(2)) <= last_printed:
@@ -436,6 +437,10 @@ def front_matter_toc_pages(doc, last_printed):
 
 def is_large_heading(page, word):
     """`word` set as a heading: at least 14pt and 80% of the page's largest text."""
+    # The cached words first: a "dict" extraction is the costliest text
+    # mode, and most pages a search looks at don't have the word at all.
+    if not any(word in w[4].lower() for w in page_words(page)):
+        return False
     spans = [s for b in page.get_text("dict")["blocks"] for l in b.get("lines", []) for s in l["spans"]]
     if not spans:
         return False
@@ -550,9 +555,9 @@ def _ref_probes(text, num, range_end):
     return probes
 
 
-def abbreviated_refs(words, page_words=("p.", "pp."), resolve_ranges=False):
+def abbreviated_refs(words, reference_words=("p.", "pp."), resolve_ranges=False):
     """'p. 12' / 'pp. 12-13' / 'p.12' (one word) style references, plus
-    'page 12' / 'pages 12-13' when `page_words` includes them. One link per
+    'page 12' / 'pages 12-13' when `reference_words` includes them. One link per
     reference, to its first page. Returns (refs, consumed word indices)."""
     refs = []
     consumed = set()
@@ -571,7 +576,7 @@ def abbreviated_refs(words, page_words=("p.", "pp."), resolve_ranges=False):
             j += 1
             continue
         bare_tok = re.sub(r'^\W+', '', tok).lower()
-        if bare_tok in page_words and j + 1 < len(words):
+        if bare_tok in reference_words and j + 1 < len(words):
             parsed = _parse_ref_number(words[j + 1][4], resolve_ranges)
             if parsed:
                 num, code, end = parsed
@@ -686,10 +691,7 @@ def extract_chapters(doc, toc_pages, target):
     362'), the page number possibly on one of the next few lines."""
     chapters = []
     for i in sorted(toc_pages):
-        lines = defaultdict(list)
-        for w in page_words(doc[i]):
-            lines[(w[5], w[6])].append(w)
-        line_words = [sorted(lines[k], key=lambda w: w[0]) for k in sorted(lines)]
+        line_words = _line_groups(page_words(doc[i]), _by_x)
 
         def strip_trailing_number(tw):
             while tw and re.match(r'^\.+$', tw[-1]):
@@ -824,11 +826,7 @@ def same_book_vocabulary(doc, toc_pages, index_pages):
     """This book's own TOC section titles and Index terms, normalized."""
     vocab = set()
     for i in toc_pages:
-        lines = defaultdict(list)
-        for w in page_words(doc[i]):
-            lines[(w[5], w[6])].append(w)
-        for key in sorted(lines):
-            ws = sorted(lines[key], key=lambda w: w[0])
+        for ws in _line_groups(page_words(doc[i]), _by_x):
             norm = normalize_title(" ".join(w[4] for w in ws if not w[4].strip(".,").isdigit()).strip(" ."))
             if len(norm) > 2:
                 vocab.add(norm)
@@ -978,9 +976,13 @@ class RuleSet:
 
     def index_refs(self, book, pt, consumed):
         if self.index_numbers == "all_but_own_number":
+            # Not the numbers of references body_refs() already found --
+            # those were linked or skipped there, and a skipped "(p. 72,
+            # SR6)" mustn't be linked here as an Index entry instead.
+            used = {pt.words[j][5:8] for j in consumed}
             own = book.pages.printed(pt.number)
             return [Ref(0, 0, f"Index: {w[4]}", [(word_rect(w), num)], is_index=True)
-                    for w, num in page_numbers_on(pt.page, own_number=own)]
+                    for w, num in page_numbers_on(pt.page, own_number=own) if w[5:8] not in used]
         return bare_number_refs(pt.words, pt.page.rect.height, consumed)
 
     def cross_book(self, book, pt, ref):
@@ -1092,7 +1094,9 @@ class Book:
         title = (self.doc.metadata or {}).get("title") or ""
         if is_filename_title(title):  # "Agents Handbook.indd": no title
             title = ""
-        key = title_key(title) or title_key(self.source_path.stem)
+        # A file name without its version and scan tags: "Agents_Handbook_v1.2"
+        # gave "agentshandbookv", which no citation of this book contains.
+        key = title_key(title) or title_key(derive_query(self.source_path.name)[0])
         line = title_key(self.rules.line_name)
         return (key.replace(line, "") or key) if line else key
 

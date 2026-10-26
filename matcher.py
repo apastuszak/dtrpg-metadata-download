@@ -11,32 +11,10 @@ import yaml
 from rapidfuzz import fuzz
 
 from dtrpg_client import DtrpgClient
-from provenance import ProductMetadata, Source, Status
+from provenance import ProductMetadata, Source, Status, derive_query
 from review import ReviewRow
 
 logger = logging.getLogger("matcher")
-
-# Tokens that are noisy for matching purposes (scanner/release artifacts,
-# not part of the actual title) but that we keep around after stripping,
-# since an edition/version token that also shows up in a candidate's
-# title is a useful tie-breaker rather than pure noise.
-NOISE_TOKEN_PATTERN = re.compile(
-    r"""(?ix)
-    \b(
-        ocr | scan | remaster(?:ed)? | v\d+(?:\.\d+)* |
-        \d+(?:st|nd|rd|th)\s*edition | \d+(?:\.\d+)?e | revised | reprint |
-        gmt | pdf
-    )\b
-    """
-)
-BRACKETED_PATTERN = re.compile(r"[\(\[\{][^)\]\}]*[\)\]\}]")
-
-# Publisher SKU/product codes (e.g. "MGP3800", "MGP40000"). DriveThruRPG's
-# catalog search endpoint isn't a fuzzy multi-token search — extra words
-# that don't appear in the actual product title (SKUs, edition shorthand
-# above) drive it to zero results rather than just ranking lower, so these
-# need to come out of the query entirely, not just get down-weighted.
-SKU_PATTERN = re.compile(r"\b[A-Z]{2,6}\d{3,}[A-Za-z0-9]*\b")
 
 # Lives alongside the PDFs it describes (in --root, or a single file's
 # parent directory), not in this project's data/ dir — so each folder of
@@ -108,27 +86,6 @@ def scan_pdfs(root: str | Path) -> list[Path]:
     # any dotfile, not just this specific prefix, matching how hidden
     # files are conventionally excluded from a file listing generally.
     return sorted(p for p in root.rglob("*.pdf") if p.is_file() and not p.name.startswith("."))
-
-
-def derive_query(filename: str) -> tuple[str, list[str]]:
-    """Turn a filename into a search query, plus a list of stripped
-    noise/edition tokens that can still inform scoring."""
-    stem = Path(filename).stem
-    # Noise comes out both before and after periods and hyphens become
-    # spaces: before, or "v1.23" loses only its "v1" and leaves "23";
-    # after, or "2nd-Edition" isn't seen as "2nd Edition".
-    stem = stem.replace("_", " ")
-    noise_tokens = [m.group(1).strip() for m in NOISE_TOKEN_PATTERN.finditer(stem)]
-    stem = NOISE_TOKEN_PATTERN.sub(" ", stem)
-    stem = stem.replace(".", " ").replace("-", " ")
-    noise_tokens += [m.group(1).strip() for m in NOISE_TOKEN_PATTERN.finditer(stem)]
-    stem = NOISE_TOKEN_PATTERN.sub(" ", stem)
-
-    noise_tokens += [m.group(0) for m in SKU_PATTERN.finditer(stem)]
-    stem = SKU_PATTERN.sub(" ", stem)
-    stem = BRACKETED_PATTERN.sub(" ", stem)
-    stem = re.sub(r"\s+", " ", stem).strip()
-    return stem, noise_tokens
 
 
 def _score(query: str, noise_tokens: list[str], candidate: ProductMetadata) -> float:

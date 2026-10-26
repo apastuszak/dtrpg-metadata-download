@@ -1104,6 +1104,11 @@ class TagTab(QWidget):
 
     @pyqtSlot(str, dict, object)
     def _on_dialog_requested(self, kind: str, payload: dict, response_q) -> None:
+        # A request already queued when the window was closed: answer it
+        # the way _ask() answers one made after, not with a dialog.
+        if self.stop_event.is_set():
+            response_q.put(TagFlowController.quit_result(kind))
+            return
         dialog = _DIALOG_CLASSES[kind](self, payload)
         dialog.exec()
         response_q.put(dialog.value)

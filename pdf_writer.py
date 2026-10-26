@@ -97,6 +97,7 @@ from lxml.etree import QName
 
 from image_converter import convert_images_to_rgb
 from page_labels import PageLabelPlan, detect_page_labels, set_page_labels
+from provenance import BOOKORBIT_NS, CALIBRE_NS, XMP_NS_RDF, XMP_NS_XMP, XMP_NS_XMPIDQ
 from review import ReviewRow
 from rpg_background_layer import apply_background_layer
 from rpg_grayscale import convert_pdf_grayscale
@@ -119,15 +120,9 @@ logger = logging.getLogger("pdf_writer")
 METADATA_MODES = ("off", "calibre", "grimmory", "bookorbit")
 DEFAULT_METADATA = "grimmory"
 
-CALIBRE_NS = "http://calibre-ebook.com/xmp-namespace"
 CALIBRE_PREFIX = "calibre"
-
-BOOKORBIT_NS = "https://bookorbit.app/metadata/1.0/"
 BOOKORBIT_PREFIX = "bookorbit"
 
-XMP_NS_RDF = "http://www.w3.org/1999/02/22-rdf-syntax-ns#"
-XMP_NS_XMP = "http://ns.adobe.com/xap/1.0/"
-XMP_NS_XMPIDQ = "http://ns.adobe.com/xmp/Identifier/qual/1.0/"
 XMP_NS_CALIBRE_SI = "http://calibre-ebook.com/xmp-namespace-series-index"
 
 
@@ -376,15 +371,31 @@ def write_metadata(
     page 2 (tag moved it there; see detect_page_labels()).
 
     `metadata` is one of METADATA_MODES. With "off" and no other step
-    asked for, the file isn't touched at all (not even backed up)."""
+    asked for, or only page labels that detection leaves unchanged, the
+    file isn't touched at all (not even backed up)."""
     if metadata not in METADATA_MODES:
         raise ValueError(f"unknown metadata mode {metadata!r} (expected one of {', '.join(METADATA_MODES)})")
     if not path.exists():
         return WriteResult(path.name, False, "file not found")
-    if metadata == "off" and not (
-        background_layer or remove_background or convert_images or convert_grayscale or hyperlink or page_labels
-    ):
+    other_steps = background_layer or remove_background or convert_images or convert_grayscale or hyperlink
+    if metadata == "off" and not (other_steps or page_labels):
         return WriteResult(path.name, True, "nothing to write (metadata off)")
+
+    # Read after every step below (they rewrite the file) and written in
+    # the same pikepdf save as the metadata -- labels live in the
+    # document catalog, not the metadata, so --metadata bookorbit's wipe
+    # doesn't touch them. Best-effort, like every other optional step.
+    # With nothing else to do, detected before the backup: a book whose
+    # labels are left unchanged isn't changed at all, so needs no .bak.
+    label_plan: PageLabelPlan | None = None
+    label_reason = ""
+    labels_detected = False
+    if page_labels and metadata == "off" and not other_steps:
+        label_plan, label_reason = detect_page_labels(path, back_cover_second=back_cover_second)
+        labels_detected = True
+        if label_plan is None:
+            _log_both(log, logging.WARNING, f"Page labels left unchanged for {path.name}: {label_reason}")
+            return WriteResult(path.name, True, "nothing to write (metadata off)")
 
     try:
         backup(path)
@@ -467,13 +478,7 @@ def write_metadata(
     if hyperlink:
         _run_hyperlink_step(path, hyperlink, log)
 
-    # Read after every step above (they rewrite the file) and written in
-    # the same pikepdf save as the metadata below -- labels live in the
-    # document catalog, not the metadata, so --metadata bookorbit's wipe
-    # doesn't touch them. Best-effort, like every other optional step.
-    label_plan: PageLabelPlan | None = None
-    label_reason = ""
-    if page_labels:
+    if page_labels and not labels_detected:
         label_plan, label_reason = detect_page_labels(path, back_cover_second=back_cover_second)
         if label_plan is None:
             _log_both(log, logging.WARNING, f"Page labels left unchanged for {path.name}: {label_reason}")

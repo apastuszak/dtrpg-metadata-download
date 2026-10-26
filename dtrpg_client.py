@@ -491,8 +491,9 @@ class DtrpgClient:
         "Mongoose"). A result count alone can't tell those apart, so we
         can't just retry-on-empty. Instead we always also query with the
         leading word dropped and union both result sets (deduped, then
-        the `limit` best by title score against either query), and let
-        the caller's local fuzzy scoring — which *can* tell a near-exact title match from a loosely-related one —
+        the `limit` best by title score against either query, before any
+        product lookup), and let the caller's local fuzzy scoring — which
+        *can* tell a near-exact title match from a loosely-related one —
         pick the winner from the wider pool.
 
         Results are cached to disk per the *original* query so repeated
@@ -502,32 +503,33 @@ class DtrpgClient:
         if use_cache and cache_key in self._catalog_cache:
             return [ProductMetadata(**item) for item in self._catalog_cache[cache_key]]
 
-        product_ids = self._catalog_search_ids(query, limit)
+        hits = dict(self._catalog_search_hits(query, limit))
 
         queries = [query]
         parts = query.split(maxsplit=1)
         if len(parts) == 2:
             fallback_query = parts[1]
             queries.append(fallback_query)
-            fallback_ids = self._catalog_search_ids(fallback_query, limit)
-            seen = set(product_ids)
-            for pid in fallback_ids:
-                if pid not in seen:
-                    seen.add(pid)
-                    product_ids.append(pid)
+            for pid, title in self._catalog_search_hits(fallback_query, limit):
+                hits.setdefault(pid, title)
+
+        # The limit applies to the union ranked by title, not to the IDs in
+        # order: cut there, six primary hits pushed out every fallback hit,
+        # the very results the fallback query exists to find. Ranked by the
+        # titles the search itself returns, so only the kept ones cost a
+        # product lookup. (A hit with no title scores 0; with none at all,
+        # the stable sort keeps search order.)
+        product_ids = list(hits)
+        if len(product_ids) > limit:
+            from rapidfuzz import fuzz
+
+            product_ids.sort(key=lambda pid: max(fuzz.token_sort_ratio(q, hits[pid]) for q in queries),
+                             reverse=True)
+            product_ids = product_ids[:limit]
 
         results = [self._fetch_product_detail(pid) for pid in product_ids]
         complete = all(r is not None for r in results)
         results = [r for r in results if r is not None]
-
-        # The limit applies after scoring the union, not to the IDs: cut
-        # there, six primary hits pushed out every fallback hit, the very
-        # results the fallback query exists to find.
-        if len(results) > limit:
-            from rapidfuzz import fuzz
-
-            results.sort(key=lambda r: max(fuzz.token_sort_ratio(q, r.title) for q in queries), reverse=True)
-            results = results[:limit]
 
         # Cached only when every product lookup succeeded: the cache never
         # expires, so a lookup that failed once (an HTTP 503, a timeout)
@@ -554,8 +556,10 @@ class DtrpgClient:
 
         return results
 
-    def _catalog_search_ids(self, query: str, limit: int) -> list[int | str]:
-        """One rate-limited catalog search request; returns product IDs."""
+    def _catalog_search_hits(self, query: str, limit: int) -> list[tuple[int | str, str]]:
+        """One rate-limited catalog search request; returns (product ID,
+        title) pairs -- the title from the same `description.name` field
+        product detail has, or "" if a hit doesn't carry one."""
         self._catalog_rate_limiter.wait()
         resp = self.session.get(
             f"{API_BASE}/products",
@@ -574,7 +578,7 @@ class DtrpgClient:
         )
         resp.raise_for_status()
         data = self._parse_json(resp, context=f"products search '{query}'")
-        product_ids: list[int | str] = []
+        hits: list[tuple[int | str, str]] = []
         try:
             # Observed live behavior is inconsistent with the JSON:API
             # envelope ({"data": [...]}) the older calibre plugin assumed —
@@ -584,11 +588,12 @@ class DtrpgClient:
             items = data if isinstance(data, list) else data.get("data", [])
             for product in items:
                 pid = product["productId"] if "productId" in product else product["attributes"]["productId"]
-                product_ids.append(pid)
+                title = (product.get("description") or {}).get("name") or ""
+                hits.append((pid, title if isinstance(title, str) else ""))
         except (KeyError, TypeError, AttributeError):
             self._dump_debug(f"products_search_{query.strip().lower()}", resp)
             raise DtrpgApiError(f"Unexpected shape from catalog search for '{query}'")
-        return product_ids
+        return hits
 
     def _fetch_product_detail(self, product_id: int | str) -> ProductMetadata | None:
         self._catalog_rate_limiter.wait()

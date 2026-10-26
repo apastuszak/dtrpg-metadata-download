@@ -37,17 +37,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from provenance import is_filename_title
+from provenance import BOOKORBIT_NS, CALIBRE_NS, XMP_NS_RDF, XMP_NS_XMP, XMP_NS_XMPIDQ, is_filename_title
 
 logger = logging.getLogger("renamer")
 
 _DC_NS = "http://purl.org/dc/elements/1.1/"
 _OPF_NS = "http://www.idpf.org/2007/opf"
-_RDF_NS = "http://www.w3.org/1999/02/22-rdf-syntax-ns#"
-_CALIBRE_NS = "http://calibre-ebook.com/xmp-namespace"  # pdf_writer.CALIBRE_NS
-_BOOKORBIT_NS = "https://bookorbit.app/metadata/1.0/"  # pdf_writer.BOOKORBIT_NS
-_XMP_NS = "http://ns.adobe.com/xap/1.0/"
-_XMPIDQ_NS = "http://ns.adobe.com/xmp/Identifier/qual/1.0/"
 
 _UNSAFE_CHARS_RE = re.compile(r'[/\\:*?"<>|\x00]')
 # Matches a colon with at least one trailing space, plus any surrounding
@@ -151,11 +146,11 @@ def _read_embedded_metadata(pdf_path: Path) -> tuple[str | None, str | None]:
     title = None
     if title_el is not None:
         # dc:title is an rdf:Alt of language alternatives; take the first
-        title = next((li.text for li in title_el.iter(f"{{{_RDF_NS}}}li") if li.text), title_el.text)
+        title = next((li.text for li in title_el.iter(f"{{{XMP_NS_RDF}}}li") if li.text), title_el.text)
     series = None
-    series_el = root.find(f".//{{{_CALIBRE_NS}}}series")
+    series_el = root.find(f".//{{{CALIBRE_NS}}}series")
     if series_el is not None:
-        series = series_el.findtext(f".//{{{_RDF_NS}}}value") or series_el.text
+        series = series_el.findtext(f".//{{{XMP_NS_RDF}}}value") or series_el.text
     title = (title or "").strip() or None
     series = (series or "").strip() or None
     # Publishers set dc:title too, so a title alone doesn't mean this file
@@ -166,10 +161,10 @@ def _read_embedded_metadata(pdf_path: Path) -> tuple[str | None, str | None]:
     # _write_embedded_metadata()); a file tagged with none of them (manual
     # entry with no URL, ISBN or series) is skipped rather than guessed at.
     schemes = {(el.text or "").strip().lower()
-               for ident in root.iter(f"{{{_XMP_NS}}}Identifier")
-               for el in ident.iter(f"{{{_XMPIDQ_NS}}}Scheme")}
+               for ident in root.iter(f"{{{XMP_NS_XMP}}}Identifier")
+               for el in ident.iter(f"{{{XMP_NS_XMPIDQ}}}Scheme")}
     tagged = (series_el is not None or schemes & {"dtrpg", "isbn"}
-              or root.find(f".//{{{_BOOKORBIT_NS}}}seriesName") is not None)
+              or root.find(f".//{{{BOOKORBIT_NS}}}seriesName") is not None)
     if not tagged or (title and is_filename_title(title)):
         return None, None
     return title, series
