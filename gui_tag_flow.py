@@ -47,6 +47,7 @@ to be doing at the same time.
 
 from __future__ import annotations
 
+import contextlib
 import queue
 import tempfile
 import threading
@@ -384,8 +385,14 @@ class TagFlowController:
         location = locate_back_cover(path, to)
         index, reason = location.index, location.reason
         if index is None and location.candidate is not None:
-            with tempfile.TemporaryDirectory(prefix="dtrpg-back-cover-") as tmp:
-                question = prepare_question(path, location, to, Path(tmp))
+            # No thumbnails rather than a failed run when the temp folder
+            # can't be created (full disk).
+            try:
+                thumbnails = tempfile.TemporaryDirectory(prefix="dtrpg-back-cover-")
+            except OSError:
+                thumbnails = contextlib.nullcontext(None)
+            with thumbnails as tmp:
+                question = prepare_question(path, location, to, Path(tmp) if tmp else None)
                 confirmed = self._ask("back_cover", {"book_title": path.name, "question": question})
             if not confirmed:
                 self._log(f"Back cover not moved for {path.name} (PDF page {question.page_index + 1} isn't the back cover)")

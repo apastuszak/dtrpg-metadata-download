@@ -174,11 +174,13 @@ def remove_watermark(
     except Exception as exc:
         return WatermarkRemovalResult(success=False, message=f"could not load watermark-removal script: {exc}")
 
-    tmp_fd, tmp_out_str = tempfile.mkstemp(suffix=".pdf", prefix=".dtrpg-tmp-", dir=str(path.parent))
-    os.close(tmp_fd)
-    tmp_out_path: Path | None = Path(tmp_out_str)
-
+    # Created inside the try, so a full disk or unwritable folder fails
+    # this step instead of escaping and stopping the batch.
+    tmp_out_path: Path | None = None
     try:
+        tmp_fd, tmp_out_str = tempfile.mkstemp(suffix=".pdf", prefix=".dtrpg-tmp-", dir=str(path.parent))
+        tmp_out_path = Path(tmp_out_str)
+        os.close(tmp_fd)
         doc = fitz.open(path)
         try:
             usage = Counter(xref for p in doc for xref in p.get_contents())

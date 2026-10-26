@@ -951,8 +951,13 @@ class TagApp(App[None]):
         location = await self._call(locate_back_cover, path, to)
         index, reason = location.index, location.reason
         if index is None and location.candidate is not None:
-            tmpdir = Path(tempfile.mkdtemp(prefix="dtrpg-back-cover-"))
-            self._tmpdirs.append(tmpdir)
+            # No thumbnails rather than a failed run when the temp folder
+            # can't be created (full disk).
+            try:
+                tmpdir = Path(tempfile.mkdtemp(prefix="dtrpg-back-cover-"))
+                self._tmpdirs.append(tmpdir)
+            except OSError:
+                tmpdir = None
             question = await self._call(prepare_question, path, location, to, tmpdir)
             if await self.push_screen_wait(BackCoverModal(path.name, question)):
                 index, reason = question.page_index, "confirmed by you"

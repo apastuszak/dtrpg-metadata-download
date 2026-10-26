@@ -80,14 +80,16 @@ def apply_background_layer(
         # degrade instead of crashing.
         return BackgroundLayerResult(success=False, message=f"expected vendored script missing: {BACKGROUND_LAYER_SCRIPT}")
 
-    # Hidden prefix -- see rpg_hyperlink.py's run_hyperlink() for
-    # why (a force-killed run must not leave a "book" scan_pdfs() would
-    # later try to match).
-    tmp_fd, tmp_out_str = tempfile.mkstemp(suffix=".pdf", prefix=".dtrpg-tmp-", dir=str(path.parent))
-    os.close(tmp_fd)
-    tmp_out_path: Path | None = Path(tmp_out_str)
-
+    # Created inside the try -- see rpg_hyperlink.py's run_hyperlink().
+    tmp_out_path: Path | None = None
     try:
+        # Hidden prefix -- see rpg_hyperlink.py's run_hyperlink() for
+        # why (a force-killed run must not leave a "book" scan_pdfs() would
+        # later try to match).
+        tmp_fd, tmp_out_str = tempfile.mkstemp(suffix=".pdf", prefix=".dtrpg-tmp-", dir=str(path.parent))
+        tmp_out_path = Path(tmp_out_str)
+        os.close(tmp_fd)
+
         cmd = [sys.executable, str(BACKGROUND_LAYER_SCRIPT), str(path), str(tmp_out_path)]
         if remove:
             cmd.append("--remove")

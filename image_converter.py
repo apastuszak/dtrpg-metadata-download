@@ -200,15 +200,17 @@ def _repair_xref(input_path: str) -> str | None:
     except ImportError:
         return None
 
-    tmp_fd, tmp_path = tempfile.mkstemp(suffix=".pdf")
-    os.close(tmp_fd)
+    tmp_path: str | None = None
     try:
+        tmp_fd, tmp_path = tempfile.mkstemp(suffix=".pdf")
+        os.close(tmp_fd)
         with pikepdf.open(input_path) as pdf:
             pdf.save(tmp_path)
         return tmp_path
     except Exception as exc:
         logger.debug("pikepdf xref repair skipped for %s: %s", input_path, exc)
-        _unlink_quietly(tmp_path)
+        if tmp_path is not None:
+            _unlink_quietly(tmp_path)
         return None
 
 

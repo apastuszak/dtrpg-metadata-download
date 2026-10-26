@@ -86,18 +86,23 @@ def run_hyperlink(
     if not path.exists():
         return HyperlinkResult(success=False, message="file not found")
 
-    # A hidden prefix (matching scan_pdfs()'s own dotfile skip in
-    # matcher.py) means a temp file left behind by a force-killed run
-    # can't later get picked up and "matched" as if it were a real book.
-    tmp_fd, tmp_out_str = tempfile.mkstemp(suffix=".pdf", prefix=".dtrpg-tmp-", dir=str(path.parent))
-    os.close(tmp_fd)
-    tmp_out_path = Path(tmp_out_str)
-    tmp_report_path = tmp_out_path.with_name(tmp_out_path.stem + "_link_report.csv")
-
     def quiet(line: str) -> None:
         pass
 
+    # Created inside the try, so a full disk or an unwritable folder fails
+    # this step like any other error instead of escaping write_metadata()
+    # and stopping a whole batch.
+    tmp_out_path: Path | None = None
+    tmp_report_path: Path | None = None
     try:
+        # A hidden prefix (matching scan_pdfs()'s own dotfile skip in
+        # matcher.py) means a temp file left behind by a force-killed run
+        # can't later get picked up and "matched" as if it were a real book.
+        tmp_fd, tmp_out_str = tempfile.mkstemp(suffix=".pdf", prefix=".dtrpg-tmp-", dir=str(path.parent))
+        tmp_out_path = Path(tmp_out_str)
+        tmp_report_path = tmp_out_path.with_name(tmp_out_path.stem + "_link_report.csv")
+        os.close(tmp_fd)
+
         counts = hyperlink_engine.hyperlink_pdf(
             str(path), str(tmp_out_path), rules, log=(log if log is not None else quiet))
 

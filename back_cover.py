@@ -118,8 +118,9 @@ class BackCoverQuestion:
     candidate_png: Path | None
 
 
-def prepare_question(path: Path, location: BackCoverLocation, to: str, tmpdir: Path) -> BackCoverQuestion:
-    """Thumbnails go in `tmpdir`, which the caller owns and removes."""
+def prepare_question(path: Path, location: BackCoverLocation, to: str, tmpdir: Path | None) -> BackCoverQuestion:
+    """Thumbnails go in `tmpdir`, which the caller owns and removes; with
+    no `tmpdir` (the caller couldn't create one) the question has none."""
     index = location.candidate
     assert index is not None
     try:
@@ -127,6 +128,8 @@ def prepare_question(path: Path, location: BackCoverLocation, to: str, tmpdir: P
             snippet = " ".join(doc[index].get_text("text").split())
     except Exception:
         snippet = ""
+    if tmpdir is None:
+        return BackCoverQuestion(index, location.page_count, to, snippet[:200], None, None)
     front, candidate = tmpdir / "front.png", tmpdir / "candidate.png"
     return BackCoverQuestion(
         index, location.page_count, to, snippet[:200],
@@ -166,10 +169,13 @@ def move_back_cover(
     if (to == "page-2" and where == 1) or (to == "end" and where != 1):
         return BackCoverMoveResult(False, f"already in place: {reason}")
 
-    tmp_fd, tmp_str = tempfile.mkstemp(suffix=".pdf", prefix=".dtrpg-tmp-", dir=str(path.parent))
-    os.close(tmp_fd)
-    tmp: Path | None = Path(tmp_str)
+    # Created inside the try, so a full disk or unwritable folder fails
+    # the move instead of escaping and stopping the batch.
+    tmp: Path | None = None
     try:
+        tmp_fd, tmp_str = tempfile.mkstemp(suffix=".pdf", prefix=".dtrpg-tmp-", dir=str(path.parent))
+        tmp = Path(tmp_str)
+        os.close(tmp_fd)
         with pikepdf.open(path) as pdf:
             count = len(pdf.pages)
             if where not in (1, count - 1):
