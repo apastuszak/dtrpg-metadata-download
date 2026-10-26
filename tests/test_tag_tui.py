@@ -358,6 +358,16 @@ async def test_manual_entry_multiline_description():
         app = TagApp(pdfs=[pdf], client=_client(), manual_overrides={}, known_urls={},
                      metadata="grimmory", rename=False, root_mode=False)
         multiline = "First paragraph.\n\nSecond paragraph, with more detail."
+        import tag_tui
+        real_write = tag_tui.write_metadata
+        written_ids = []
+
+        def spy_write(path, row, *args, **kwargs):
+            written_ids.append(row.product_id)
+            return real_write(path, row, *args, **kwargs)
+
+        spy = patch.object(tag_tui, "write_metadata", spy_write)
+        spy.start()
         async with app.run_test() as pilot:
             await pilot.pause()  # empty candidate screen (no candidates)
             await pilot.click("#manual")
@@ -366,6 +376,8 @@ async def test_manual_entry_multiline_description():
             await pilot.press(*"Manually Typed Book")
             desc = pilot.app.screen.query_one("#description", TextArea)
             desc.text = multiline
+            pilot.app.screen.query_one("#product_url", Input).value = (
+                "https://www.drivethrurpg.com/en/product/56586/manual-book")
             # The Submit button can fall below the visible area on a
             # standard terminal (this form has a lot of fields) -- use
             # the ctrl+s shortcut instead of clicking, exactly the fix
@@ -376,11 +388,15 @@ async def test_manual_entry_multiline_description():
             await pilot.pause()
             await pilot.press("enter")  # series dialog -- leave blank
             await pilot.pause(delay=0.2)
+        spy.stop()
 
         with pikepdf.open(pdf) as p:
             with p.open_metadata() as m:
                 assert m.get("dc:title") == "Manually Typed Book"
                 assert m.get("dc:description") == multiline, repr(m.get("dc:description"))
+        # The typed URL must also give the DriveThruRPG identifier, the
+        # way a manual_overrides.yaml product_url does.
+        assert written_ids == ["56586"], written_ids
         sidecar = json.loads((pdf.parent / "Manual.metadata.json").read_text())
         assert sidecar["metadata"]["description"] == multiline
     print("PASS: manual_entry_multiline_description (the actual feature)")

@@ -37,6 +37,7 @@ import os
 import re
 import stat
 import tempfile
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -58,6 +59,60 @@ API_BASE = "https://api.drivethrurpg.com/api/vBeta"
 # way out short of killing the process. 30s is generous for a single
 # request/response, not a total-run budget.
 DEFAULT_TIMEOUT_SECONDS = 30
+
+# The application key goes in auth_key's query string (see
+# _authenticate), and urllib3 logs request URLs: every request at DEBUG
+# (-v), and a "Retrying ... after connection broken by ...: <url>" WARNING
+# at the default level when a connection fails. Those records come from
+# urllib3's own loggers and reach whatever handler is installed (the TUI's
+# TextualHandler, the GUI's log pane, stderr), so the key is redacted when
+# each log record is created -- one place, for every logger and handler.
+# DtrpgClient registers its key here; nothing else needs to.
+_SECRETS: set[str] = set()
+_REDACTED = "***REDACTED***"
+_redaction_lock = threading.Lock()
+_redaction_installed = False
+
+
+def _redact(text: str) -> str:
+    for secret in _SECRETS:
+        text = text.replace(secret, _REDACTED)
+    return text
+
+
+def register_secret(secret: str | None) -> None:
+    """Keep secret out of every log record from now on."""
+    global _redaction_installed
+    # An empty secret is "in" every string -- redacting it would mangle
+    # every message (the same guard _dump_debug has).
+    if not secret:
+        return
+    with _redaction_lock:
+        _SECRETS.add(secret)
+        if _redaction_installed:
+            return
+        previous = logging.getLogRecordFactory()
+
+        def factory(*args, **kwargs):
+            record = previous(*args, **kwargs)
+            try:
+                message = record.getMessage()
+            except Exception:
+                return record  # let the handler report the bad format, as usual
+            if any(s in message for s in _SECRETS):
+                record.msg, record.args = _redact(message), None
+            if record.exc_info and record.exc_info[0] is not None:
+                # A traceback can carry the URL too (urllib3's
+                # MaxRetryError names it). Formatters use exc_text when
+                # it's already set, so format it here, redacted.
+                text = logging.Formatter().formatException(record.exc_info)
+                if any(s in text for s in _SECRETS):
+                    record.exc_text = _redact(text)
+            return record
+
+        logging.setLogRecordFactory(factory)
+        _redaction_installed = True
+
 
 # category/filter names that describe format, language, or site policy
 # rather than the book's actual subject matter — not useful as tags.
@@ -144,6 +199,7 @@ class DtrpgClient:
         timeout: float = DEFAULT_TIMEOUT_SECONDS,
     ):
         self.api_key = api_key
+        register_secret(api_key)
         self.cache_dir = Path(cache_dir)
         self.debug_dir = self.cache_dir / "debug"
         self.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -606,7 +662,7 @@ class DtrpgClient:
         # inserting the redaction marker between every character. Not
         # reachable via the CLI today (build_client() already refuses an
         # empty key before constructing this client), but cheap to guard.
-        url = resp.url.replace(self.api_key, "***REDACTED***") if self.api_key and self.api_key in resp.url else resp.url
+        url = resp.url.replace(self.api_key, _REDACTED) if self.api_key and self.api_key in resp.url else resp.url
         try:
             path.write_text(
                 f"URL: {url}\nStatus: {resp.status_code}\n\n{resp.text}",

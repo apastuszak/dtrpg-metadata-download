@@ -106,11 +106,15 @@ def build_manual_metadata(
 ) -> ProductMetadata | None:
     """Mirrors the old _prompt_manual_metadata()'s validation/construction.
     Returns None if Title is blank -- the same "cancel" signal as before.
+    A typed DriveThruRPG URL also gives product_id, the same way
+    load_manual_overrides() derives it -- without one, dc:identifier and
+    the sidecars' DriveThruRPG identifier are left empty.
     """
     title = title.strip()
     if not title:
         return None
     tags = [t.strip() for t in tags_raw.split(";") if t.strip()]
+    product_url = product_url.strip()
     return ProductMetadata(
         title=title,
         series=series.strip(),
@@ -118,9 +122,10 @@ def build_manual_metadata(
         publisher=publisher.strip(),
         tags=tags,
         description=description.strip(),
-        product_url=product_url.strip(),
+        product_url=product_url,
         source=Source.MANUAL,
         isbn=isbn.strip(),
+        product_id=(extract_product_id(product_url) or "") if product_url else "",
     )
 
 
@@ -141,13 +146,19 @@ def apply_edits(
     since they aren't hand-typed data (product_id in particular must stay
     whatever was actually matched/fetched, so dc:identifier and --rename
     still point at the right DriveThruRPG page even if the user tweaks
-    the title). Returns None if Title was cleared, the same "cancel"
-    signal as build_manual_metadata.
+    the title). Only hand-typed metadata (manual entry, or an override)
+    takes it from a URL typed here, and only when the URL names one.
+    Returns None if Title was cleared, the same "cancel" signal as
+    build_manual_metadata.
     """
     title = title.strip()
     if not title:
         return None
     tags = [t.strip() for t in tags_raw.split(";") if t.strip()]
+    product_url = product_url.strip()
+    product_id = meta.product_id
+    if product_url and (meta.source == Source.MANUAL or not product_id):
+        product_id = extract_product_id(product_url) or product_id
     return replace(
         meta,
         title=title,
@@ -157,7 +168,8 @@ def apply_edits(
         description=description.strip(),
         tags=tags,
         isbn=isbn.strip(),
-        product_url=product_url.strip(),
+        product_url=product_url,
+        product_id=product_id,
     )
 
 
