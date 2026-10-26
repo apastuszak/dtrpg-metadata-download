@@ -92,8 +92,12 @@ def joined_words(words, start, step, limit):
 
 def sentence_ends_at(words, i):
     """The word at `i` ends a sentence or clause ("(p. 174)." / "p. 12;"),
-    so what follows isn't about the reference: "(p. 174). In 1967, ..."."""
-    return words[i][4].rstrip("\u2019\u201d").endswith((".", ";", ":", "!", "?", ")"))
+    so what follows isn't about the reference: "(p. 174). In 1967, ...".
+    A bare closing parenthesis doesn't: "(page 85) of the Agent's
+    Handbook" and "(p. 233) in WWI: EWt." still go on to cite a book. A
+    sentence that ends inside the parentheses does: "(See page 2.) In
+    2020, ..." as well as "page 2). In 2020"."""
+    return words[i][4].rstrip("\u2019\u201d)]").endswith((".", ";", ":", "!", "?"))
 
 
 def is_caps(text):
@@ -164,7 +168,8 @@ def italic_known_title_before():
     def fn(book, pt, ref):
         words = pt.words
         i = ref.start - 1
-        while i >= 0 and words[i][4].strip("(),.;:").lower() in ("(", "see", "cf."):
+        # Compared stripped, so "cf." is "cf" and a lone "(" is "".
+        while i >= 0 and words[i][4].strip("(),.;:").lower() in ("", "see", "cf"):
             i -= 1
         run = []
         while i >= 0 and len(run) < LOOKBACK_WORDS_FOR_TITLE and pt.is_italic(i):
@@ -188,7 +193,7 @@ def known_title_before():
     def fn(book, pt, ref):
         words = pt.words
         i = ref.start - 1
-        while i >= 0 and words[i][4].strip("(),.;:").lower() in ("(", "see", "cf.", "in", "on"):
+        while i >= 0 and words[i][4].strip("(),.;:").lower() in ("", "see", "cf", "in", "on"):
             i -= 1
         run = []
         while i >= 0 and len(run) < LOOKBACK_WORDS_FOR_TITLE:

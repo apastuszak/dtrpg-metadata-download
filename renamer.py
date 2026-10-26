@@ -8,7 +8,10 @@ order (see pdf_writer.METADATA_MODES for which mode writes what):
 2. the BookOrbit `.opf` sidecar -- `dc:title` and
    `<meta name="calibre:series">`;
 3. the embedded Calibre XMP -- `dc:title`, and `calibre:series`'s nested
-   `rdf:value`, read from the raw XMP with lxml. pikepdf's public dict
+   `rdf:value`, read from the raw XMP with lxml. Only when the XMP also
+   has something only tagging writes (a Calibre series, a dtrpg/isbn
+   identifier, a BookOrbit series) and the title isn't a file name:
+   publishers set `dc:title` too. pikepdf's public dict
    API can't read that structured property back any more reliably than it
    can write it (see pdf_writer.py's module docstring), so it isn't used
    for the series. A file with a title but no series there is renamed
@@ -39,6 +42,15 @@ _DC_NS = "http://purl.org/dc/elements/1.1/"
 _OPF_NS = "http://www.idpf.org/2007/opf"
 _RDF_NS = "http://www.w3.org/1999/02/22-rdf-syntax-ns#"
 _CALIBRE_NS = "http://calibre-ebook.com/xmp-namespace"  # pdf_writer.CALIBRE_NS
+_BOOKORBIT_NS = "https://bookorbit.app/metadata/1.0/"  # pdf_writer.BOOKORBIT_NS
+_XMP_NS = "http://ns.adobe.com/xap/1.0/"
+_XMPIDQ_NS = "http://ns.adobe.com/xmp/Identifier/qual/1.0/"
+# "High Guard Cover.indd", "Banestorm Book.qxp": a publisher's export
+# left its file name in the title. Only real layout/document extensions --
+# "any short suffix after a dot" also matched "Rules 3.5e" and "v1.23".
+_FILENAME_TITLE_RE = re.compile(
+    r"\.(?:indd|indt|idml|qxp|qxd|qxt|pmd|p65|fm|book|doc|docx|rtf|odt|pages|txt|pdf|ai|eps)$",
+    re.IGNORECASE)
 
 _UNSAFE_CHARS_RE = re.compile(r'[/\\:*?"<>|\x00]')
 # Matches a colon with at least one trailing space, plus any surrounding
@@ -145,7 +157,23 @@ def _read_embedded_metadata(pdf_path: Path) -> tuple[str | None, str | None]:
     series_el = root.find(f".//{{{_CALIBRE_NS}}}series")
     if series_el is not None:
         series = series_el.findtext(f".//{{{_RDF_NS}}}value") or series_el.text
-    return (title or "").strip() or None, (series or "").strip() or None
+    title = (title or "").strip() or None
+    series = (series or "").strip() or None
+    # Publishers set dc:title too, so a title alone doesn't mean this file
+    # was tagged -- renaming an untagged book after its InDesign title
+    # ("High Guard Cover.indd.pdf") is exactly what "untagged files are
+    # skipped" promises not to do. Only tagging writes a Calibre series, a
+    # DriveThruRPG/ISBN identifier or a BookOrbit series (pdf_writer.py's
+    # _write_embedded_metadata()); a file tagged with none of them (manual
+    # entry with no URL, ISBN or series) is skipped rather than guessed at.
+    schemes = {(el.text or "").strip().lower()
+               for ident in root.iter(f"{{{_XMP_NS}}}Identifier")
+               for el in ident.iter(f"{{{_XMPIDQ_NS}}}Scheme")}
+    tagged = (series_el is not None or schemes & {"dtrpg", "isbn"}
+              or root.find(f".//{{{_BOOKORBIT_NS}}}seriesName") is not None)
+    if not tagged or (title and _FILENAME_TITLE_RE.search(title)):
+        return None, None
+    return title, series
 
 
 def read_title_and_series(pdf_path: Path) -> tuple[str | None, str | None, str | None]:

@@ -57,7 +57,7 @@ from pathlib import Path
 import pymupdf as fitz
 
 import hyperlink_engine as engine
-from hyperlink_checks import is_caps, joined_words, name_after_comma, normalize_title, title_key
+from hyperlink_checks import is_caps, joined_words, name_after_comma, normalize_title, sentence_ends_at, title_key
 
 REFERENCE_WORDS = ("p.", "pp.", "pg.", "pgs.", "page", "pages")
 TITLE_STOPWORDS = {"the", "a", "an", "of", "and"}
@@ -211,7 +211,7 @@ def second_numbering_run(doc, pages):
                      fitz.Rect(r.x0, r.y1 - r.height * 0.10, r.x1, r.y1)):
             for off in {page.number - int(t) for t in
                         (w[4].strip(".,:;|()[]") for w in page.get_text("words", clip=clip))
-                        if t.isdigit() and 1 <= int(t) <= 999}:
+                        if t.isdecimal() and 1 <= int(t) <= 999}:  # not isdigit(): "²" crashes int()
                 if off != pages.offset:
                     other[off] += 1
     return bool(other) and other.most_common(1)[0][1] >= 0.15 * doc.page_count
@@ -294,9 +294,9 @@ def survey_context(pt, bs, survey, start, end):
     # After: "of the <Title>" / "in <Title>" / "of 3"
     after = [t for t, _ in joined_words(words, end + 1, 1, CONTEXT_WORDS)]
     # Only when the sentence carries on: "(p. 174). In 1967, ..." is a new
-    # sentence, not "page 174 in <something>".
-    sentence_ends = words[end][4].rstrip("\u2019\u201d").endswith((".", ";", ":", "!", "?", ")"))
-    if after and not sentence_ends and after[0].lower().strip("(") in ("of", "in"):
+    # sentence, not "page 174 in <something>". The checks' own rule, so
+    # the survey counts exactly what they'll read.
+    if after and not sentence_ends_at(words, end) and after[0].lower().strip("(") in ("of", "in"):
         rest = after[1:]
         if rest and rest[0][:1].isdigit():
             if after[0].lower() == "of":
@@ -328,7 +328,7 @@ def survey_context(pt, bs, survey, start, end):
         if re.match(r"^Book\d{1,2}$", prev, re.I):
             survey.sample("sibling_volume", bs, pt.number, words, start, end)
     run, i = [], start - 1
-    while i >= 0 and words[i][4].strip("(),.;:").lower() in ("(", "see", "cf.", "in", "on"):
+    while i >= 0 and words[i][4].strip("(),.;:").lower() in ("", "see", "cf", "in", "on"):
         i -= 1
     while i >= 0 and len(run) < 6:
         clean = words[i][4].strip("(),.;:’”“")

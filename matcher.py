@@ -210,19 +210,6 @@ def load_manual_overrides(path: str | Path) -> dict[str, ProductMetadata]:
     return overrides
 
 
-def _maybe_enrich(client: DtrpgClient, meta: ProductMetadata) -> ProductMetadata:
-    """Backfill description/authors/tags for a library-sourced match (see
-    DtrpgClient.enrich) before it's kept — a no-op for catalog matches,
-    which already carry this data, and cheap to call redundantly."""
-    if meta.source != Source.DTRPG_LIBRARY or meta.description:
-        return meta
-    try:
-        return client.enrich(meta)
-    except Exception:
-        logger.exception("Enrichment failed for %r (product_id=%s)", meta.title, meta.product_id)
-        return meta
-
-
 def find_candidates(
     path: Path, client: DtrpgClient, limit: int = 5
 ) -> list[tuple[ProductMetadata, float]]:

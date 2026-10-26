@@ -168,7 +168,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-import os
 import sys
 from pathlib import Path
 
@@ -180,6 +179,7 @@ from matcher import load_known_urls, load_manual_overrides, scan_pdfs
 from pdf_writer import DEFAULT_METADATA, METADATA_MODES, write_page_labels_only
 from preferences import DEFAULT_PREFERENCES_PATH, load_preferences, resolve_api_key
 from renamer import apply_rename, plan_rename
+from rpg_hyperlink import rule_sets
 from tag_tui import TagApp
 
 logger = logging.getLogger("dtrpg-metadata-download")
@@ -448,10 +448,6 @@ def main() -> None:
     )
 
     def hyperlink_rule_set(name: str) -> str:
-        # Checked only when --hyperlink is given, so other subcommands
-        # never import the engine just to build the parser.
-        from rpg_hyperlink import rule_sets
-
         names = [r.name for r in rule_sets()]
         if name not in names:
             raise argparse.ArgumentTypeError(
