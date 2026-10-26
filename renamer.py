@@ -35,6 +35,7 @@ import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from provenance import is_filename_title
 
@@ -286,3 +287,28 @@ def apply_rename(plan: RenamePlan, dry_run: bool = False) -> RenameResult:
         done.append((old, new))
 
     return RenameResult(plan.pdf_path, new_pdf_path, True, "ok")
+
+
+def rename_one(
+    pdf_path: Path,
+    dry_run: bool = False,
+    log: Callable[[str], None] = print,
+    title: str | None = None,
+    series: str | None = None,
+) -> str:
+    """Plan and apply one rename, report it through `log`, and return
+    'renamed'/'skipped'/'failed' for a caller's tally. The one copy the
+    `rename` command, tag --rename (TUI and GUI) and the GUI's Dry run
+    all use. `title`/`series` are what tag just confirmed; with none, they
+    come from the metadata already in the file (see plan_rename())."""
+    plan = plan_rename(pdf_path, title, series)
+    result = apply_rename(plan, dry_run=dry_run)
+    if not result.success:
+        if plan.reason is not None:
+            log(f"Rename skipped: {pdf_path.name} ({plan.reason})")
+            return "skipped"
+        log(f"Rename failed: {pdf_path.name}: {result.message}")
+        return "failed"
+    verb = "Would rename" if dry_run else "Renamed"
+    log(f"{verb}: {pdf_path.name} -> {result.new_pdf.name}")
+    return "renamed"

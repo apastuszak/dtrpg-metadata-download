@@ -52,7 +52,7 @@ from PyQt6.QtWidgets import (
 )
 
 from dtrpg_client import DtrpgClient
-from pdf_writer import DEFAULT_METADATA, write_page_labels_only
+from pdf_writer import DEFAULT_METADATA
 from preferences import (
     DEFAULT_PREFERENCES_PATH,
     Preferences,
@@ -60,7 +60,6 @@ from preferences import (
     resolve_api_key,
     save_preferences,
 )
-from renamer import apply_rename, plan_rename
 from rpg_hyperlink import rule_sets
 
 # Shared checkbox explanatory text, used by TagTab (gui_tag_flow.py).
@@ -501,50 +500,6 @@ def _add_hyperlink_picker(layout: QVBoxLayout) -> QComboBox:
         ("Off", None, "Adds no links."),
         *((info.label, info.name, info.description) for info in rule_sets()),
     ], HYPERLINK_HINT)
-
-
-# ---------------------------------------------------------------------------
-# Shared rename/page-label logic for the Tag tab's dry run.
-# None of these functions touch Qt (or touched tkinter before them) --
-# they take a plain `log` callable, so the Tk->Qt port needed no changes
-# to their bodies at all, only to their callers.
-# ---------------------------------------------------------------------------
-
-
-def _rename_one(pdf_path: Path, dry_run: bool, log) -> str:
-    """Same per-file logic as dtrpg-metadata-download.py's own
-    _rename_one() -- reimplemented here (rather than imported) for the
-    same reason tag_tui.py's do_rename() is: that file's hyphenated name
-    can't be imported by name, and print()-based reporting doesn't fit a
-    log-widget callback."""
-    plan = plan_rename(pdf_path)
-    result = apply_rename(plan, dry_run=dry_run)
-    if not result.success:
-        if plan.reason is not None:
-            log(f"SKIP: {pdf_path.name} ({plan.reason})")
-            return "skipped"
-        log(f"FAILED: {pdf_path.name}: {result.message}")
-        return "failed"
-    verb = "Would rename" if dry_run else "Renamed"
-    log(f"{verb}: {pdf_path.name} -> {result.new_pdf.name}")
-    return "renamed"
-
-
-def _label_one(pdf_path: Path, dry_run: bool, show_ranges: bool, log) -> str:
-    """GUI twin of dtrpg-metadata-download.py's _label_one(), same reason
-    _rename_one() above is duplicated."""
-    result = write_page_labels_only(pdf_path, dry_run=dry_run)
-    if result.status == "skipped":
-        log(f"SKIP: {pdf_path.name} ({result.message})")
-    elif result.status == "failed":
-        log(f"FAILED: {pdf_path.name}: {result.message}")
-    else:
-        verb = "Would label" if dry_run else "Labeled"
-        log(f"{verb}: {pdf_path.name} ({result.message})")
-        if show_ranges:
-            for line in result.plan.describe():
-                log(f"    {line}")
-    return result.status
 
 
 # ---------------------------------------------------------------------------

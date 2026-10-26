@@ -2,7 +2,7 @@
 manual entry, confirm-then-write, the batch/per-book series dialogs).
 Reuses tag_tui.py's pure helpers and result dataclasses directly --
 resolve_series/build_manual_metadata/apply_edits/format_candidate_lines/
-do_rename/CandidateResult/ManualEntryResult/ConfirmResult -- rather than
+CandidateResult/ManualEntryResult/ConfirmResult -- rather than
 reimplementing any of that logic; only the *presentation* differs.
 
 The central problem this file solves: Textual's `push_screen_wait()`
@@ -74,8 +74,9 @@ from PyQt6.QtWidgets import (
 
 from back_cover import describe_question, locate_back_cover, move_back_cover, prepare_question
 from matcher import extract_product_id, find_candidates, load_known_urls, load_manual_overrides, row_from_match, scan_pdfs
-from pdf_writer import backup, write_metadata
+from pdf_writer import backup, label_one, write_metadata
 from provenance import ProductMetadata, Source, Status
+from renamer import rename_one
 from review import ReviewRow
 from tag_tui import (
     CandidateResult,
@@ -84,7 +85,6 @@ from tag_tui import (
     apply_edits,
     build_manual_metadata,
     describe_write,
-    do_rename,
     format_candidate_lines,
     resolve_series,
 )
@@ -103,8 +103,6 @@ from gui_app import (
     _make_log_widget,
     _StyledTextEdit,
     _add_back_cover_picker,
-    _label_one,
-    _rename_one,
     build_client_safe,
 )
 from watermark_removal import describe_detection, detect_watermark, remove_watermark
@@ -257,9 +255,9 @@ class TagFlowController:
             # --dry-run`): what page labels and rename would do to the file
             # as it is now -- no matching, nothing written.
             if self.page_labels:
-                _label_one(path, True, True, self._log)
+                label_one(path, dry_run=True, show_ranges=True, log=self._log)
             if self.rename:
-                _rename_one(path, True, self._log)
+                rename_one(path, dry_run=True, log=self._log)
             return False
 
         self._maybe_remove_watermark(path)
@@ -424,9 +422,7 @@ class TagFlowController:
         )
         self._log(describe_write(path, result, self.metadata))
         if result.success and self.rename:
-            outcome = do_rename(path, row.matched_title, row.series)
-            if outcome:
-                self._log(outcome)
+            rename_one(path, log=self._log, title=row.matched_title, series=row.series)
 
 
 class TagWorker(QObject):

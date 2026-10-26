@@ -176,9 +176,9 @@ from textual.logging import TextualHandler
 
 from dtrpg_client import DtrpgClient
 from matcher import load_known_urls, load_manual_overrides, scan_pdfs
-from pdf_writer import DEFAULT_METADATA, METADATA_MODES, write_page_labels_only
+from pdf_writer import DEFAULT_METADATA, METADATA_MODES, label_one
 from preferences import DEFAULT_PREFERENCES_PATH, load_preferences, resolve_api_key
-from renamer import apply_rename, plan_rename
+from renamer import rename_one
 from rpg_hyperlink import rule_sets
 from tag_tui import TagApp
 
@@ -233,23 +233,6 @@ def build_client(config: dict) -> DtrpgClient:
     )
 
 
-def _rename_one(pdf_path: Path, dry_run: bool) -> str:
-    """Rename a single PDF (plus its .bak/.opf/.metadata.json/_link_report.csv companions),
-    print the outcome, and return 'renamed'/'skipped'/'failed' for the
-    caller's tally."""
-    plan = plan_rename(pdf_path)
-    result = apply_rename(plan, dry_run=dry_run)
-    if not result.success:
-        if plan.reason is not None:
-            print(f"SKIP: {pdf_path.name} ({plan.reason})")
-            return "skipped"
-        print(f"FAILED: {pdf_path.name}: {result.message}")
-        return "failed"
-    verb = "Would rename" if dry_run else "Renamed"
-    print(f"{verb}: {pdf_path.name} -> {result.new_pdf.name}")
-    return "renamed"
-
-
 def cmd_rename(args: argparse.Namespace, config: dict) -> None:
     if args.pdf:
         path = Path(args.pdf)
@@ -257,7 +240,7 @@ def cmd_rename(args: argparse.Namespace, config: dict) -> None:
             sys.exit(f"File not found: {path}")
         if path.suffix.lower() != ".pdf":
             sys.exit(f"Not a PDF: {path}")
-        _rename_one(path, args.dry_run)
+        rename_one(path, args.dry_run)
         return
 
     root = args.root or config.get("root")
@@ -271,29 +254,12 @@ def cmd_rename(args: argparse.Namespace, config: dict) -> None:
 
     counts = {"renamed": 0, "skipped": 0, "failed": 0}
     for pdf_path in pdfs:
-        counts[_rename_one(pdf_path, args.dry_run)] += 1
+        counts[rename_one(pdf_path, args.dry_run)] += 1
 
     summary = f"{counts['renamed']} renamed, {counts['skipped']} skipped, {counts['failed']} failed"
     if args.dry_run:
         summary += " (dry run, nothing changed)"
     print(f"\n{summary}")
-
-
-def _label_one(pdf_path: Path, dry_run: bool, show_ranges: bool) -> str:
-    """Label one PDF, print the outcome, and return 'labeled'/'skipped'/
-    'failed' for the caller's tally."""
-    result = write_page_labels_only(pdf_path, dry_run=dry_run)
-    if result.status == "skipped":
-        print(f"SKIP: {pdf_path.name} ({result.message})")
-    elif result.status == "failed":
-        print(f"FAILED: {pdf_path.name}: {result.message}")
-    else:
-        verb = "Would label" if dry_run else "Labeled"
-        print(f"{verb}: {pdf_path.name} ({result.message})")
-        if show_ranges:
-            for line in result.plan.describe():
-                print(f"    {line}")
-    return result.status
 
 
 def cmd_page_labels(args: argparse.Namespace, config: dict) -> None:
@@ -303,7 +269,7 @@ def cmd_page_labels(args: argparse.Namespace, config: dict) -> None:
             sys.exit(f"File not found: {path}")
         if path.suffix.lower() != ".pdf":
             sys.exit(f"Not a PDF: {path}")
-        _label_one(path, args.dry_run, show_ranges=True)
+        label_one(path, args.dry_run, show_ranges=True)
         return
 
     root = args.root or config.get("root")
@@ -317,7 +283,7 @@ def cmd_page_labels(args: argparse.Namespace, config: dict) -> None:
 
     counts = {"labeled": 0, "skipped": 0, "failed": 0}
     for pdf_path in pdfs:
-        counts[_label_one(pdf_path, args.dry_run, show_ranges=args.dry_run)] += 1
+        counts[label_one(pdf_path, args.dry_run, show_ranges=args.dry_run)] += 1
 
     summary = f"{counts['labeled']} labeled, {counts['skipped']} skipped, {counts['failed']} failed"
     if args.dry_run:

@@ -7,7 +7,7 @@ manual metadata entry can use a real multi-line TextArea for Description,
 which input() can't do. Everything else about the matching/writing/
 renaming pipeline is untouched: this module only calls into
 matcher.find_candidates()/row_from_match()/extract_product_id(),
-pdf_writer.write_metadata(), and renamer.plan_rename()/apply_rename() --
+pdf_writer.write_metadata(), and renamer.rename_one() --
 the exact same functions the old code called, with the exact same
 ProductMetadata/ReviewRow objects. rename/page-labels are not
 interactive and have no TUI involvement at all.
@@ -70,7 +70,7 @@ from dtrpg_client import DtrpgClient
 from matcher import extract_product_id, find_candidates, row_from_match
 from pdf_writer import backup, write_metadata
 from provenance import ProductMetadata, Source, Status
-from renamer import apply_rename, plan_rename
+from renamer import rename_one
 from review import ReviewRow
 from watermark_removal import WatermarkDetection, describe_detection, detect_watermark, remove_watermark
 
@@ -195,28 +195,6 @@ def describe_write(path: Path, result, metadata: str) -> str:
         return f"Done with {path.name} (metadata tagging off)"
     labels = {"calibre": "Calibre", "grimmory": "Calibre + Grimmory sidecar", "bookorbit": "BookOrbit sidecar only"}
     return f"Wrote metadata to {path.name} ({labels.get(metadata, metadata)})"
-
-
-def do_rename(path: Path, title: str | None = None, series: str | None = None) -> str | None:
-    """Same rename-one-file logic dtrpg-metadata-download.py's own
-    _rename_one() implements for the standalone `rename` subcommand
-    (plan_rename() + apply_rename(), both untouched), reimplemented here
-    since _rename_one() lives in a script file with hyphens in its name
-    and can't be imported by name, and its print()-based reporting
-    doesn't fit a TUI. Returns a one-line outcome message, or None on
-    success with nothing worth reporting beyond the caller's own message.
-    `title`/`series` are what was just confirmed, so the new name doesn't
-    depend on which metadata mode was written; with none given (metadata
-    tagging off, so nothing was matched), it comes from the metadata
-    already in the file, exactly as the `rename` subcommand does.
-    """
-    plan = plan_rename(path, title, series)
-    result = apply_rename(plan, dry_run=False)
-    if not result.success:
-        if plan.reason is not None:
-            return f"Rename skipped for {path.name}: {plan.reason}"
-        return f"Rename failed for {path.name}: {result.message}"
-    return f"Renamed: {path.name} -> {result.new_pdf.name}"
 
 
 # ---------------------------------------------------------------------------
@@ -953,9 +931,12 @@ class TagApp(App[None]):
         )
         self._log(describe_write(path, result, self.metadata))
         if result.success and self.rename:
-            outcome = await self._call(do_rename, path, row.matched_title, row.series)
-            if outcome:
-                self._log(outcome)
+            # Collected on the worker thread, shown here: notify() belongs
+            # on the app's own thread.
+            lines: list[str] = []
+            await self._call(rename_one, path, False, lines.append, row.matched_title, row.series)
+            for line in lines:
+                self._log(line)
 
     async def _maybe_move_back_cover(self, path: Path) -> bool:
         """--back-cover-to-page-2/--back-cover-to-end for one file: a

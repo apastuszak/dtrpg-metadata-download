@@ -294,6 +294,26 @@ def write_page_labels_only(path: Path, dry_run: bool = False) -> PageLabelResult
     return PageLabelResult("labeled", reason, plan)
 
 
+def label_one(path: Path, dry_run: bool = False, show_ranges: bool = False,
+              log: Callable[[str], None] = print) -> str:
+    """write_page_labels_only() for one file, reported through `log`
+    (with each label range when `show_ranges`); returns 'labeled'/
+    'skipped'/'failed' for a caller's tally. The one copy the
+    `page-labels` command and the GUI's Dry run both use."""
+    result = write_page_labels_only(path, dry_run=dry_run)
+    if result.status == "skipped":
+        log(f"Page labels skipped: {path.name} ({result.message})")
+    elif result.status == "failed":
+        log(f"Page labels failed: {path.name}: {result.message}")
+    else:
+        verb = "Would label" if dry_run else "Labeled"
+        log(f"{verb}: {path.name} ({result.message})")
+        if show_ranges:
+            for line in result.plan.describe():
+                log(f"    {line}")
+    return result.status
+
+
 def _run_hyperlink_step(path: Path, rules: str, log: Callable[[str], None] | None) -> None:
     """--hyperlink RULES: the engine (see rpg_hyperlink.py) with rule set
     `rules`, logged under that rule set's label."""
