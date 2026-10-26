@@ -789,6 +789,19 @@ def chapter_number_refs(words):
 
 _TRIGGER_STOPWORDS = {"the", "a", "an", "of", "and"}
 
+# A publisher's export that left its file name in /Title ("High Guard
+# Cover.indd", "Banestorm Book.qxp"). Only real layout/document
+# extensions: "any short suffix after a dot" also took "Rules 3.5e" and
+# "Traveller Rules v1.23" for file names. renamer.py uses this too.
+_FILENAME_TITLE_RE = re.compile(
+    r"\.(?:indd|indt|idml|qxp|qxd|qxt|pmd|p65|fm|book|doc|docx|rtf|odt|pages|txt|pdf|ai|eps)$",
+    re.IGNORECASE)
+
+
+def is_filename_title(title):
+    """True if `title` is a file name, not a real title."""
+    return bool(_FILENAME_TITLE_RE.search(title.strip()))
+
 
 def detect_trigger_word(doc, default, strip_series_prefix=False, copyright_fallback=False):
     """The word that marks a citation of another book in the same line
@@ -805,8 +818,7 @@ def detect_trigger_word(doc, default, strip_series_prefix=False, copyright_fallb
     title = (doc.metadata or {}).get("title", "") or ""
     if strip_series_prefix:
         title = re.sub(r"^\s*(?:[A-Za-z]+\s+){1,3}?\d+\s*:\s*", "", title)
-    is_filename = bool(re.search(r"\.\w{2,5}$", title.strip()))
-    words = [] if is_filename else [w.lower() for w in re.findall(r"[A-Za-z']+", title)]
+    words = [] if is_filename_title(title) else [w.lower() for w in re.findall(r"[A-Za-z']+", title)]
     words = [w for w in words if w not in _TRIGGER_STOPWORDS]
     if words:
         return words[0]
@@ -1296,7 +1308,9 @@ def hyperlink_pdf(in_path, out_path, rules, log=print):
     (a module name in hyperlink_rules/, or a RuleSet subclass -- e.g. a
     draft from hyperlink_survey.py that isn't installed yet), and write `<out stem>_link_report.csv` next to
     it. Progress goes to `log`. Returns {"added", "chapter_added",
-    "toc_added"} (Index links count as "added")."""
+    "toc_added"} (Index links count as "added"), plus "counts": every
+    counter on its own ("index_added", "skipped_size", ...), for a caller
+    that needs them apart (hyperlink_survey.py's trial run)."""
     rules_cls = rules if isinstance(rules, type) and issubclass(rules, RuleSet) else load_rules(rules)
     if Path(in_path).resolve() == Path(out_path).resolve():
         raise ValueError("output path must be different from the input path")
@@ -1328,7 +1342,7 @@ def hyperlink_pdf(in_path, out_path, rules, log=print):
     log(f"Added {c['toc_added']} Table of Contents links")
     log(f"Wrote {out_path}")
     log(f"Wrote report: {report_path}")
-    return result
+    return {**result, "counts": dict(c)}
 
 
 def main():

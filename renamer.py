@@ -45,12 +45,6 @@ _CALIBRE_NS = "http://calibre-ebook.com/xmp-namespace"  # pdf_writer.CALIBRE_NS
 _BOOKORBIT_NS = "https://bookorbit.app/metadata/1.0/"  # pdf_writer.BOOKORBIT_NS
 _XMP_NS = "http://ns.adobe.com/xap/1.0/"
 _XMPIDQ_NS = "http://ns.adobe.com/xmp/Identifier/qual/1.0/"
-# "High Guard Cover.indd", "Banestorm Book.qxp": a publisher's export
-# left its file name in the title. Only real layout/document extensions --
-# "any short suffix after a dot" also matched "Rules 3.5e" and "v1.23".
-_FILENAME_TITLE_RE = re.compile(
-    r"\.(?:indd|indt|idml|qxp|qxd|qxt|pmd|p65|fm|book|doc|docx|rtf|odt|pages|txt|pdf|ai|eps)$",
-    re.IGNORECASE)
 
 _UNSAFE_CHARS_RE = re.compile(r'[/\\:*?"<>|\x00]')
 # Matches a colon with at least one trailing space, plus any surrounding
@@ -134,6 +128,8 @@ def _read_embedded_metadata(pdf_path: Path) -> tuple[str | None, str | None]:
     import pikepdf
     from lxml import etree
 
+    from hyperlink_engine import is_filename_title
+
     try:
         with pikepdf.open(pdf_path) as pdf:
             stream = pdf.Root.get("/Metadata")
@@ -171,7 +167,7 @@ def _read_embedded_metadata(pdf_path: Path) -> tuple[str | None, str | None]:
                for el in ident.iter(f"{{{_XMPIDQ_NS}}}Scheme")}
     tagged = (series_el is not None or schemes & {"dtrpg", "isbn"}
               or root.find(f".//{{{_BOOKORBIT_NS}}}seriesName") is not None)
-    if not tagged or (title and _FILENAME_TITLE_RE.search(title)):
+    if not tagged or (title and is_filename_title(title)):
         return None, None
     return title, series
 

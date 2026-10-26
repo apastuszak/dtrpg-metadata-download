@@ -43,7 +43,6 @@ REQUIREMENTS:
 from __future__ import annotations
 
 import argparse
-import csv
 import importlib.util
 import keyword
 import re
@@ -682,8 +681,9 @@ def render_report(name, choices, survey, validation, module_path):
     if validation:
         out += ["## Trial run with the draft", "",
                 "The draft run over temporary copies of the same books (the originals weren't touched).", "",
-                "| Book | Page refs | Index | TOC | Chapters | Skipped: other book | Skipped: out of range | Skipped: already linked |",
-                "|---|---|---|---|---|---|---|---|"]
+                "| Book | Page refs | Index | TOC | Chapters | Skipped: other book | Skipped: out of range "
+                "| Skipped: already linked | Skipped: link too large |",
+                "|---|---|---|---|---|---|---|---|---|"]
         for row in validation:
             out.append("| " + " | ".join(str(v) for v in row) + " |")
         out.append("")
@@ -721,28 +721,18 @@ def trial_run(rules_cls, pdfs, log):
     with tempfile.TemporaryDirectory(prefix="hyperlink-survey-") as tmp:
         for path in pdfs:
             out = Path(tmp) / f"{path.stem}.pdf"
-            book_counts = Counter()
             try:
-                engine.hyperlink_pdf(str(path), str(out), rules_cls, log=lambda line: None)
-                report = Path(tmp) / f"{path.stem}_link_report.csv"
-                with open(report, newline="", encoding="utf-8") as f:
-                    for r in csv.DictReader(f):
-                        status, detail = r["Status"], r["Detail"]
-                        if status.startswith("added"):
-                            kind = ("toc" if "TOC" in status or r["Matched Text"].startswith("TOC:")
-                                    else "chapter" if "chapter" in status
-                                    else "index" if r["Matched Text"].startswith("Index:") else "body")
-                            book_counts[kind] += 1
-                        elif detail == "already linked":
-                            book_counts["existing"] += 1
-                        elif "range" in detail:
-                            book_counts["range"] += 1
-                        else:
-                            book_counts["other"] += 1
-                rows.append((path.name, book_counts["body"], book_counts["index"], book_counts["toc"],
-                             book_counts["chapter"], book_counts["other"], book_counts["range"], book_counts["existing"]))
+                # The engine's own counters, not guesses from the report
+                # text: an Index link's row needn't say "Index:" (it doesn't
+                # with index_numbers="outside_footer"), and a too-large rect
+                # is its own kind of skip, not a cross-book one.
+                c = Counter(engine.hyperlink_pdf(str(path), str(out), rules_cls,
+                                                 log=lambda line: None)["counts"])
+                rows.append((path.name, c["added"], c["index_added"], c["toc_added"], c["chapter_added"],
+                             c["skipped_title"] + c["chapter_skipped_title"], c["skipped_range"],
+                             c["skipped_existing"], c["skipped_size"]))
             except Exception as exc:
-                rows.append((path.name, f"failed: {exc}", "", "", "", "", "", ""))
+                rows.append((path.name, f"failed: {exc}", "", "", "", "", "", "", ""))
             log(f"  trial: {path.name}")
             for p in Path(tmp).iterdir():
                 p.unlink()
