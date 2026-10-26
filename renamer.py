@@ -36,6 +36,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from provenance import is_filename_title
+
 logger = logging.getLogger("renamer")
 
 _DC_NS = "http://purl.org/dc/elements/1.1/"
@@ -128,15 +130,15 @@ def _read_embedded_metadata(pdf_path: Path) -> tuple[str | None, str | None]:
     import pikepdf
     from lxml import etree
 
-    from hyperlink_engine import is_filename_title
-
     try:
         with pikepdf.open(pdf_path) as pdf:
             stream = pdf.Root.get("/Metadata")
             if stream is None:
                 return None, None
             xmp = stream.read_bytes()
-    except (pikepdf.PdfError, OSError):
+    except (pikepdf.PdfError, OSError, AttributeError, TypeError):
+        # AttributeError/TypeError: a /Metadata that isn't a stream (an
+        # integer, say) -- one malformed book must not stop a rename run.
         return None, None
     try:
         root = etree.fromstring(xmp, etree.XMLParser(resolve_entities=False, no_network=True, recover=True))

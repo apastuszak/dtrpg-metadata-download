@@ -131,7 +131,13 @@ def book_title(doc, path):
 # ---------------------------------------------------------------------------
 
 def survey_book(path, survey):
-    doc = fitz.open(path)
+    # Closed on any error too: main() logs a failing book and carries on,
+    # and an open document keeps its cached page words alive.
+    with fitz.open(path) as doc:
+        _survey_open_book(doc, path, survey)
+
+
+def _survey_open_book(doc, path, survey):
     bs = BookSurvey(path, book_title(doc, path), doc.page_count)
     survey.books.append(bs)
     try:
@@ -139,7 +145,6 @@ def survey_book(path, survey):
         bs.numbering, bs.numbering_ok = pages.description, True
     except (ValueError, RuntimeError) as exc:
         bs.numbering = str(exc)
-        doc.close()
         return
     try:
         bs.labels_trusted = engine.footer_vote(doc, use_labels=True).labels is not None
@@ -197,7 +202,6 @@ def survey_book(path, survey):
             if len(survey.samples["page_header"]) < SAMPLES_PER_PATTERN:
                 survey.samples["page_header"].append(
                     f"{path.name} p.{pg + 1} and p.{pg + 2}: …{before} Page {n}… / …{before} Page {n + 1}…")
-    doc.close()
 
 
 def second_numbering_run(doc, pages):

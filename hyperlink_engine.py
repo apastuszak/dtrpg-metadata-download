@@ -56,6 +56,7 @@ import pymupdf as fitz  # PyMuPDF -- `import fitz` is the deprecated alias
 
 import hyperlink_checks as checks  # noqa: F401 -- re-exported for rule sets
 from hyperlink_checks import normalize_title, title_key
+from provenance import is_filename_title
 
 NBSP = " "
 OTHER_SPACES = "   "  # regular space, nbsp, punctuation space
@@ -789,18 +790,6 @@ def chapter_number_refs(words):
 
 _TRIGGER_STOPWORDS = {"the", "a", "an", "of", "and"}
 
-# A publisher's export that left its file name in /Title ("High Guard
-# Cover.indd", "Banestorm Book.qxp"). Only real layout/document
-# extensions: "any short suffix after a dot" also took "Rules 3.5e" and
-# "Traveller Rules v1.23" for file names. renamer.py uses this too.
-_FILENAME_TITLE_RE = re.compile(
-    r"\.(?:indd|indt|idml|qxp|qxd|qxt|pmd|p65|fm|book|doc|docx|rtf|odt|pages|txt|pdf|ai|eps)$",
-    re.IGNORECASE)
-
-
-def is_filename_title(title):
-    """True if `title` is a file name, not a real title."""
-    return bool(_FILENAME_TITLE_RE.search(title.strip()))
 
 
 def detect_trigger_word(doc, default, strip_series_prefix=False, copyright_fallback=False):
@@ -1101,6 +1090,8 @@ class Book:
         """This book's own title, letters only, minus the line's name --
         for recognising "page N of <this book>"."""
         title = (self.doc.metadata or {}).get("title") or ""
+        if is_filename_title(title):  # "Agents Handbook.indd": no title
+            title = ""
         key = title_key(title) or title_key(self.source_path.stem)
         line = title_key(self.rules.line_name)
         return (key.replace(line, "") or key) if line else key

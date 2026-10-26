@@ -74,8 +74,8 @@ _redaction_lock = threading.Lock()
 _redaction_installed = False
 
 
-def _redact(text: str) -> str:
-    for secret in _SECRETS:
+def _redact(text: str, secrets: tuple[str, ...]) -> str:
+    for secret in secrets:
         text = text.replace(secret, _REDACTED)
     return text
 
@@ -95,19 +95,23 @@ def register_secret(secret: str | None) -> None:
 
         def factory(*args, **kwargs):
             record = previous(*args, **kwargs)
+            # A copy: another thread's register_secret() may add to the set
+            # mid-loop ("Set changed size during iteration"), and this runs
+            # inside every logging call on every thread.
+            secrets = tuple(_SECRETS)
             try:
                 message = record.getMessage()
             except Exception:
                 return record  # let the handler report the bad format, as usual
-            if any(s in message for s in _SECRETS):
-                record.msg, record.args = _redact(message), None
+            if any(s in message for s in secrets):
+                record.msg, record.args = _redact(message, secrets), None
             if record.exc_info and record.exc_info[0] is not None:
                 # A traceback can carry the URL too (urllib3's
                 # MaxRetryError names it). Formatters use exc_text when
                 # it's already set, so format it here, redacted.
                 text = logging.Formatter().formatException(record.exc_info)
-                if any(s in text for s in _SECRETS):
-                    record.exc_text = _redact(text)
+                if any(s in text for s in secrets):
+                    record.exc_text = _redact(text, secrets)
             return record
 
         logging.setLogRecordFactory(factory)

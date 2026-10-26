@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -46,3 +47,17 @@ class ProductMetadata:
 
     def tags_str(self) -> str:
         return "; ".join(self.tags)
+
+
+# A publisher's export that left its file name in /Title ("High Guard
+# Cover.indd", "Banestorm Book.qxp"). Only real layout/document
+# extensions: "any short suffix after a dot" also took "Rules 3.5e" and
+# "Traveller Rules v1.23" for file names. Used by renamer.py and hyperlink_engine.py.
+_FILENAME_TITLE_RE = re.compile(
+    r"\.(?:indd|indt|idml|qxp|qxd|qxt|pmd|p65|fm|book|doc|docx|rtf|odt|pages|txt|pdf|ai|eps)$",
+    re.IGNORECASE)
+
+
+def is_filename_title(title: str) -> bool:
+    """True if `title` is a file name, not a real title."""
+    return bool(_FILENAME_TITLE_RE.search(title.strip()))
