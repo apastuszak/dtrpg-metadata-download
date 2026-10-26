@@ -114,12 +114,15 @@ def derive_query(filename: str) -> tuple[str, list[str]]:
     """Turn a filename into a search query, plus a list of stripped
     noise/edition tokens that can still inform scoring."""
     stem = Path(filename).stem
-    # Version tokens come out before periods become spaces: "v1.23" would
-    # otherwise lose only its "v1", leaving "23" in the query.
+    # Noise comes out both before and after periods and hyphens become
+    # spaces: before, or "v1.23" loses only its "v1" and leaves "23";
+    # after, or "2nd-Edition" isn't seen as "2nd Edition".
     stem = stem.replace("_", " ")
     noise_tokens = [m.group(1).strip() for m in NOISE_TOKEN_PATTERN.finditer(stem)]
     stem = NOISE_TOKEN_PATTERN.sub(" ", stem)
     stem = stem.replace(".", " ").replace("-", " ")
+    noise_tokens += [m.group(1).strip() for m in NOISE_TOKEN_PATTERN.finditer(stem)]
+    stem = NOISE_TOKEN_PATTERN.sub(" ", stem)
 
     noise_tokens += [m.group(0) for m in SKU_PATTERN.finditer(stem)]
     stem = SKU_PATTERN.sub(" ", stem)
