@@ -490,9 +490,9 @@ class DtrpgClient:
         core rulebook — the actual core rulebook's title doesn't contain
         "Mongoose"). A result count alone can't tell those apart, so we
         can't just retry-on-empty. Instead we always also query with the
-        leading word dropped and union both result sets (deduped, capped
-        at `limit`), and let the caller's local fuzzy scoring — which
-        *can* tell a near-exact title match from a loosely-related one —
+        leading word dropped and union both result sets (deduped, then
+        the `limit` best by title score against either query), and let
+        the caller's local fuzzy scoring — which *can* tell a near-exact title match from a loosely-related one —
         pick the winner from the wider pool.
 
         Results are cached to disk per the *original* query so repeated
@@ -504,20 +504,30 @@ class DtrpgClient:
 
         product_ids = self._catalog_search_ids(query, limit)
 
+        queries = [query]
         parts = query.split(maxsplit=1)
         if len(parts) == 2:
             fallback_query = parts[1]
+            queries.append(fallback_query)
             fallback_ids = self._catalog_search_ids(fallback_query, limit)
             seen = set(product_ids)
             for pid in fallback_ids:
                 if pid not in seen:
                     seen.add(pid)
                     product_ids.append(pid)
-            product_ids = product_ids[:limit]
 
         results = [self._fetch_product_detail(pid) for pid in product_ids]
         complete = all(r is not None for r in results)
         results = [r for r in results if r is not None]
+
+        # The limit applies after scoring the union, not to the IDs: cut
+        # there, six primary hits pushed out every fallback hit, the very
+        # results the fallback query exists to find.
+        if len(results) > limit:
+            from rapidfuzz import fuzz
+
+            results.sort(key=lambda r: max(fuzz.token_sort_ratio(q, r.title) for q in queries), reverse=True)
+            results = results[:limit]
 
         # Cached only when every product lookup succeeded: the cache never
         # expires, so a lookup that failed once (an HTTP 503, a timeout)
