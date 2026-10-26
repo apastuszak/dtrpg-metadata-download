@@ -160,7 +160,8 @@ def read_page_numbers(doc: fitz.Document) -> list[set[int]]:
         for clip in (fitz.Rect(r.x0, r.y0, r.x1, r.y0 + band), fitz.Rect(r.x0, r.y1 - band, r.x1, r.y1)):
             for word in page.get_text("words", clip=clip):
                 token = word[4].strip(".,:;|()[]")
-                if token.isdigit() and len(token) <= MAX_PAGE_NUMBER_DIGITS and int(token) >= 1:
+                # not isdigit(): "²" passes that, then int() fails
+                if token.isdecimal() and len(token) <= MAX_PAGE_NUMBER_DIGITS and int(token) >= 1:
                     found.add(int(token))
         numbers.append(found)
     return numbers

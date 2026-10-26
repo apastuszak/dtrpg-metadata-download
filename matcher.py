@@ -23,8 +23,8 @@ logger = logging.getLogger("matcher")
 NOISE_TOKEN_PATTERN = re.compile(
     r"""(?ix)
     \b(
-        ocr | scan | remaster(?:ed)? | v\d+(?:\.\d+)? |
-        \d+(?:st|nd|rd|th)\s*edition | \d+e | revised | reprint |
+        ocr | scan | remaster(?:ed)? | v\d+(?:\.\d+)* |
+        \d+(?:st|nd|rd|th)\s*edition | \d+(?:\.\d+)?e | revised | reprint |
         gmt | pdf
     )\b
     """
@@ -114,11 +114,14 @@ def derive_query(filename: str) -> tuple[str, list[str]]:
     """Turn a filename into a search query, plus a list of stripped
     noise/edition tokens that can still inform scoring."""
     stem = Path(filename).stem
-    stem = stem.replace("_", " ").replace(".", " ").replace("-", " ")
-
+    # Version tokens come out before periods become spaces: "v1.23" would
+    # otherwise lose only its "v1", leaving "23" in the query.
+    stem = stem.replace("_", " ")
     noise_tokens = [m.group(1).strip() for m in NOISE_TOKEN_PATTERN.finditer(stem)]
-    noise_tokens += [m.group(0) for m in SKU_PATTERN.finditer(stem)]
     stem = NOISE_TOKEN_PATTERN.sub(" ", stem)
+    stem = stem.replace(".", " ").replace("-", " ")
+
+    noise_tokens += [m.group(0) for m in SKU_PATTERN.finditer(stem)]
     stem = SKU_PATTERN.sub(" ", stem)
     stem = BRACKETED_PATTERN.sub(" ", stem)
     stem = re.sub(r"\s+", " ", stem).strip()
