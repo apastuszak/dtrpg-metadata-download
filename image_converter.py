@@ -89,6 +89,24 @@ _srgb_icc_load_attempted = False
 # pixels, kept when an image is re-encoded (see convert_images_to_rgb()).
 KEEP_IMAGE_KEYS = ("OC", "Intent", "Interpolate", "Metadata", "StructParent", "Name", "ID")
 
+# Bytes allowed as-is in a PDF name; anything else is written as #xx.
+_NAME_REGULAR = frozenset(range(0x21, 0x7F)) - frozenset(b"()<>[]{}/%#")
+
+
+def _pdf_value(kind: str, value: str) -> str:
+    """A value from xref_get_key() back in PDF syntax for xref_set_key().
+    Names and strings come back decoded ("/A B" for /A#20B), and setting
+    that raised "bad 'value'" -- an image named
+    "/CthulhubyGaslight_Investigators' Guide__front.jpg" failed a whole
+    book's conversion. References, numbers and arrays come back raw."""
+    if kind == "name":
+        return "/" + "".join(
+            chr(b) if b in _NAME_REGULAR else f"#{b:02X}" for b in value[1:].encode("utf-8")
+        )
+    if kind == "string":
+        return "<FEFF" + value.encode("utf-16-be").hex().upper() + ">"
+    return value
+
 
 def _load_first_readable_file(paths: list[str]) -> bytes | None:
     """Return the raw bytes of the first path in `paths` that exists and can
@@ -336,7 +354,7 @@ def convert_images_to_rgb(path: Path, jpeg_quality: int = DEFAULT_QUALITY) -> Im
                 except Exception:
                     continue
                 if kind != "null":
-                    kept_keys[key] = value
+                    kept_keys[key] = _pdf_value(kind, value)
 
             if use_lossless:
                 # Omit /Filter here -- update_stream(compress=True) adds
